@@ -88,6 +88,7 @@ const TEXTURE_FALLBACKS := {
 @onready var status_label: Label = $StatusLayer/StatusPanel/Margin/Status
 @onready var inventory_label: Label = $StatusLayer/Inventory
 @onready var inventory_panel: PanelContainer = $StatusLayer/InventoryPanel
+@onready var key_light: DirectionalLight3D = $KeyLight
 @onready var inventory_items_container: VBoxContainer = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
@@ -187,6 +188,7 @@ func _make_exterior_environment() -> Environment:
 func _set_cell_environment(cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
+	key_light.visible = is_exterior
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	if camera != null:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
