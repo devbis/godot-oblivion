@@ -51,6 +51,7 @@ const EXTERIOR_TREE_NEAR_DISTANCE := 42.0
 const EXTERIOR_COLLISION_DISTANCE := 65.0
 const EXTERIOR_COLLISION_UNLOAD_DISTANCE := 84.0
 const EXTERIOR_TERRAIN_COLLISION_DISTANCE := 65.0
+const EXTERIOR_TERRAIN_COLLISION_UNLOAD_DISTANCE := 84.0
 const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
 const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.08
 const EXTERIOR_CAMERA_FAR := 430.0
@@ -123,6 +124,10 @@ var _exterior_collision_stream_enabled := false
 var _exterior_collision_stream_busy := false
 var _exterior_collision_busy_generation := -1
 var _exterior_collision_scan_cooldown := 0.0
+var _exterior_terrain_collision_bodies: Dictionary = {}
+var _exterior_terrain_collision_attempted_ids: Dictionary = {}
+var _exterior_terrain_collision_stream_enabled := false
+var _exterior_terrain_collision_scan_cooldown := 0.0
 var _player_deferred_assets_ready := false
 var _player_deferred_assets_loading := false
 var _cell_material: StandardMaterial3D
@@ -239,6 +244,7 @@ func _process(_delta: float) -> void:
 			_update_player_animation(_delta)
 		_update_npc_actors(_delta)
 		_update_exterior_collision_streaming()
+		_update_exterior_terrain_collision_streaming()
 		_update_npc_streaming()
 		if not _player_face_state.is_empty():
 			_update_face_blink(_player_face_state, _delta)
@@ -485,6 +491,10 @@ func _load_cell_geometry(
 		_exterior_collision_scan_cooldown = 0.0
 		_exterior_collision_bodies.clear()
 		_exterior_collision_attempted_ids.clear()
+		_exterior_terrain_collision_stream_enabled = false
+		_exterior_terrain_collision_scan_cooldown = 0.0
+		_exterior_terrain_collision_bodies.clear()
+		_exterior_terrain_collision_attempted_ids.clear()
 		_placed_items.clear()
 		_linked_door_candidates.clear()
 		if has_node("TestFloor/MeshInstance3D"):
@@ -759,7 +769,6 @@ func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 	var terrain_distance := terrain_center.distance_to(player.global_position)
 	var detail_step := 1 if terrain_distance <= 110.0 else 2 if terrain_distance <= 220.0 else 4
 	var mesh_key := "%d,%d,%d" % [grid_x, grid_y, detail_step]
-	var cache_key := "%d,%d" % [grid_x, grid_y]
 	var mesh := _land_mesh_cache.get(mesh_key) as ArrayMesh
 	if mesh == null:
 		mesh = _build_land_mesh(heights, detail_step)
@@ -779,25 +788,96 @@ func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 	instance.position = position
 	cell_visual_root.add_child(instance)
 
-	var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
-	if terrain_center.distance_to(player.global_position) > EXTERIOR_TERRAIN_COLLISION_DISTANCE:
+	if _terrain_cell_edge_distance(grid_x, grid_y, player.global_position) > EXTERIOR_TERRAIN_COLLISION_DISTANCE:
 		return {"rendered": true, "collider": false}
+	return {"rendered": true, "collider": _add_terrain_cell_collider(land)}
+
+func _terrain_cell_edge_distance(grid_x: int, grid_y: int, world_position: Vector3) -> float:
+	var cell_size_meters := EXTERIOR_CELL_SIZE * game_units_to_meters
+	var min_x := float(grid_x) * cell_size_meters
+	var max_x := min_x + cell_size_meters
+	var min_z := -float(grid_y + 1) * cell_size_meters
+	var max_z := -float(grid_y) * cell_size_meters
+	var nearest_x := clampf(world_position.x, min_x, max_x)
+	var nearest_z := clampf(world_position.z, min_z, max_z)
+	return Vector2(nearest_x - world_position.x, nearest_z - world_position.z).length()
+
+func _add_terrain_cell_collider(land: Dictionary) -> bool:
+	var grid_x := int(land.get("grid_x", 0))
+	var grid_y := int(land.get("grid_y", 0))
+	var cache_key := "%d,%d" % [grid_x, grid_y]
+	var existing_entry: Dictionary = _exterior_terrain_collision_bodies.get(cache_key, {})
+	var existing_body := existing_entry.get("body") as StaticBody3D
+	if is_instance_valid(existing_body):
+		return true
+	if _exterior_terrain_collision_attempted_ids.has(cache_key):
+		return false
+	_exterior_terrain_collision_attempted_ids[cache_key] = true
+	var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
+	if heights.size() != 33 * 33:
+		return false
+	var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
 	if collision == null:
-		collision = _build_concave_shape(mesh.get_faces())
-		if collision != null:
-			_land_collision_cache[cache_key] = collision
-	if collision != null:
-		var body := StaticBody3D.new()
-		body.name = "TerrainCollision_%d_%d" % [grid_x, grid_y]
-		body.collision_layer = 2
-		body.collision_mask = 0
-		body.scale = Vector3.ONE * game_units_to_meters
-		body.position = instance.position
-		var collision_instance := CollisionShape3D.new()
-		collision_instance.shape = collision
-		body.add_child(collision_instance)
-		cell_visual_root.add_child(body)
-	return {"rendered": true, "collider": collision != null}
+		var mesh_key := "%d,%d,1" % [grid_x, grid_y]
+		var terrain_mesh := _land_mesh_cache.get(mesh_key) as ArrayMesh
+		if terrain_mesh == null:
+			terrain_mesh = _build_land_mesh(heights, 1)
+			if terrain_mesh != null:
+				_land_mesh_cache[mesh_key] = terrain_mesh
+		if terrain_mesh != null:
+			collision = _build_concave_shape(terrain_mesh.get_faces())
+			if collision != null:
+				_land_collision_cache[cache_key] = collision
+	if collision == null:
+		return false
+	var body := StaticBody3D.new()
+	body.name = "TerrainCollision_%d_%d" % [grid_x, grid_y]
+	body.collision_layer = 2
+	body.collision_mask = 0
+	body.scale = Vector3.ONE * game_units_to_meters
+	body.position = Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
+	var collision_instance := CollisionShape3D.new()
+	collision_instance.shape = collision
+	body.add_child(collision_instance)
+	cell_visual_root.add_child(body)
+	_exterior_terrain_collision_bodies[cache_key] = {"body": body, "land": land}
+	return true
+
+func _update_exterior_terrain_collision_streaming() -> void:
+	if not _exterior_terrain_collision_stream_enabled or _world_loading or data_reader == null:
+		return
+	_exterior_terrain_collision_scan_cooldown = maxf(
+		0.0, _exterior_terrain_collision_scan_cooldown - get_process_delta_time()
+	)
+	if _exterior_terrain_collision_scan_cooldown > 0.0:
+		return
+	_exterior_terrain_collision_scan_cooldown = 0.35
+	for cache_key_value: Variant in _exterior_terrain_collision_bodies.keys():
+		var cache_key := str(cache_key_value)
+		var entry: Dictionary = _exterior_terrain_collision_bodies.get(cache_key, {})
+		var body := entry.get("body") as StaticBody3D
+		if not is_instance_valid(body):
+			_exterior_terrain_collision_bodies.erase(cache_key)
+			_exterior_terrain_collision_attempted_ids.erase(cache_key)
+			continue
+		var land: Dictionary = entry.get("land", {})
+		var grid_x := int(land.get("grid_x", 0))
+		var grid_y := int(land.get("grid_y", 0))
+		if _terrain_cell_edge_distance(grid_x, grid_y, player.global_position) <= EXTERIOR_TERRAIN_COLLISION_UNLOAD_DISTANCE:
+			continue
+		body.queue_free()
+		_exterior_terrain_collision_bodies.erase(cache_key)
+		_exterior_terrain_collision_attempted_ids.erase(cache_key)
+	var terrain_cells: Array = current_cell.get("land_cells", [])
+	if terrain_cells.is_empty() and current_cell.has("land"):
+		terrain_cells.push_back(current_cell.get("land"))
+	for land_value: Variant in terrain_cells:
+		var land: Dictionary = land_value
+		var grid_x := int(land.get("grid_x", 0))
+		var grid_y := int(land.get("grid_y", 0))
+		if _terrain_cell_edge_distance(grid_x, grid_y, player.global_position) > EXTERIOR_TERRAIN_COLLISION_DISTANCE:
+			continue
+		_add_terrain_cell_collider(land)
 
 func _build_land_mesh(heights: PackedFloat32Array, step := 1) -> ArrayMesh:
 	var surface := SurfaceTool.new()
@@ -1318,6 +1398,7 @@ func _start_deferred_cell_loading() -> void:
 	_deferred_world_generation += 1
 	_npc_stream_enabled = false
 	_exterior_collision_stream_enabled = false
+	_exterior_terrain_collision_stream_enabled = false
 	_load_deferred_cell_assets(_deferred_world_generation, current_cell)
 
 func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
@@ -1340,8 +1421,9 @@ func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
 	if not geometry_complete or generation != _deferred_world_generation:
 		return
 	_exterior_collision_stream_enabled = is_exterior
+	_exterior_terrain_collision_stream_enabled = is_exterior
 	_npc_stream_enabled = true
-	print("OpenOB nearby world pass complete; exterior collision and NPC streaming enabled for %s" % str(cell.get("editor_id", "cell")))
+	print("OpenOB nearby world pass complete; exterior object, terrain collision, and NPC streaming enabled for %s" % str(cell.get("editor_id", "cell")))
 
 func _initialize_player_face_profiles() -> void:
 	_player_face_profiles.clear()
@@ -1684,32 +1766,7 @@ func _ensure_nearby_terrain_collisions() -> void:
 		var grid_y := int(land.get("grid_y", 0))
 		if abs(grid_x - player_grid_x) > 1 or abs(grid_y - player_grid_y) > 1:
 			continue
-		var body_name := "TerrainCollision_%d_%d" % [grid_x, grid_y]
-		if cell_visual_root.has_node(NodePath(body_name)):
-			continue
-		var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
-		if heights.size() != 33 * 33:
-			continue
-		var cache_key := "%d,%d" % [grid_x, grid_y]
-		var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
-		if collision == null:
-			var terrain_mesh := _build_land_mesh(heights, 1)
-			if terrain_mesh == null:
-				continue
-			collision = _build_concave_shape(terrain_mesh.get_faces())
-			if collision == null:
-				continue
-			_land_collision_cache[cache_key] = collision
-		var body := StaticBody3D.new()
-		body.name = body_name
-		body.collision_layer = 2
-		body.collision_mask = 0
-		body.scale = Vector3.ONE * game_units_to_meters
-		body.position = Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
-		var collision_instance := CollisionShape3D.new()
-		collision_instance.shape = collision
-		body.add_child(collision_instance)
-		cell_visual_root.add_child(body)
+		_add_terrain_cell_collider(land)
 
 func _snap_player_to_nearby_floor() -> void:
 	var query := PhysicsRayQueryParameters3D.create(
