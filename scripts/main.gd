@@ -107,6 +107,7 @@ var data_reader: Object
 var current_cell: Dictionary = {}
 var cell_visual_root: Node3D
 var _model_cache: Dictionary = {}
+var _physics_mesh_cache: Dictionary = {}
 var _nif_metadata_cache: Dictionary = {}
 var _collision_cache: Dictionary = {}
 var _material_cache: Dictionary = {}
@@ -622,6 +623,20 @@ func _load_cell_geometry(
 		var meshes: Array = await _meshes_for_model(model_path)
 		if generation != _cell_load_generation:
 			return false
+		var nif_key := model_path.to_lower().replace("\\", "/")
+		var physics_metadata: Dictionary = _nif_metadata_cache.get(nif_key, {})
+		if _supports_imported_nif_physics(physics_metadata, meshes):
+			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
+				reference_transform, model_path, meshes, physics_metadata
+			)
+			if generation != _cell_load_generation:
+				return false
+			if not physics_result.is_empty():
+				instance_count += int(physics_result.get("mesh_count", 0))
+				collision_count += int(physics_result.get("body_count", 0))
+				if reference_count % 8 == 0:
+					await get_tree().process_frame
+				continue
 		var should_collide := (
 			not is_pickup_item
 			and _should_collide_model(model_path)
@@ -747,7 +762,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s (%d references, %d meshes, %d generated colliders, %d tree billboards).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
+	status_label.text = "Cell: %s (%d references, %d meshes, %d collision bodies, %d tree billboards).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, animations, and supported Havok bodies/constraints load from game files; collision is simulated with Jolt." % [
 		cell_label, cell.references.size(), instance_count, collision_count, tree_reference_count
 	]
 	_update_interaction_hint({}, {})
@@ -1042,11 +1057,17 @@ func _meshes_for_model(model_path: String) -> Array:
 		return []
 
 	var result: Dictionary = data_reader.take_nif_meshes()
-	_nif_metadata_cache[key] = {
+	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
+	var physics_bodies: Array = result.get("physics_bodies", [])
+	var metadata := {
 		"nodes": result.get("nodes", []),
 		"animations": result.get("animations", []),
+		"physics_bodies": physics_bodies,
+		"physics_constraints": result.get("physics_constraints", []),
 	}
-	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
+	if not physics_bodies.is_empty():
+		metadata["source_bytes"] = source_bytes
+	_nif_metadata_cache[key] = metadata
 	var raw_meshes: Array = result.get("meshes", [])
 	var godot_meshes: Array[Dictionary] = []
 	for index in range(raw_meshes.size()):
@@ -1059,6 +1080,13 @@ func _meshes_for_model(model_path: String) -> Array:
 			godot_meshes.push_back({
 				"mesh": resource,
 				"mesh_name": str(mesh_data.get("name", "")),
+				"parent_node_name": str(mesh_data.get("parent_node_name", "")),
+				"parent_local_vertices": mesh_data.get("parent_local_vertices", PackedVector3Array()),
+				"parent_local_normals": mesh_data.get("parent_local_normals", PackedVector3Array()),
+				"uvs": mesh_data.get("uvs", PackedVector2Array()),
+				"indices": mesh_data.get("indices", PackedInt32Array()),
+				"bone_indices": mesh_data.get("bone_indices", PackedInt32Array()),
+				"bone_weights": mesh_data.get("bone_weights", PackedFloat32Array()),
 				"diffuse_texture_path": str(mesh_data.get("diffuse_texture_path", "")),
 				"alpha_blend": bool(mesh_data.get("alpha_blend", false)),
 				"alpha_test": bool(mesh_data.get("alpha_test", false)),
@@ -1067,6 +1095,271 @@ func _meshes_for_model(model_path: String) -> Array:
 			})
 	_model_cache[key] = godot_meshes
 	return godot_meshes
+
+func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool:
+	var bodies: Array = metadata.get("physics_bodies", [])
+	var constraints: Array = metadata.get("physics_constraints", [])
+	var source_bytes: PackedByteArray = metadata.get("source_bytes", PackedByteArray())
+	if bodies.is_empty() or constraints.is_empty() or source_bytes.is_empty():
+		return false
+	var meshes_by_node: Dictionary = {}
+	for mesh_value: Variant in meshes:
+		var mesh: Dictionary = mesh_value
+		var node_name := str(mesh.get("parent_node_name", ""))
+		if not node_name.is_empty():
+			meshes_by_node[node_name] = true
+	var body_names: Dictionary = {}
+	var has_dynamic_body := false
+	for body_value: Variant in bodies:
+		var body: Dictionary = body_value
+		var node_name := str(body.get("node_name", ""))
+		var shape: Dictionary = body.get("shape", {})
+		if node_name.is_empty() or not meshes_by_node.has(node_name) or body_names.has(node_name):
+			return false
+		if str(shape.get("type", "")) not in ["capsule", "convex_vertices", "sphere"]:
+			return false
+		if float(body.get("mass", 0.0)) > 0.0:
+			has_dynamic_body = true
+		body_names[node_name] = true
+	if not has_dynamic_body:
+		return false
+	for constraint_value: Variant in constraints:
+		var constraint: Dictionary = constraint_value
+		if str(constraint.get("type", "")) != "ragdoll":
+			return false
+		if not body_names.has(str(constraint.get("body_a_node_name", ""))):
+			return false
+		if not body_names.has(str(constraint.get("body_b_node_name", ""))):
+			return false
+	return true
+
+func _physics_mesh_for_entry(model_path: String, mesh_index: int, mesh_entry: Dictionary) -> ArrayMesh:
+	var model_key := model_path.to_lower().replace("\\", "/")
+	var cache_key := "%s|%d" % [model_key, mesh_index]
+	if _physics_mesh_cache.has(cache_key):
+		return _physics_mesh_cache[cache_key] as ArrayMesh
+	var metadata: Dictionary = _nif_metadata_cache.get(model_key, {})
+	var source_bytes: PackedByteArray = metadata.get("source_bytes", PackedByteArray())
+	var local_data := {
+		"vertices": mesh_entry.get("parent_local_vertices", PackedVector3Array()),
+		"normals": mesh_entry.get("parent_local_normals", PackedVector3Array()),
+		"uvs": mesh_entry.get("uvs", PackedVector2Array()),
+		"indices": mesh_entry.get("indices", PackedInt32Array()),
+		"bone_indices": mesh_entry.get("bone_indices", PackedInt32Array()),
+		"bone_weights": mesh_entry.get("bone_weights", PackedFloat32Array()),
+	}
+	var resource: ArrayMesh = null
+	if not source_bytes.is_empty():
+		var builder := Callable(self, "_build_godot_mesh").bind(local_data)
+		resource = DerivedResourceCache.load_or_build(
+			source_bytes, "nif-havok-node-local-v1-%d" % mesh_index, builder
+		) as ArrayMesh
+	if resource != null:
+		_physics_mesh_cache[cache_key] = resource
+	return resource
+
+func _create_imported_havok_shapes(shape_data: Dictionary) -> Array[CollisionShape3D]:
+	var collisions: Array[CollisionShape3D] = []
+	var shape_type := str(shape_data.get("type", ""))
+	if shape_type == "capsule":
+		var point_a: Vector3 = shape_data.get("point1", Vector3.ZERO) * game_units_to_meters
+		var point_b: Vector3 = shape_data.get("point2", Vector3.ZERO) * game_units_to_meters
+		var radius := maxf(float(shape_data.get("radius1", 0.0)), float(shape_data.get("radius2", 0.0))) * game_units_to_meters
+		var segment := point_b - point_a
+		radius = maxf(radius, 0.002)
+		# Approximate the NIF capsule with overlapping spheres. This preserves
+		# its end-to-end dimensions while avoiding unstable tiny Jolt capsules.
+		var sphere_count := clampi(ceili(segment.length() / (radius * 1.75)) + 1, 2, 24)
+		for sphere_index in range(sphere_count):
+			var collision := CollisionShape3D.new()
+			var sphere := SphereShape3D.new()
+			sphere.radius = radius
+			sphere.margin = minf(0.001, radius * 0.1)
+			collision.shape = sphere
+			collision.position = point_a.lerp(point_b, float(sphere_index) / float(sphere_count - 1))
+			collisions.push_back(collision)
+		return collisions
+	elif shape_type == "convex_vertices":
+		var source_points: PackedVector3Array = shape_data.get("vertices", PackedVector3Array())
+		var points := PackedVector3Array()
+		points.resize(source_points.size())
+		for index in range(source_points.size()):
+			points[index] = source_points[index] * game_units_to_meters
+		var convex := ConvexPolygonShape3D.new()
+		convex.set_points(points)
+		convex.margin = 0.001
+		var collision := CollisionShape3D.new()
+		collision.shape = convex
+		collisions.push_back(collision)
+	elif shape_type == "sphere":
+		var sphere := SphereShape3D.new()
+		sphere.radius = float(shape_data.get("radius1", 0.0)) * game_units_to_meters
+		sphere.margin = minf(0.001, sphere.radius * 0.1)
+		var collision := CollisionShape3D.new()
+		collision.shape = sphere
+		collisions.push_back(collision)
+	return collisions
+
+func _instantiate_imported_nif_physics(
+	reference_transform: Transform3D,
+	model_path: String,
+	meshes: Array,
+	metadata: Dictionary
+) -> Dictionary:
+	var bodies: Array = metadata.get("physics_bodies", [])
+	var constraints: Array = metadata.get("physics_constraints", [])
+	var body_nodes: Dictionary = {}
+	var physics_root := Node3D.new()
+	physics_root.name = "ImportedHavokPhysics"
+	cell_visual_root.add_child(physics_root)
+	var body_count := 0
+	var dynamic_count := 0
+	for body_value: Variant in bodies:
+		var body_data: Dictionary = body_value
+		var node_name := str(body_data.get("node_name", ""))
+		var mass := float(body_data.get("mass", 0.0))
+		var physics_body: PhysicsBody3D
+		if mass > 0.0:
+			var rigid_body := RigidBody3D.new()
+			rigid_body.name = "HavokBody_" + node_name
+			# Build every body and constraint before the links enter the solver.
+			rigid_body.freeze = true
+			rigid_body.mass = mass
+			rigid_body.gravity_scale = float(body_data.get("gravity_factor", 1.0))
+			rigid_body.linear_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+			rigid_body.angular_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+			rigid_body.linear_damp = float(body_data.get("linear_damping", 0.0))
+			rigid_body.angular_damp = float(body_data.get("angular_damping", 0.0))
+			# Keep chain links on a dedicated layer so they collide with the world
+			# without colliding with every other link in the same chain.
+			rigid_body.collision_layer = 16
+			rigid_body.collision_mask = 2
+			var physics_material := PhysicsMaterial.new()
+			physics_material.friction = float(body_data.get("friction", 0.3))
+			physics_material.bounce = float(body_data.get("restitution", 0.0))
+			rigid_body.physics_material_override = physics_material
+			physics_body = rigid_body
+			dynamic_count += 1
+		else:
+			var static_body := StaticBody3D.new()
+			static_body.name = "HavokAnchor_" + node_name
+			static_body.collision_layer = 2
+			static_body.collision_mask = 0
+			physics_body = static_body
+		var node_transform := _godot_node_rest({
+			"translation": body_data.get("node_global_translation", Vector3.ZERO),
+			"rotation_rows": body_data.get("node_global_rotation_rows", PackedFloat32Array()),
+			"scale": float(body_data.get("node_global_scale", 1.0)),
+		})
+		var body_basis := (
+			reference_transform.basis.orthonormalized() * node_transform.basis.orthonormalized()
+		).orthonormalized()
+		var body_origin := reference_transform.origin + reference_transform.basis * node_transform.origin
+		physics_body.transform = Transform3D(body_basis, body_origin)
+		var collision_instances := _create_imported_havok_shapes(body_data.get("shape", {}))
+		if collision_instances.is_empty():
+			physics_root.queue_free()
+			return {}
+		for collision_instance: CollisionShape3D in collision_instances:
+			physics_body.add_child(collision_instance)
+		body_nodes[node_name] = {"node": physics_body, "data": body_data}
+		body_count += 1
+
+	var mesh_count := 0
+	for mesh_index in range(meshes.size()):
+		var mesh_entry: Dictionary = meshes[mesh_index]
+		var node_name := str(mesh_entry.get("parent_node_name", ""))
+		if not body_nodes.has(node_name):
+			var static_mesh := MeshInstance3D.new()
+			static_mesh.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
+			static_mesh.mesh = mesh_entry.get("mesh") as ArrayMesh
+			static_mesh.material_override = await _material_for_reference(
+				model_path,
+				str(mesh_entry.get("diffuse_texture_path", "")),
+				bool(mesh_entry.get("alpha_blend", false)),
+				bool(mesh_entry.get("alpha_test", false)),
+				int(mesh_entry.get("alpha_threshold", 128))
+			)
+			static_mesh.transform = reference_transform
+			physics_root.add_child(static_mesh)
+			mesh_count += 1
+			continue
+		var physical_mesh := _physics_mesh_for_entry(model_path, mesh_index, mesh_entry)
+		if physical_mesh == null:
+			physics_root.queue_free()
+			return {}
+		var body_entry: Dictionary = body_nodes[node_name]
+		var physics_body := body_entry.get("node") as PhysicsBody3D
+		var visual := MeshInstance3D.new()
+		visual.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
+		visual.mesh = physical_mesh
+		visual.scale = Vector3.ONE * game_units_to_meters
+		visual.material_override = await _material_for_reference(
+			model_path,
+			str(mesh_entry.get("diffuse_texture_path", "")),
+			bool(mesh_entry.get("alpha_blend", false)),
+			bool(mesh_entry.get("alpha_test", false)),
+			int(mesh_entry.get("alpha_threshold", 128))
+		)
+		physics_body.add_child(visual)
+		mesh_count += 1
+
+	# Register complete bodies with Jolt only after their colliders and visuals
+	# are assembled, then create joints before allowing the solver to step.
+	for body_entry: Dictionary in body_nodes.values():
+		physics_root.add_child(body_entry.get("node") as PhysicsBody3D)
+
+	var largest_initial_anchor_error := 0.0
+	for constraint_value: Variant in constraints:
+		var constraint: Dictionary = constraint_value
+		var body_a_entry: Dictionary = body_nodes[str(constraint.get("body_a_node_name", ""))]
+		var body_b_entry: Dictionary = body_nodes[str(constraint.get("body_b_node_name", ""))]
+		var body_a := body_a_entry.get("node") as PhysicsBody3D
+		var body_b := body_b_entry.get("node") as PhysicsBody3D
+		var pivot_a: Vector3 = constraint.get("pivot_a", Vector3.ZERO) * game_units_to_meters
+		var pivot_b: Vector3 = constraint.get("pivot_b", Vector3.ZERO) * game_units_to_meters
+		var world_anchor_a := body_a.global_transform * pivot_a
+		var world_anchor_b := body_b.global_transform * pivot_b
+		largest_initial_anchor_error = maxf(largest_initial_anchor_error, world_anchor_a.distance_to(world_anchor_b))
+		var twist_axis: Vector3 = constraint.get("twist_axis_a", Vector3.ZERO)
+		twist_axis = body_a.global_basis * twist_axis
+		if twist_axis.length_squared() < 0.000001:
+			twist_axis = Vector3.UP
+		else:
+			twist_axis = twist_axis.normalized()
+		var plane_axis: Vector3 = constraint.get("plane_axis_a", Vector3.ZERO)
+		plane_axis = body_a.global_basis * plane_axis
+		plane_axis -= twist_axis * plane_axis.dot(twist_axis)
+		if plane_axis.length_squared() < 0.000001:
+			var fallback_axis := Vector3.RIGHT if absf(twist_axis.dot(Vector3.RIGHT)) < 0.9 else Vector3.FORWARD
+			plane_axis = fallback_axis - twist_axis * fallback_axis.dot(twist_axis)
+		plane_axis = plane_axis.normalized()
+		# Godot's ConeTwistJoint3D uses its local X axis for twist.
+		var x_axis := twist_axis
+		var y_axis := plane_axis
+		var z_axis := x_axis.cross(y_axis).normalized()
+		var joint := ConeTwistJoint3D.new()
+		joint.name = "OriginalRagdollJoint_%s" % str(constraint.get("body_a_node_name", "Link"))
+		joint.node_a = NodePath("../" + body_a.name)
+		joint.node_b = NodePath("../" + body_b.name)
+		joint.exclude_nodes_from_collision = true
+		joint.set_param(ConeTwistJoint3D.PARAM_SWING_SPAN, float(constraint.get("cone_max_angle", 0.785398)))
+		joint.set_param(ConeTwistJoint3D.PARAM_TWIST_SPAN, maxf(
+			absf(float(constraint.get("twist_min_angle", 0.0))),
+			absf(float(constraint.get("twist_max_angle", 0.0)))
+		))
+		joint.transform = Transform3D(Basis(x_axis, y_axis, z_axis), (world_anchor_a + world_anchor_b) * 0.5)
+		physics_root.add_child(joint)
+
+	for body_entry: Dictionary in body_nodes.values():
+		var imported_body := body_entry.get("node") as PhysicsBody3D
+		if imported_body is RigidBody3D:
+			(imported_body as RigidBody3D).freeze = false
+
+	print("OpenOB imported original Havok NIF physics: %s (%d bodies, %d dynamic, %d ragdoll joints; largest initial anchor mismatch %.4fm)" % [
+		model_path.get_file(), body_count, dynamic_count, constraints.size(), largest_initial_anchor_error
+	])
+	return {"body_count": body_count, "mesh_count": mesh_count}
 
 func _ensure_collision_shape(model_path: String) -> void:
 	var key := model_path.to_lower().replace("\\", "/")

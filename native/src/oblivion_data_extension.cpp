@@ -524,6 +524,7 @@ public:
         for (const auto& mesh : asset_data.meshes) {
             Dictionary item;
             item["name"] = String::utf8(mesh.name.c_str());
+            item["parent_node_name"] = String::utf8(mesh.parent_node_name.c_str());
             item["diffuse_texture_path"] = String::utf8(mesh.diffuse_texture_path.c_str());
             item["alpha_blend"] = mesh.alpha_blend;
             item["alpha_test"] = mesh.alpha_test;
@@ -535,6 +536,13 @@ public:
                 vertices.set(i, Vector3(value[0], value[1], value[2]));
             }
             item["vertices"] = vertices;
+            PackedVector3Array parent_local_vertices;
+            parent_local_vertices.resize(static_cast<int64_t>(mesh.parent_local_vertices.size()));
+            for (int64_t i = 0; i < static_cast<int64_t>(mesh.parent_local_vertices.size()); ++i) {
+                const auto& value = mesh.parent_local_vertices[static_cast<std::size_t>(i)];
+                parent_local_vertices.set(i, Vector3(value[0], value[1], value[2]));
+            }
+            item["parent_local_vertices"] = parent_local_vertices;
             PackedVector3Array normals;
             normals.resize(static_cast<int64_t>(mesh.normals.size()));
             for (int64_t i = 0; i < static_cast<int64_t>(mesh.normals.size()); ++i) {
@@ -542,6 +550,13 @@ public:
                 normals.set(i, Vector3(value[0], value[1], value[2]));
             }
             item["normals"] = normals;
+            PackedVector3Array parent_local_normals;
+            parent_local_normals.resize(static_cast<int64_t>(mesh.parent_local_normals.size()));
+            for (int64_t i = 0; i < static_cast<int64_t>(mesh.parent_local_normals.size()); ++i) {
+                const auto& value = mesh.parent_local_normals[static_cast<std::size_t>(i)];
+                parent_local_normals.set(i, Vector3(value[0], value[1], value[2]));
+            }
+            item["parent_local_normals"] = parent_local_normals;
             PackedVector2Array uvs;
             uvs.resize(static_cast<int64_t>(mesh.uvs.size()));
             for (int64_t i = 0; i < static_cast<int64_t>(mesh.uvs.size()); ++i) {
@@ -582,9 +597,82 @@ public:
             for (int i = 0; i < 9; ++i) rotation_rows.set(i, node.rotation_rows[static_cast<std::size_t>(i)]);
             item["rotation_rows"] = rotation_rows;
             item["scale"] = node.scale;
+            item["global_translation"] = Vector3(
+                node.global_translation[0], node.global_translation[1], node.global_translation[2]);
+            PackedFloat32Array global_rotation_rows;
+            global_rotation_rows.resize(9);
+            for (int i = 0; i < 9; ++i)
+                global_rotation_rows.set(i, node.global_rotation_rows[static_cast<std::size_t>(i)]);
+            item["global_rotation_rows"] = global_rotation_rows;
+            item["global_scale"] = node.global_scale;
             nodes.push_back(item);
         }
         result["nodes"] = nodes;
+        Array physics_bodies;
+        for (const auto& body : asset_data.physics_bodies) {
+            Dictionary item;
+            item["block_index"] = static_cast<int64_t>(body.block_index);
+            item["node_name"] = String::utf8(body.node_name.c_str());
+            item["node_global_translation"] = Vector3(
+                body.node_global_translation[0], body.node_global_translation[1], body.node_global_translation[2]);
+            PackedFloat32Array node_global_rotation_rows;
+            node_global_rotation_rows.resize(9);
+            for (int i = 0; i < 9; ++i)
+                node_global_rotation_rows.set(i, body.node_global_rotation_rows[static_cast<std::size_t>(i)]);
+            item["node_global_rotation_rows"] = node_global_rotation_rows;
+            item["node_global_scale"] = body.node_global_scale;
+            item["havok_translation"] = Vector3(
+                body.havok_translation[0], body.havok_translation[1], body.havok_translation[2]);
+            PackedFloat32Array havok_rotation;
+            havok_rotation.resize(4);
+            for (int i = 0; i < 4; ++i)
+                havok_rotation.set(i, body.havok_rotation[static_cast<std::size_t>(i)]);
+            item["havok_rotation"] = havok_rotation;
+            item["mass"] = body.mass;
+            item["linear_damping"] = body.linear_damping;
+            item["angular_damping"] = body.angular_damping;
+            item["gravity_factor"] = body.gravity_factor;
+            item["friction"] = body.friction;
+            item["restitution"] = body.restitution;
+            item["collision_layer"] = body.collision_layer;
+            Dictionary shape;
+            shape["type"] = String::utf8(body.shape.type.c_str());
+            shape["point1"] = Vector3(body.shape.point1[0], body.shape.point1[1], body.shape.point1[2]);
+            shape["point2"] = Vector3(body.shape.point2[0], body.shape.point2[1], body.shape.point2[2]);
+            shape["radius1"] = body.shape.radius1;
+            shape["radius2"] = body.shape.radius2;
+            PackedVector3Array shape_vertices;
+            shape_vertices.resize(static_cast<int64_t>(body.shape.vertices.size()));
+            for (int64_t i = 0; i < static_cast<int64_t>(body.shape.vertices.size()); ++i) {
+                const auto& vertex = body.shape.vertices[static_cast<std::size_t>(i)];
+                shape_vertices.set(i, Vector3(vertex[0], vertex[1], vertex[2]));
+            }
+            shape["vertices"] = shape_vertices;
+            item["shape"] = shape;
+            physics_bodies.push_back(item);
+        }
+        result["physics_bodies"] = physics_bodies;
+        Array physics_constraints;
+        for (const auto& constraint : asset_data.physics_constraints) {
+            Dictionary item;
+            item["type"] = String::utf8(constraint.type.c_str());
+            item["body_a_node_name"] = String::utf8(constraint.body_a_node_name.c_str());
+            item["body_b_node_name"] = String::utf8(constraint.body_b_node_name.c_str());
+            item["pivot_a"] = Vector3(constraint.pivot_a[0], constraint.pivot_a[1], constraint.pivot_a[2]);
+            item["pivot_b"] = Vector3(constraint.pivot_b[0], constraint.pivot_b[1], constraint.pivot_b[2]);
+            item["twist_axis_a"] = Vector3(
+                constraint.twist_axis_a[0], constraint.twist_axis_a[1], constraint.twist_axis_a[2]);
+            item["plane_axis_a"] = Vector3(
+                constraint.plane_axis_a[0], constraint.plane_axis_a[1], constraint.plane_axis_a[2]);
+            item["cone_max_angle"] = constraint.cone_max_angle;
+            item["plane_min_angle"] = constraint.plane_min_angle;
+            item["plane_max_angle"] = constraint.plane_max_angle;
+            item["twist_min_angle"] = constraint.twist_min_angle;
+            item["twist_max_angle"] = constraint.twist_max_angle;
+            item["max_friction"] = constraint.max_friction;
+            physics_constraints.push_back(item);
+        }
+        result["physics_constraints"] = physics_constraints;
         Array animations;
         for (const auto& animation : asset_data.animations) {
             Dictionary animation_item;

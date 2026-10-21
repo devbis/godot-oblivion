@@ -10,10 +10,12 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <Geometry.hpp>
 #include <Animation.hpp>
+#include <bhk.hpp>
 #include <NifFile.hpp>
 #include <Nodes.hpp>
 #include <Skin.hpp>
@@ -43,11 +45,14 @@ std::string palette_string(const nifly::NiHeader& header,
 
 void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
                   const nifly::MatTransform& transform,
+                  const nifly::MatTransform& parent_transform,
+                  std::string_view parent_node_name,
                   NifMeshData& output) {
     auto* geometry = shape.GetGeomData();
     if (!geometry || geometry->vertices.empty()) return;
 
     output.name = shape.name.get();
+    output.parent_node_name = parent_node_name;
     file.GetTextureSlot(&shape, output.diffuse_texture_path, 0);
     if (const auto* alpha = file.GetAlphaProperty(&shape)) {
         output.alpha_blend = (alpha->flags & 0x0001U) != 0;
@@ -55,13 +60,22 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
         output.alpha_threshold = alpha->threshold;
     }
     output.vertices.reserve(geometry->vertices.size());
-    for (const auto& vertex : geometry->vertices)
-        output.vertices.push_back(to_godot(transform.ApplyTransform(vertex)));
+    output.parent_local_vertices.reserve(geometry->vertices.size());
+    const auto parent_inverse = parent_transform.InverseTransform();
+    for (const auto& vertex : geometry->vertices) {
+        const auto world_vertex = transform.ApplyTransform(vertex);
+        output.vertices.push_back(to_godot(world_vertex));
+        output.parent_local_vertices.push_back(to_godot(parent_inverse.ApplyTransform(world_vertex)));
+    }
 
     if (geometry->normals.size() == geometry->vertices.size()) {
         output.normals.reserve(geometry->normals.size());
-        for (const auto& normal : geometry->normals)
-            output.normals.push_back(to_godot(transform.ApplyTransformToDir(normal)));
+        output.parent_local_normals.reserve(geometry->normals.size());
+        for (const auto& normal : geometry->normals) {
+            const auto world_normal = transform.ApplyTransformToDir(normal);
+            output.normals.push_back(to_godot(world_normal));
+            output.parent_local_normals.push_back(to_godot(parent_inverse.ApplyTransformToDir(world_normal)));
+        }
     }
 
     if (!geometry->uvSets.empty() && geometry->uvSets.front().size() == geometry->vertices.size()) {
@@ -112,6 +126,7 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
 
 void visit_node(nifly::NifFile& file, nifly::NiAVObject* object,
                 const nifly::MatTransform& parent_transform,
+                std::string_view parent_node_name,
                 std::unordered_set<const nifly::NiAVObject*>& visited,
                 std::vector<NifMeshData>& meshes) {
     if (!object || !visited.insert(object).second) return;
@@ -119,7 +134,7 @@ void visit_node(nifly::NifFile& file, nifly::NiAVObject* object,
 
     if (auto* shape = dynamic_cast<nifly::NiShape*>(object)) {
         NifMeshData mesh;
-        append_shape(file, *shape, world_transform, mesh);
+        append_shape(file, *shape, world_transform, parent_transform, parent_node_name, mesh);
         if (mesh.vertices.size() >= 3 && mesh.indices.size() >= 3)
             meshes.push_back(std::move(mesh));
     }
@@ -128,8 +143,108 @@ void visit_node(nifly::NifFile& file, nifly::NiAVObject* object,
         for (const auto& child_ref : node->childRefs) {
             if (child_ref.IsEmpty()) continue;
             auto* child = file.GetHeader().GetBlock<nifly::NiAVObject>(child_ref.index);
-            visit_node(file, child, world_transform, visited, meshes);
+            visit_node(file, child, world_transform, node->name.get(), visited, meshes);
         }
+    }
+}
+
+void copy_transform(const nifly::MatTransform& source, std::array<float, 3>& translation,
+                    std::array<float, 9>& rotation_rows, float& scale) {
+    translation = to_godot(source.translation);
+    for (std::size_t row = 0; row < 3; ++row)
+        for (std::size_t column = 0; column < 3; ++column)
+            rotation_rows[row * 3 + column] = source.rotation[row][column];
+    scale = source.scale;
+}
+
+std::array<float, 3> havok_point_to_game_units(const nifly::Vector3& value) {
+    // Oblivion's chain NIF maps BHK body spacing to NiNode spacing at 1:7.
+    constexpr float kHavokToGameUnits = 7.0f;
+    const auto converted = to_godot(value);
+    return {converted[0] * kHavokToGameUnits,
+            converted[1] * kHavokToGameUnits,
+            converted[2] * kHavokToGameUnits};
+}
+
+void append_physics(nifly::NifFile& file, NifAssetData& result) {
+    auto& header = file.GetHeader();
+    const auto block_count = header.GetNumBlocks();
+    std::unordered_map<uint32_t, std::string> body_node_names;
+
+    for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
+        auto* collision = header.GetBlock<nifly::bhkNiCollisionObject>(block_index);
+        if (!collision) continue;
+        auto* body = header.GetBlock<nifly::bhkRigidBody>(collision->bodyRef);
+        auto* target = header.GetBlock<nifly::NiAVObject>(collision->targetRef);
+        if (!body || !target || target->name.get().empty()) continue;
+
+        nifly::MatTransform node_transform;
+        if (!file.GetNodeTransformToGlobal(target->name.get(), node_transform)) continue;
+
+        NifPhysicsBodyData output;
+        output.block_index = collision->bodyRef.index;
+        output.node_name = target->name.get();
+        copy_transform(node_transform, output.node_global_translation,
+                       output.node_global_rotation_rows, output.node_global_scale);
+        output.havok_translation = havok_point_to_game_units(
+            {body->translation.x, body->translation.y, body->translation.z});
+        output.havok_rotation = {
+            body->rotation.x, body->rotation.z, -body->rotation.y, body->rotation.w
+        };
+        output.mass = body->mass;
+        output.linear_damping = body->linearDamping;
+        output.angular_damping = body->angularDamping;
+        output.gravity_factor = body->gravityFactor;
+        output.friction = body->friction;
+        output.restitution = body->restitution;
+        output.collision_layer = body->collisionFilter.layer;
+
+        if (auto* capsule = header.GetBlock<nifly::bhkCapsuleShape>(body->shapeRef)) {
+            output.shape.type = "capsule";
+            output.shape.point1 = havok_point_to_game_units(capsule->point1);
+            output.shape.point2 = havok_point_to_game_units(capsule->point2);
+            output.shape.radius1 = capsule->radius1 * 7.0f;
+            output.shape.radius2 = capsule->radius2 * 7.0f;
+        } else if (auto* vertices = header.GetBlock<nifly::bhkConvexVerticesShape>(body->shapeRef)) {
+            output.shape.type = "convex_vertices";
+            output.shape.vertices.reserve(vertices->verts.size());
+            for (const auto& vertex : vertices->verts)
+                output.shape.vertices.push_back(havok_point_to_game_units({vertex.x, vertex.y, vertex.z}));
+        } else if (auto* sphere = header.GetBlock<nifly::bhkSphereShape>(body->shapeRef)) {
+            output.shape.type = "sphere";
+            output.shape.radius1 = sphere->radius * 7.0f;
+        } else {
+            continue;
+        }
+        body_node_names[output.block_index] = output.node_name;
+        result.physics_bodies.push_back(std::move(output));
+    }
+
+    for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
+        auto* ragdoll = header.GetBlock<nifly::bhkRagdollConstraint>(block_index);
+        if (!ragdoll || ragdoll->entityRefs.GetSize() < 2) continue;
+        const auto body_a = ragdoll->entityRefs.GetBlockRef(0);
+        const auto body_b = ragdoll->entityRefs.GetBlockRef(1);
+        const auto node_a = body_node_names.find(body_a);
+        const auto node_b = body_node_names.find(body_b);
+        if (node_a == body_node_names.end() || node_b == body_node_names.end()) continue;
+
+        const auto& desc = ragdoll->ragdoll;
+        NifPhysicsConstraintData output;
+        output.type = "ragdoll";
+        output.body_a_node_name = node_a->second;
+        output.body_b_node_name = node_b->second;
+        output.pivot_a = havok_point_to_game_units({desc.pivotA.x, desc.pivotA.y, desc.pivotA.z});
+        output.pivot_b = havok_point_to_game_units({desc.pivotB.x, desc.pivotB.y, desc.pivotB.z});
+        output.twist_axis_a = havok_point_to_game_units({desc.twistA.x, desc.twistA.y, desc.twistA.z});
+        output.plane_axis_a = havok_point_to_game_units({desc.planeA.x, desc.planeA.y, desc.planeA.z});
+        output.cone_max_angle = desc.coneMaxAngle;
+        output.plane_min_angle = desc.planeMinAngle;
+        output.plane_max_angle = desc.planeMaxAngle;
+        output.twist_min_angle = desc.twistMinAngle;
+        output.twist_max_angle = desc.twistMaxAngle;
+        output.max_friction = desc.maxFriction;
+        result.physics_constraints.push_back(std::move(output));
     }
 }
 
@@ -158,6 +273,10 @@ NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
             for (std::size_t column = 0; column < 3; ++column)
                 output.rotation_rows[row * 3 + column] = node->transform.rotation[row][column];
         output.scale = node->transform.scale;
+        nifly::MatTransform global_transform;
+        if (file.GetNodeTransformToGlobal(node->name.get(), global_transform))
+            copy_transform(global_transform, output.global_translation,
+                           output.global_rotation_rows, output.global_scale);
         result.nodes.push_back(std::move(output));
     }
 
@@ -239,7 +358,8 @@ NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
     nifly::MatTransform identity;
     identity.Clear();
     std::unordered_set<const nifly::NiAVObject*> visited;
-    visit_node(file, root, identity, visited, result.meshes);
+    visit_node(file, root, identity, {}, visited, result.meshes);
+    append_physics(file, result);
     return result;
 }
 
