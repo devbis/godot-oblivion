@@ -216,6 +216,18 @@ func _place_player_on_ground(feet_position: Vector3) -> void:
 	push_warning("No walkable cell floor was found below the player start; using temporary support at the start marker")
 
 func _log_runtime_spawn_positions() -> void:
+	if _player_skeleton != null:
+		var foot_positions: Array[String] = []
+		for bone_name in ["Bip01 L Foot", "Bip01 L Toe0", "Bip01 R Foot", "Bip01 R Toe0"]:
+			var bone_index := _player_skeleton.find_bone(bone_name)
+			if bone_index >= 0:
+				var bone_position := _player_skeleton.global_transform * _player_skeleton.get_bone_global_pose(bone_index).origin
+				foot_positions.push_back("%s=%.3f" % [bone_name, bone_position.y])
+		print("OpenOB player floor alignment: root_y=%.3f feet=[%s] on_floor=%s" % [
+			player.global_position.y,
+			", ".join(foot_positions),
+			str(player.is_on_floor()),
+		])
 	if _npc_actors.is_empty():
 		print("OpenOB spawn check after physics: player=%s; no NPC actors" % str(player.global_position))
 		return
@@ -425,6 +437,7 @@ func _load_player_avatar() -> void:
 	_player_skeleton = _build_player_skeleton(skeleton_metadata.get("nodes", []))
 	if _player_skeleton != null:
 		avatar.add_child(_player_skeleton)
+		_align_avatar_to_floor_origin(avatar, _player_skeleton)
 	await _meshes_for_model(PLAYER_IDLE_KF)
 	await _meshes_for_model(PLAYER_WALK_KF)
 	_player_animations["Idle"] = _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE)
@@ -730,6 +743,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			actor_root.queue_free()
 			continue
 		avatar.add_child(skeleton)
+		_align_avatar_to_floor_origin(avatar, skeleton)
 		var is_female := bool(npc.get("female", false))
 		var actor_parts: Array = (FEMALE_AVATAR_PARTS if is_female else PLAYER_AVATAR_PARTS).duplicate()
 		actor_parts.pop_back()
@@ -1197,6 +1211,16 @@ func _build_player_skeleton(node_data: Array) -> Skeleton3D:
 			break
 	skeleton.reset_bone_poses()
 	return skeleton
+
+func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void:
+	var root_bone := skeleton.find_bone("Bip01")
+	if root_bone < 0:
+		return
+	# Character meshes use the model origin at the soles, while Bip01 is above them.
+	var rig_root_height := skeleton.get_bone_global_rest(root_bone).origin.y * game_units_to_meters
+	avatar.position.y -= rig_root_height
+	if skeleton == _player_skeleton:
+		print("OpenOB aligned avatar mesh origin to rig root: root_height=%.3fm" % rig_root_height)
 
 func _godot_node_rest(node: Dictionary) -> Transform3D:
 	var rows: PackedFloat32Array = node.get("rotation_rows", PackedFloat32Array())
