@@ -118,6 +118,7 @@ var _player_skeleton: Skeleton3D
 var _player_avatar: Node3D
 var _player_face_meshes: Array[MeshInstance3D] = []
 var _player_hair_meshes: Array[MeshInstance3D] = []
+var _player_body_meshes_by_slot: Dictionary = {0x0004: [], 0x0008: []}
 var _player_face_source_meshes: Array[ArrayMesh] = []
 var _player_facegen_mesh_data: Array[Dictionary] = []
 var _player_face_profiles: Array[Dictionary] = []
@@ -1053,6 +1054,10 @@ func _load_player_avatar() -> void:
 				_player_facegen_mesh_data.push_back(facegen_data)
 			if is_player_hair:
 				_player_hair_meshes.push_back(instance)
+			if model_path.to_lower() == PLAYER_AVATAR_PARTS[0].to_lower():
+				_player_body_meshes_by_slot[0x0004].push_back(instance)
+			elif model_path.to_lower() == PLAYER_AVATAR_PARTS[1].to_lower():
+				_player_body_meshes_by_slot[0x0008].push_back(instance)
 			instance.material_override = await _material_for_texture(
 				str(mesh_entry.diffuse_texture_path),
 				bool(mesh_entry.get("alpha_blend", false)),
@@ -1284,7 +1289,20 @@ func _equip_player_item(form_id: int) -> bool:
 		_player_equipment.erase(equipped_id)
 	_player_equipment[form_id] = {"slots": slots, "meshes": item_meshes}
 	_refresh_player_hair_visibility()
+	_refresh_player_body_visibility()
 	return true
+
+func _refresh_player_body_visibility() -> void:
+	var covered_slots := 0
+	for equipment_value: Variant in _player_equipment.values():
+		var equipment: Dictionary = equipment_value
+		covered_slots |= int(equipment.get("slots", 0))
+	for slot_value: Variant in _player_body_meshes_by_slot.keys():
+		var slot := int(slot_value)
+		for body_mesh_value: Variant in _player_body_meshes_by_slot[slot]:
+			var body_mesh := body_mesh_value as MeshInstance3D
+			if is_instance_valid(body_mesh):
+				body_mesh.visible = (covered_slots & slot) == 0
 
 func _refresh_player_hair_visibility() -> void:
 	var headwear_equipped := false
@@ -1408,8 +1426,78 @@ func _toggle_face_view() -> void:
 func _toggle_fly_mode() -> void:
 	if _world_loading or _inventory_open:
 		return
-	player.set_fly_mode(not player.is_flying)
+	var enable_fly_mode: bool = not player.is_flying
+	if not enable_fly_mode:
+		var resume_physics := player.is_physics_processing()
+		player.set_physics_process(false)
+		_ensure_nearby_terrain_collisions()
+		await get_tree().physics_frame
+		player.set_fly_mode(false)
+		_snap_player_to_nearby_floor()
+		player.set_physics_process(resume_physics)
+	else:
+		player.set_fly_mode(true)
 	fly_mode_button.text = "Y · Fly: On" if player.is_flying else "Y · Fly: Off"
+
+func _ensure_nearby_terrain_collisions() -> void:
+	if current_cell.is_empty() or bool(current_cell.get("interior", true)):
+		return
+	var cell_size_meters := EXTERIOR_CELL_SIZE * game_units_to_meters
+	var player_grid_x := floori(player.global_position.x / cell_size_meters)
+	var player_grid_y := floori(-player.global_position.z / cell_size_meters)
+	var terrain_cells: Array = current_cell.get("land_cells", [])
+	if terrain_cells.is_empty() and current_cell.has("land"):
+		terrain_cells.push_back(current_cell.get("land"))
+	for land_value: Variant in terrain_cells:
+		var land: Dictionary = land_value
+		var grid_x := int(land.get("grid_x", 0))
+		var grid_y := int(land.get("grid_y", 0))
+		if abs(grid_x - player_grid_x) > 1 or abs(grid_y - player_grid_y) > 1:
+			continue
+		var body_name := "TerrainCollision_%d_%d" % [grid_x, grid_y]
+		if cell_visual_root.has_node(NodePath(body_name)):
+			continue
+		var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
+		if heights.size() != 33 * 33:
+			continue
+		var cache_key := "%d,%d" % [grid_x, grid_y]
+		var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
+		if collision == null:
+			var terrain_mesh := _build_land_mesh(heights, 1)
+			if terrain_mesh == null:
+				continue
+			collision = _build_concave_shape(terrain_mesh.get_faces())
+			if collision == null:
+				continue
+			_land_collision_cache[cache_key] = collision
+		var body := StaticBody3D.new()
+		body.name = body_name
+		body.collision_layer = 2
+		body.collision_mask = 0
+		body.scale = Vector3.ONE * game_units_to_meters
+		body.position = Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
+		var collision_instance := CollisionShape3D.new()
+		collision_instance.shape = collision
+		body.add_child(collision_instance)
+		cell_visual_root.add_child(body)
+
+func _snap_player_to_nearby_floor() -> void:
+	var query := PhysicsRayQueryParameters3D.create(
+		player.global_position + Vector3.UP * 1.2,
+		player.global_position - Vector3.UP * 2.5,
+		2,
+		[player.get_rid()]
+	)
+	query.collide_with_areas = false
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty() or Vector3(result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
+		return
+	var floor_position: Vector3 = result.get("position", player.global_position)
+	if absf(floor_position.y - player.global_position.y) > 2.0:
+		return
+	player.global_position.y = floor_position.y + 0.02
+	player.velocity = Vector3.ZERO
+	player.force_update_transform()
 
 func _player_face_camera_anchor() -> Vector3:
 	if _player_skeleton == null:

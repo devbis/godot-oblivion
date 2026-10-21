@@ -270,7 +270,9 @@ static func _compute_normals(vertices: PackedVector3Array, indices: PackedInt32A
 		normals[b] += normal
 		normals[c] += normal
 	for vertex_index in range(normals.size()):
-		normals[vertex_index] = normals[vertex_index].normalized() if normals[vertex_index].length_squared() > 0.000001 else Vector3.UP
+		# Match the reversed shading-normal convention used by the NIF converter;
+		# FaceGen rebuilds these normals after applying each facial morph.
+		normals[vertex_index] = -normals[vertex_index].normalized() if normals[vertex_index].length_squared() > 0.000001 else Vector3.DOWN
 	return normals
 
 static func _has_bytes(bytes: PackedByteArray, offset: int, count: int) -> bool:

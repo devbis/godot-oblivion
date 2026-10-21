@@ -44,6 +44,7 @@ func _ready() -> void:
 	_camera_yaw = rotation.y
 	_target_camera_distance = camera_distance
 	_current_camera_distance = camera_distance
+	floor_snap_length = 0.35
 	_camera_collision_shape = SphereShape3D.new()
 	_camera_collision_shape.radius = camera_collision_radius
 	camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
@@ -76,6 +77,8 @@ func set_fly_mode(enabled: bool) -> void:
 		collision_mask = _saved_collision_mask
 	velocity = Vector3.ZERO
 	is_flying = enabled
+	if not enabled:
+		force_update_transform()
 
 func toggle_face_preview(face_anchor: Vector3) -> bool:
 	face_preview_enabled = not face_preview_enabled
