@@ -156,6 +156,16 @@ theme_override_constants/outline_size = 4
 text = "C · Face: Default\nG · Expression: Neutral"
 horizontal_alignment = 2
 
+[node name="FaceView" type="Button" parent="StatusLayer"]
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -176.0
+offset_top = 92.0
+offset_right = -16.0
+offset_bottom = 126.0
+text = "T · Face view"
+tooltip_text = "Look at the player from the front to inspect facial expressions. Press T to toggle."
+
 [node name="InteractionHint" type="Label" parent="StatusLayer"]
 anchor_top = 1.0
 anchor_right = 1.0

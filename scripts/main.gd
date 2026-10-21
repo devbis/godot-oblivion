@@ -26,6 +26,15 @@ const PLAYER_JUMP_KFS := {
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
+const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
+const PLAYER_FACE_DETAIL_PARTS := [
+	"Characters/Imperial/eyeLeftHuman.nif",
+	"Characters/Imperial/eyeRightHuman.nif",
+	"Characters/Imperial/mouthHuman.nif",
+	"Characters/Imperial/teethUpperHuman.nif",
+	"Characters/Imperial/teethLowerHuman.nif",
+	"Characters/Imperial/tongueHuman.nif",
+]
 const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const PLAYER_AVATAR_PARTS := [
@@ -59,6 +68,7 @@ const TEXTURE_FALLBACKS := {
 @onready var inventory_items_container: VBoxContainer = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
+@onready var face_view_button: Button = $StatusLayer/FaceView
 @onready var player: CharacterBody3D = $Player
 
 var data_reader: Object
@@ -78,6 +88,7 @@ var _player_skeleton: Skeleton3D
 var _player_avatar: Node3D
 var _player_face_meshes: Array[MeshInstance3D] = []
 var _player_face_source_meshes: Array[ArrayMesh] = []
+var _player_facegen_mesh_data: Array[Dictionary] = []
 var _player_face_profiles: Array[Dictionary] = []
 var _player_face_profile_ids: Dictionary = {}
 var _player_face_profile_index := 0
@@ -102,6 +113,8 @@ var _fallback_support: StaticBody3D
 
 func _ready() -> void:
 	player.set_physics_process(false)
+	face_view_button.disabled = true
+	face_view_button.pressed.connect(_toggle_face_view)
 	cell_visual_root = Node3D.new()
 	cell_visual_root.name = "StreamedCell"
 	add_child(cell_visual_root)
@@ -151,6 +164,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cycle_player_face_expression()
 	elif event.keycode == KEY_I:
 		_toggle_inventory()
+	elif event.keycode == KEY_T:
+		_toggle_face_view()
 
 func _load_game_data() -> void:
 	if not ClassDB.class_exists("OblivionData"):
@@ -190,6 +205,7 @@ func _load_game_data() -> void:
 	await _load_cell_actors(current_cell)
 	player.set_physics_process(true)
 	_world_loading = false
+	face_view_button.disabled = false
 	player.capture_mouse()
 	await get_tree().create_timer(1.0).timeout
 	_log_runtime_spawn_positions()
@@ -497,24 +513,66 @@ func _load_player_avatar() -> void:
 			loaded_animation_names.push_back(animation_name)
 	_initialize_player_face_profiles()
 	var part_count := 0
-	for model_path: String in PLAYER_AVATAR_PARTS:
+	var player_model_paths: Array[String] = []
+	for model_path_value: Variant in PLAYER_AVATAR_PARTS:
+		player_model_paths.push_back(str(model_path_value))
+	for model_path_value: Variant in PLAYER_FACE_DETAIL_PARTS:
+		player_model_paths.push_back(str(model_path_value))
+	for model_path: String in player_model_paths:
 		var meshes: Array = await _meshes_for_model(model_path)
+		var part_mesh_count := 0
+		var is_face_model := model_path == PLAYER_FACE_HEAD_MODEL or PLAYER_FACE_DETAIL_PARTS.has(model_path)
+		var is_player_hair := model_path.to_lower() == PLAYER_HAIR_MODEL.to_lower()
+		var facegen_data: Dictionary = _ensure_facegen_data(model_path) if is_face_model else {}
+		var attachment: Node3D = avatar
+		if (PLAYER_FACE_DETAIL_PARTS.has(model_path) or is_player_hair) and _player_skeleton != null:
+			var head_attachment := BoneAttachment3D.new()
+			head_attachment.name = model_path.get_file().get_basename() + "Attachment"
+			head_attachment.bone_name = "Bip01 Head"
+			_player_skeleton.add_child(head_attachment)
+			attachment = head_attachment
+			if PLAYER_FACE_DETAIL_PARTS.has(model_path):
+				var face_detail_to_head := Node3D.new()
+				face_detail_to_head.name = "FaceDetailToHeadSpace"
+				face_detail_to_head.transform = _player_face_detail_to_head_transform()
+				head_attachment.add_child(face_detail_to_head)
+				attachment = face_detail_to_head
+			elif is_player_hair:
+				var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
+				if head_bone_index >= 0:
+					var hair_model_to_head := Node3D.new()
+					hair_model_to_head.name = "HairModelToHeadSpace"
+					hair_model_to_head.transform = _player_skeleton.get_bone_global_rest(head_bone_index).affine_inverse()
+					head_attachment.add_child(hair_model_to_head)
+					attachment = hair_model_to_head
 		for mesh_entry: Dictionary in meshes:
 			var instance := MeshInstance3D.new()
 			var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
 			instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
 			var source_mesh := mesh_entry.mesh as ArrayMesh
 			instance.mesh = source_mesh
-			if model_path.to_lower() == PLAYER_FACE_HEAD_MODEL.to_lower():
+			if is_face_model:
 				_player_face_meshes.push_back(instance)
 				_player_face_source_meshes.push_back(source_mesh)
-			instance.material_override = await _material_for_texture(str(mesh_entry.diffuse_texture_path))
-			avatar.add_child(instance)
+				_player_facegen_mesh_data.push_back(facegen_data)
+			instance.material_override = await _material_for_texture(
+				str(mesh_entry.diffuse_texture_path),
+				bool(mesh_entry.get("alpha_blend", false)),
+				bool(mesh_entry.get("alpha_test", false)),
+				int(mesh_entry.get("alpha_threshold", 128))
+			)
+			if model_path.to_lower() == PLAYER_FACE_HEAD_MODEL.to_lower():
+				instance.extra_cull_margin = 1.0
+			attachment.add_child(instance)
 			var bone_names: Array = mesh_entry.get("bone_names", [])
 			if _player_skeleton != null and not bone_names.is_empty():
 				instance.skeleton = NodePath("../Skeleton3D")
 				instance.skin = _skin_for_mesh(bone_names, _player_skeleton)
 			part_count += 1
+			part_mesh_count += 1
+		print("OpenOB player model %s: %d mesh(es)" % [model_path, part_mesh_count])
+		if part_mesh_count == 0 and (is_face_model or model_path == PLAYER_AVATAR_PARTS.back()):
+			push_warning("Player appearance part did not load: %s" % model_path)
 	_apply_player_face_profile()
 	_player_face_state = {
 		"name": "Player",
@@ -618,12 +676,12 @@ func _apply_player_face_profile() -> void:
 	if _player_face_profiles.is_empty() or _player_face_meshes.is_empty():
 		return
 	var profile: Dictionary = _player_face_profiles[_player_face_profile_index]
-	var facegen_data := _ensure_facegen_data(PLAYER_FACE_HEAD_MODEL)
-	if facegen_data.is_empty():
-		return
 	for index in range(mini(_player_face_meshes.size(), _player_face_source_meshes.size())):
 		var instance := _player_face_meshes[index]
 		if not is_instance_valid(instance):
+			continue
+		var facegen_data: Dictionary = _player_facegen_mesh_data[index]
+		if facegen_data.is_empty():
 			continue
 		var morphed_mesh := FaceGenData.build_head_mesh(
 			_player_face_source_meshes[index],
@@ -785,6 +843,38 @@ func _toggle_inventory() -> void:
 	else:
 		player.capture_mouse()
 
+func _toggle_face_view() -> void:
+	if _world_loading or _inventory_open:
+		return
+	var enabled := bool(player.toggle_face_preview(_player_face_camera_anchor()))
+	face_view_button.text = "T · Behind player" if enabled else "T · Face view"
+
+func _player_face_camera_anchor() -> Vector3:
+	if _player_skeleton == null:
+		return Vector3(0.0, 1.5, 0.0)
+	var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
+	if head_bone_index < 0:
+		return Vector3(0.0, 1.5, 0.0)
+	var head_pose := _player_skeleton.get_bone_global_pose(head_bone_index)
+	var face_detail_to_head := _player_face_detail_to_head_transform()
+	var face_target_in_skeleton := head_pose * (face_detail_to_head * Vector3(0.0, 4.0, -8.0))
+	return player.to_local(_player_skeleton.to_global(face_target_in_skeleton))
+
+func _player_face_detail_to_head_transform() -> Transform3D:
+	if _player_skeleton == null:
+		return Transform3D.IDENTITY
+	var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
+	if head_bone_index < 0:
+		return Transform3D.IDENTITY
+	var head_metadata: Dictionary = _nif_metadata_cache.get(PLAYER_FACE_HEAD_MODEL.to_lower(), {})
+	var face_model_head_transform := Transform3D.IDENTITY
+	for node_value: Variant in head_metadata.get("nodes", []):
+		var node: Dictionary = node_value
+		if str(node.get("name", "")) == "Bip01 Head":
+			face_model_head_transform = _godot_node_rest(node)
+			break
+	return _player_skeleton.get_bone_global_rest(head_bone_index).affine_inverse() * face_model_head_transform
+
 func _update_interaction_hint(nearby_item: Dictionary) -> void:
 	if _world_loading:
 		interaction_hint_label.visible = false
@@ -863,7 +953,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		if hair_path.is_empty():
 			hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
 		var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
-		await _add_actor_model(avatar, skeleton, hair_path, "", hair_color)
+		await _add_actor_model(avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, true)
 		var weapon_attached := false
 		var attached_item_names: Array[String] = []
 		for item_form_id: int in _npc_equipment_ids(npc):
@@ -1050,7 +1140,8 @@ func _add_actor_model(
 	model_path: String,
 	attach_bone := "",
 	tint: PackedByteArray = PackedByteArray(),
-	npc_face_data: Dictionary = {}
+	npc_face_data: Dictionary = {},
+	model_space_bone_attachment := false
 ) -> Array[MeshInstance3D]:
 	var meshes: Array = await _meshes_for_model(model_path)
 	var attachment: Node3D = avatar
@@ -1060,6 +1151,14 @@ func _add_actor_model(
 		bone_attachment.bone_name = attach_bone
 		skeleton.add_child(bone_attachment)
 		attachment = bone_attachment
+		if model_space_bone_attachment:
+			var bone_index := skeleton.find_bone(attach_bone)
+			if bone_index >= 0:
+				var model_to_bone := Node3D.new()
+				model_to_bone.name = "ModelToBoneSpace"
+				model_to_bone.transform = skeleton.get_bone_global_rest(bone_index).affine_inverse()
+				bone_attachment.add_child(model_to_bone)
+				attachment = model_to_bone
 	for mesh_entry: Dictionary in meshes:
 		var instance := MeshInstance3D.new()
 		var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))

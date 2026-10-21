@@ -27,6 +27,11 @@ var _target_camera_distance := 2.0
 var _current_camera_distance := 2.0
 var _camera_collision_shape: SphereShape3D
 var _third_person := true
+var face_preview_enabled := false
+var _saved_camera_pitch := -0.28
+var _saved_camera_distance := 2.0
+var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
+const FACE_PREVIEW_MIN_DISTANCE := 0.005
 var _capture_mouse_on_focus := false
 
 func _ready() -> void:
@@ -56,6 +61,24 @@ func release_mouse() -> void:
 	_capture_mouse_on_focus = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
+func toggle_face_preview(face_anchor: Vector3) -> bool:
+	face_preview_enabled = not face_preview_enabled
+	if face_preview_enabled:
+		_saved_camera_pitch = _camera_pitch
+		_saved_camera_distance = _target_camera_distance
+		_saved_camera_pivot_position = camera_pivot.position
+		camera.near = 0.005
+		_camera_pitch = 0.0
+		camera_pivot.position = face_anchor
+		_set_camera_distance(0.08)
+	else:
+		_camera_pitch = _saved_camera_pitch
+		camera_pivot.position = _saved_camera_pivot_position
+		camera.near = 0.05
+		_set_camera_distance(_saved_camera_distance)
+	_apply_camera_orbit()
+	return face_preview_enabled
+
 func _process(delta: float) -> void:
 	rotation.y = _camera_yaw
 	_apply_camera_orbit()
@@ -72,7 +95,10 @@ func handle_camera_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 	elif event is InputEventPanGesture:
 		if not is_zero_approx(event.delta.y):
-			_set_camera_distance(_target_camera_distance - event.delta.y * camera_zoom_speed * 0.04)
+			if face_preview_enabled:
+				_set_camera_distance(_target_camera_distance * exp(event.delta.y * 0.08))
+			else:
+				_set_camera_distance(_target_camera_distance + event.delta.y * camera_zoom_speed * 0.04)
 			get_viewport().set_input_as_handled()
 	elif event is InputEventMagnifyGesture:
 		if event.factor > 0.0 and not is_equal_approx(event.factor, 1.0):
@@ -80,10 +106,16 @@ func handle_camera_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_set_camera_distance(_target_camera_distance - camera_zoom_speed * 0.25)
+			if face_preview_enabled:
+				_set_camera_distance(_target_camera_distance * 0.8)
+			else:
+				_set_camera_distance(_target_camera_distance - camera_zoom_speed * 0.25)
 			get_viewport().set_input_as_handled()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_set_camera_distance(_target_camera_distance + camera_zoom_speed * 0.25)
+			if face_preview_enabled:
+				_set_camera_distance(_target_camera_distance / 0.8)
+			else:
+				_set_camera_distance(_target_camera_distance + camera_zoom_speed * 0.25)
 			get_viewport().set_input_as_handled()
 		elif Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			capture_mouse()
@@ -102,10 +134,11 @@ func _notification(what: int) -> void:
 
 func _apply_camera_orbit() -> void:
 	if is_instance_valid(camera_pivot):
-		camera_pivot.rotation = Vector3(_camera_pitch, 0.0, 0.0)
+		camera_pivot.rotation = Vector3(_camera_pitch, PI if face_preview_enabled else 0.0, 0.0)
 
 func _set_camera_distance(distance: float) -> void:
-	_target_camera_distance = clampf(distance, camera_zoom_min, camera_zoom_max)
+	var min_distance := FACE_PREVIEW_MIN_DISTANCE if face_preview_enabled else camera_zoom_min
+	_target_camera_distance = clampf(distance, min_distance, camera_zoom_max)
 	_third_person = _target_camera_distance > camera_zoom_min + 0.05
 
 func _physics_process(delta: float) -> void:
@@ -141,10 +174,11 @@ func _update_camera_clearance(delta: float) -> void:
 	query.margin = 0.02
 
 	var fractions := get_world_3d().direct_space_state.cast_motion(query)
+	var min_distance := FACE_PREVIEW_MIN_DISTANCE if face_preview_enabled else camera_zoom_min
 	var available_distance := _target_camera_distance
 	if fractions.size() == 2 and fractions[0] < 1.0:
 		available_distance *= fractions[0]
-		available_distance = maxf(camera_zoom_min, available_distance - spring_arm.margin)
+		available_distance = maxf(min_distance, available_distance - spring_arm.margin)
 
 	# Move inward before entering a wall; ease back out after the view is clear.
 	if available_distance < _current_camera_distance:
