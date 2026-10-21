@@ -48,7 +48,8 @@ const EXTERIOR_RELOAD_GRID_DISTANCE := 5
 const EXTERIOR_REFERENCE_RENDER_DISTANCE := 220.0
 const EXTERIOR_TREE_RENDER_DISTANCE := 380.0
 const EXTERIOR_TREE_NEAR_DISTANCE := 42.0
-const EXTERIOR_COLLISION_DISTANCE := 18.0
+const EXTERIOR_COLLISION_DISTANCE := 65.0
+const EXTERIOR_COLLISION_UNLOAD_DISTANCE := 84.0
 const EXTERIOR_TERRAIN_COLLISION_DISTANCE := 65.0
 const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
 const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.08
@@ -116,6 +117,12 @@ var _npc_stream_enabled := false
 var _npc_stream_busy := false
 var _npc_stream_scan_cooldown := 0.0
 var _npc_loaded_reference_ids: Dictionary = {}
+var _exterior_collision_bodies: Dictionary = {}
+var _exterior_collision_attempted_ids: Dictionary = {}
+var _exterior_collision_stream_enabled := false
+var _exterior_collision_stream_busy := false
+var _exterior_collision_busy_generation := -1
+var _exterior_collision_scan_cooldown := 0.0
 var _player_deferred_assets_ready := false
 var _player_deferred_assets_loading := false
 var _cell_material: StandardMaterial3D
@@ -231,6 +238,7 @@ func _process(_delta: float) -> void:
 		if not _inventory_open:
 			_update_player_animation(_delta)
 		_update_npc_actors(_delta)
+		_update_exterior_collision_streaming()
 		_update_npc_streaming()
 		if not _player_face_state.is_empty():
 			_update_face_blink(_player_face_state, _delta)
@@ -471,6 +479,12 @@ func _load_cell_geometry(
 	var generation := _cell_load_generation
 	_set_cell_environment(cell)
 	if clear_existing:
+		_exterior_collision_stream_enabled = false
+		_exterior_collision_stream_busy = false
+		_exterior_collision_busy_generation = -1
+		_exterior_collision_scan_cooldown = 0.0
+		_exterior_collision_bodies.clear()
+		_exterior_collision_attempted_ids.clear()
 		_placed_items.clear()
 		_linked_door_candidates.clear()
 		if has_node("TestFloor/MeshInstance3D"):
@@ -604,6 +618,7 @@ func _load_cell_geometry(
 			and (not is_exterior or reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_DISTANCE)
 		)
 		if should_collide:
+			_exterior_collision_attempted_ids[int(reference.get("form_id", 0))] = true
 			_ensure_collision_shape(model_path)
 		var item_mesh_instances: Array[MeshInstance3D] = []
 		for mesh_index in range(meshes.size()):
@@ -680,18 +695,7 @@ func _load_cell_geometry(
 				"mesh_instances": item_mesh_instances,
 			}
 		if should_collide:
-			var model_key := model_path.to_lower().replace("\\", "/")
-			var collision_shape := _collision_cache.get(model_key) as ConcavePolygonShape3D
-			if collision_shape != null:
-				var static_body := StaticBody3D.new()
-				static_body.name = "GeneratedStaticMeshCollision"
-				static_body.collision_layer = 2
-				static_body.collision_mask = 0
-				static_body.transform = reference_transform
-				var collision_instance := CollisionShape3D.new()
-				collision_instance.shape = collision_shape
-				static_body.add_child(collision_instance)
-				cell_visual_root.add_child(static_body)
+			if _add_reference_collider(int(reference.get("form_id", 0)), reference_transform, model_path, is_exterior):
 				collision_count += 1
 		if reference_count % 8 == 0:
 			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
@@ -738,8 +742,8 @@ func _load_cell_geometry(
 	]
 	_update_interaction_hint({}, {})
 	_refresh_inventory_hud()
-	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d meshes, %d terrain tiles; culled %d distant references, skipped %d gates" % [
-		cell_label, reference_count, tree_reference_count, instance_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
+	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d meshes, %d generated colliders, %d terrain tiles; culled %d distant references, skipped %d gates" % [
+		cell_label, reference_count, tree_reference_count, instance_count, collision_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
 	return true
@@ -998,6 +1002,25 @@ func _ensure_collision_shape(model_path: String) -> void:
 			collision_faces.append_array(mesh.get_faces())
 	_collision_cache[key] = _build_concave_shape(collision_faces)
 
+func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
+	_ensure_collision_shape(model_path)
+	var model_key := model_path.to_lower().replace("\\", "/")
+	var collision_shape := _collision_cache.get(model_key) as ConcavePolygonShape3D
+	if collision_shape == null:
+		return false
+	var static_body := StaticBody3D.new()
+	static_body.name = "GeneratedStaticMeshCollision"
+	static_body.collision_layer = 2
+	static_body.collision_mask = 0
+	static_body.transform = reference_transform
+	var collision_instance := CollisionShape3D.new()
+	collision_instance.shape = collision_shape
+	static_body.add_child(collision_instance)
+	cell_visual_root.add_child(static_body)
+	if track_exterior:
+		_exterior_collision_bodies[reference_id] = static_body
+	return true
+
 func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
 		return null
@@ -1009,6 +1032,80 @@ func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
 	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx")
+
+func _update_exterior_collision_streaming() -> void:
+	if (
+		not _exterior_collision_stream_enabled
+		or _exterior_collision_stream_busy
+		or _npc_stream_busy
+		or _world_loading
+		or data_reader == null
+	):
+		return
+	_exterior_collision_scan_cooldown = maxf(0.0, _exterior_collision_scan_cooldown - get_process_delta_time())
+	if _exterior_collision_scan_cooldown > 0.0:
+		return
+	_exterior_collision_scan_cooldown = 0.5
+	for reference_id_value: Variant in _exterior_collision_bodies.keys():
+		var reference_id := int(reference_id_value)
+		var static_body := _exterior_collision_bodies.get(reference_id) as StaticBody3D
+		if not is_instance_valid(static_body):
+			_exterior_collision_bodies.erase(reference_id)
+			_exterior_collision_attempted_ids.erase(reference_id)
+			continue
+		if static_body.global_position.distance_to(player.global_position) <= EXTERIOR_COLLISION_UNLOAD_DISTANCE:
+			continue
+		static_body.queue_free()
+		_exterior_collision_bodies.erase(reference_id)
+		_exterior_collision_attempted_ids.erase(reference_id)
+
+	var selected_reference: Dictionary = {}
+	var selected_distance := EXTERIOR_COLLISION_DISTANCE
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		var reference_id := int(reference.get("form_id", 0))
+		if _exterior_collision_attempted_ids.has(reference_id):
+			continue
+		var distance_to_player := _reference_transform(reference).origin.distance_to(player.global_position)
+		if distance_to_player > selected_distance:
+			continue
+		if bool(reference.get("is_tree", false)):
+			continue
+		var model_path := str(reference.get("model_path", ""))
+		if model_path.is_empty() or not model_path.to_lower().ends_with(".nif") or not _should_collide_model(model_path):
+			continue
+		if _is_early_oblivion_gate(reference, model_path):
+			continue
+		var base_type := str(data_reader.find_record_type(int(reference.get("base_form_id", 0))))
+		if base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]:
+			continue
+		selected_distance = distance_to_player
+		selected_reference = reference
+	if selected_reference.is_empty():
+		return
+	var selected_id := int(selected_reference.get("form_id", 0))
+	_exterior_collision_attempted_ids[selected_id] = true
+	_exterior_collision_stream_busy = true
+	_exterior_collision_busy_generation = _cell_load_generation
+	_load_exterior_reference_collider.call_deferred(selected_reference, _cell_load_generation)
+
+func _load_exterior_reference_collider(reference: Dictionary, generation: int) -> void:
+	var reference_id := int(reference.get("form_id", 0))
+	var reference_transform := _reference_transform(reference)
+	var model_path := str(reference.get("model_path", ""))
+	var model_key := model_path.to_lower().replace("\\", "/")
+	if not _model_cache.has(model_key):
+		await _meshes_for_model(model_path)
+	if generation != _cell_load_generation or not _exterior_collision_stream_enabled:
+		if _exterior_collision_busy_generation == generation:
+			_exterior_collision_stream_busy = false
+			_exterior_collision_busy_generation = -1
+		return
+	if reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_UNLOAD_DISTANCE:
+		_add_reference_collider(reference_id, reference_transform, model_path, true)
+	if _exterior_collision_busy_generation == generation:
+		_exterior_collision_stream_busy = false
+		_exterior_collision_busy_generation = -1
 
 func _material_for_reference(
 	model_path: String,
@@ -1220,6 +1317,7 @@ func _load_deferred_player_assets() -> void:
 func _start_deferred_cell_loading() -> void:
 	_deferred_world_generation += 1
 	_npc_stream_enabled = false
+	_exterior_collision_stream_enabled = false
 	_load_deferred_cell_assets(_deferred_world_generation, current_cell)
 
 func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
@@ -1241,8 +1339,9 @@ func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
 	var geometry_complete: bool = await _load_cell_geometry(cell, near_distance, far_distance, false)
 	if not geometry_complete or generation != _deferred_world_generation:
 		return
+	_exterior_collision_stream_enabled = is_exterior
 	_npc_stream_enabled = true
-	print("OpenOB nearby world pass complete; NPC streaming enabled for %s" % str(cell.get("editor_id", "cell")))
+	print("OpenOB nearby world pass complete; exterior collision and NPC streaming enabled for %s" % str(cell.get("editor_id", "cell")))
 
 func _initialize_player_face_profiles() -> void:
 	_player_face_profiles.clear()
@@ -1915,7 +2014,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		await get_tree().process_frame
 
 func _update_npc_streaming() -> void:
-	if not _npc_stream_enabled or _npc_stream_busy or _world_loading or data_reader == null:
+	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
 		return
 	_npc_stream_scan_cooldown = maxf(0.0, _npc_stream_scan_cooldown - get_process_delta_time())
 	if _npc_stream_scan_cooldown > 0.0:
