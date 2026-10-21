@@ -1,7 +1,7 @@
 extends RefCounted
 ## Stores generated Godot resources in the ignored project cache.
 
-const CONVERTER_VERSION := "openob-resource-v3"
+const CONVERTER_VERSION := "openob-resource-v4"
 const CACHE_ROOT := "res://.godot/openob/cache/"
 
 static func key_for(source_bytes: PackedByteArray, resource_kind: String) -> String:

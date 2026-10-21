@@ -162,7 +162,7 @@ func _load_game_data() -> void:
 	])
 	await _load_cell_geometry(current_cell)
 	_place_player_at_start(current_cell)
-	_place_fallback_support(_player_start_position)
+	await _place_player_on_ground(_player_start_position)
 	await _load_player_avatar()
 	await _load_cell_actors(current_cell)
 	player.set_physics_process(true)
@@ -186,6 +186,34 @@ func _place_fallback_support(feet_position: Vector3) -> void:
 	_fallback_support.global_position = feet_position - Vector3.UP * 0.075
 	player.global_position = feet_position
 	player.velocity = Vector3.ZERO
+
+func _place_player_on_ground(feet_position: Vector3) -> void:
+	if is_instance_valid(_fallback_support):
+		_fallback_support.queue_free()
+		_fallback_support = null
+		await get_tree().physics_frame
+	player.global_position = feet_position
+	player.velocity = Vector3.ZERO
+	await get_tree().physics_frame
+	var query := PhysicsRayQueryParameters3D.create(
+		feet_position + Vector3.UP * 1.5,
+		feet_position - Vector3.UP * 3.0,
+		2,
+		[player.get_rid()]
+	)
+	query.collide_with_areas = false
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	var hit_position: Vector3 = result.get("position", feet_position)
+	var hit_normal: Vector3 = result.get("normal", Vector3.UP)
+	if not result.is_empty() and hit_normal.dot(Vector3.UP) >= 0.55:
+		player.global_position = Vector3(feet_position.x, hit_position.y + 0.02, feet_position.z)
+		player.velocity = Vector3.ZERO
+		print("OpenOB grounded player at cell floor: marker_y=%.3f floor_y=%.3f offset=%.3fm" % [
+			feet_position.y, hit_position.y, hit_position.y - feet_position.y
+		])
+		return
+	_place_fallback_support(feet_position)
+	push_warning("No walkable cell floor was found below the player start; using temporary support at the start marker")
 
 func _log_runtime_spawn_positions() -> void:
 	if _npc_actors.is_empty():
@@ -358,6 +386,7 @@ func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
 		return null
 	var shape := ConcavePolygonShape3D.new()
+	shape.backface_collision = true
 	shape.set_faces(faces)
 	return shape
 
@@ -1539,9 +1568,10 @@ func _transition_to_next_linked_cell() -> void:
 	_transition_index = 0
 	await _load_cell_geometry(current_cell)
 	var destination: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
+	var destination_position := player.global_position
 	if destination.size() >= 3:
-		var destination_position := Vector3(destination[0], destination[2], -destination[1]) * game_units_to_meters
-		_place_fallback_support(destination_position)
+		destination_position = Vector3(destination[0], destination[2], -destination[1]) * game_units_to_meters
+	await _place_player_on_ground(destination_position)
 	var destination_rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
 	if destination_rotation.size() >= 3:
 		var source_to_godot := Basis(Vector3.RIGHT, Vector3(0.0, 0.0, -1.0), Vector3(0.0, 1.0, 0.0))
