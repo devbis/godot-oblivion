@@ -344,6 +344,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     outfit.form_id = form_id;
     AiPackageRecord ai_package;
     ai_package.form_id = form_id;
+    int race_part_section = -1;
+    int race_part_index = -1;
+    bool race_part_female = false;
     if (is_reference)
         reference.record_type.assign(type);
     std::string base_editor_id;
@@ -428,8 +431,49 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             target.reserve(subrecord_size / 4);
             for (std::size_t offset = 0; offset < subrecord_size; offset += 4)
                 target.push_back(f32(value + offset));
+        } else if (tag == "FGTS" && is_race && subrecord_size % 4 == 0) {
+            auto& target = race_face_gen.face_texture_coefficients;
+            target.clear();
+            target.reserve(subrecord_size / 4);
+            for (std::size_t offset = 0; offset < subrecord_size; offset += 4)
+                target.push_back(f32(value + offset));
+        } else if (tag == "NAM0" && is_race) {
+            race_part_section = 0;
+            race_part_index = -1;
+        } else if (tag == "NAM1" && is_race) {
+            race_part_section = 1;
+            race_part_index = 4;
+        } else if (tag == "MNAM" && is_race) {
+            race_part_female = false;
+        } else if (tag == "FNAM" && is_race) {
+            race_part_female = true;
+        } else if (tag == "INDX" && is_race && subrecord_size >= 4) {
+            race_part_index = static_cast<int>(u32(value));
+        } else if (tag == "MODL" && is_race && race_part_section >= 0 && race_part_index >= 0) {
+            const auto path = read_zstring(value, subrecord_size);
+            if (race_part_section == 0 && race_part_index < 9) {
+                auto& parts = race_part_female ? race_face_gen.head_parts_female : race_face_gen.head_parts_male;
+                parts[static_cast<std::size_t>(race_part_index)].model_path = path;
+            } else if (race_part_section == 1 && race_part_index < 5) {
+                auto& parts = race_part_female ? race_face_gen.body_parts_female : race_face_gen.body_parts_male;
+                parts[static_cast<std::size_t>(race_part_index)].model_path = path;
+            }
+        } else if (tag == "ICON" && is_race && race_part_section >= 0 && race_part_index >= 0) {
+            const auto path = read_zstring(value, subrecord_size);
+            if (race_part_section == 0 && race_part_index < 9) {
+                auto& parts = race_part_female ? race_face_gen.head_parts_female : race_face_gen.head_parts_male;
+                parts[static_cast<std::size_t>(race_part_index)].texture_path = path;
+            } else if (race_part_section == 1 && race_part_index < 5) {
+                auto& parts = race_part_female ? race_face_gen.body_parts_female : race_face_gen.body_parts_male;
+                parts[static_cast<std::size_t>(race_part_index)].texture_path = path;
+            }
         } else if (tag == "FGTS" && is_npc_base) {
             npc.face_texture.assign(value, value + subrecord_size);
+            if (subrecord_size % 4 == 0) {
+                npc.face_texture_coefficients.reserve(subrecord_size / 4);
+                for (std::size_t offset = 0; offset < subrecord_size; offset += 4)
+                    npc.face_texture_coefficients.push_back(f32(value + offset));
+            }
         } else if (tag == "DOFT" && is_npc_base && subrecord_size >= 4) {
             npc.default_outfit_form_id = u32(value);
         } else if (tag == "CNTO" && is_npc_base && subrecord_size >= 8) {

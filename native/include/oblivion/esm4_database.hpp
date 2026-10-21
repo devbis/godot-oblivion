@@ -48,6 +48,7 @@ struct NpcBaseRecord {
     std::array<std::uint8_t, 4> hair_color{};
     std::vector<float> face_symmetric;
     std::vector<float> face_asymmetric;
+    std::vector<float> face_texture_coefficients;
     std::vector<std::uint8_t> face_texture;
     std::vector<NpcInventoryEntry> inventory;
     std::vector<std::uint32_t> ai_package_form_ids;
@@ -57,6 +58,15 @@ struct RaceFaceGenRecord {
     std::uint32_t form_id = 0;
     std::vector<float> face_symmetric;
     std::vector<float> face_asymmetric;
+    std::vector<float> face_texture_coefficients;
+    struct Part {
+        std::string model_path;
+        std::string texture_path;
+    };
+    std::array<Part, 9> head_parts_male{};
+    std::array<Part, 9> head_parts_female{};
+    std::array<Part, 5> body_parts_male{};
+    std::array<Part, 5> body_parts_female{};
 };
 
 struct OutfitRecord {

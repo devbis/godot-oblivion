@@ -14,7 +14,12 @@
 #include <godot_cpp/godot.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -44,10 +49,105 @@ PackedFloat32Array add_face_coefficients(const std::vector<float>& race,
     return result;
 }
 
+template <std::size_t Size>
+Array race_parts_to_array(const std::array<oblivion::RaceFaceGenRecord::Part, Size>& parts) {
+    Array result;
+    for (const auto& part : parts) {
+        Dictionary item;
+        item["model_path"] = String::utf8(part.model_path.c_str());
+        item["texture_path"] = String::utf8(part.texture_path.c_str());
+        result.push_back(item);
+    }
+    return result;
+}
+
+template <std::size_t Size>
+bool has_race_parts(const std::array<oblivion::RaceFaceGenRecord::Part, Size>& parts) {
+    return std::any_of(parts.begin(), parts.end(), [](const auto& part) {
+        return !part.model_path.empty() || !part.texture_path.empty();
+    });
+}
+
 const std::vector<float>& race_shape_coefficients(const oblivion::RaceFaceGenRecord* race, bool symmetric) {
     static const std::vector<float> empty;
     if (!race) return empty;
     return symmetric ? race->face_symmetric : race->face_asymmetric;
+}
+
+std::uint32_t read_u32_le(const std::uint8_t* bytes) {
+    return static_cast<std::uint32_t>(bytes[0])
+        | (static_cast<std::uint32_t>(bytes[1]) << 8)
+        | (static_cast<std::uint32_t>(bytes[2]) << 16)
+        | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+PackedByteArray apply_facegen_texture(const PackedByteArray& image_data, std::int64_t width,
+                                     std::int64_t height, const PackedByteArray& egt_data,
+                                     const PackedFloat32Array& coefficients) {
+    constexpr std::size_t header_size = 64;
+    if (width <= 0 || height <= 0 || egt_data.size() < static_cast<std::int64_t>(header_size)) return {};
+    const auto* egt = egt_data.ptr();
+    if (std::string_view(reinterpret_cast<const char*>(egt), 8) != "FREGT003") return {};
+
+    const std::uint32_t rows = read_u32_le(egt + 8);
+    const std::uint32_t columns = read_u32_le(egt + 12);
+    const std::uint32_t symmetric_count = read_u32_le(egt + 16);
+    const std::uint32_t asymmetric_count = read_u32_le(egt + 20);
+    if (rows == 0 || columns == 0 || rows % static_cast<std::uint32_t>(height) != 0
+        || columns % static_cast<std::uint32_t>(width) != 0
+        || symmetric_count > 256 || asymmetric_count > 256) return {};
+
+    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t egt_pixels = static_cast<std::size_t>(rows) * columns;
+    const std::size_t scale_y = rows / static_cast<std::uint32_t>(height);
+    const std::size_t scale_x = columns / static_cast<std::uint32_t>(width);
+    const std::size_t sample_count = scale_x * scale_y;
+    const std::size_t mode_size = sizeof(float) + egt_pixels * 3;
+    const std::size_t mode_count = static_cast<std::size_t>(symmetric_count) + asymmetric_count;
+    if (pixels > static_cast<std::size_t>(image_data.size()) / 4
+        || header_size + mode_count * mode_size != static_cast<std::size_t>(egt_data.size())
+        || coefficients.is_empty()) return {};
+
+    const auto coefficient_count = std::min<std::size_t>(symmetric_count, coefficients.size());
+    std::vector<float> deltas(pixels * 3, 0.0f);
+    for (std::size_t mode = 0; mode < coefficient_count; ++mode) {
+        const std::size_t mode_offset = header_size + mode * mode_size;
+        const float scale = std::bit_cast<float>(read_u32_le(egt + mode_offset));
+        const float weight = coefficients[static_cast<std::int64_t>(mode)] * scale;
+        if (!std::isfinite(weight) || std::abs(weight) < 0.000001f) continue;
+        const auto* mode_deltas = egt + mode_offset + sizeof(float);
+        const auto* red = mode_deltas;
+        const auto* green = mode_deltas + egt_pixels;
+        const auto* blue = mode_deltas + egt_pixels * 2;
+        for (std::size_t y = 0; y < static_cast<std::size_t>(height); ++y) {
+            for (std::size_t x = 0; x < static_cast<std::size_t>(width); ++x) {
+                const std::size_t image_pixel = y * static_cast<std::size_t>(width) + x;
+                std::array<float, 3> average_delta{};
+                for (std::size_t dy = 0; dy < scale_y; ++dy) {
+                    const std::size_t egt_row = static_cast<std::size_t>(rows) - (y * scale_y + dy) - 1;
+                    for (std::size_t dx = 0; dx < scale_x; ++dx) {
+                        const std::size_t egt_pixel = egt_row * columns + x * scale_x + dx;
+                        average_delta[0] += static_cast<std::int8_t>(red[egt_pixel]);
+                        average_delta[1] += static_cast<std::int8_t>(green[egt_pixel]);
+                        average_delta[2] += static_cast<std::int8_t>(blue[egt_pixel]);
+                    }
+                }
+                for (std::size_t channel = 0; channel < 3; ++channel)
+                    deltas[image_pixel * 3 + channel] += average_delta[channel] / static_cast<float>(sample_count) * weight;
+            }
+        }
+    }
+
+    PackedByteArray result = image_data;
+    auto* output = result.ptrw();
+    const auto* source = image_data.ptr();
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            const float value = static_cast<float>(source[pixel * 4 + channel]) + deltas[pixel * 3 + channel];
+            output[pixel * 4 + channel] = static_cast<std::uint8_t>(std::clamp(std::lround(value), 0l, 255l));
+        }
+    }
+    return result;
 }
 
 } // namespace
@@ -166,6 +266,20 @@ public:
         for (int64_t i = 0; i < static_cast<int64_t>(npc->face_texture.size()); ++i)
             face_texture.set(i, npc->face_texture[static_cast<std::size_t>(i)]);
         result["face_texture"] = face_texture;
+        result["face_texture_coefficients"] = add_face_coefficients(
+            race ? race->face_texture_coefficients : std::vector<float>{}, npc->face_texture_coefficients);
+        if (race) {
+            const bool female = (npc->flags & 0x000001) != 0;
+            const auto& head_parts = female && has_race_parts(race->head_parts_female)
+                ? race->head_parts_female : race->head_parts_male;
+            const auto& body_parts = female && has_race_parts(race->body_parts_female)
+                ? race->body_parts_female : race->body_parts_male;
+            result["race_head_parts"] = race_parts_to_array(head_parts);
+            result["race_body_parts"] = race_parts_to_array(body_parts);
+        } else {
+            result["race_head_parts"] = Array{};
+            result["race_body_parts"] = Array{};
+        }
         Array inventory;
         for (const auto& item : npc->inventory) {
             Dictionary entry;
@@ -261,6 +375,12 @@ public:
         for (int64_t i = 0; i < static_cast<int64_t>(bytes.size()); ++i)
             result.set(i, bytes[static_cast<std::size_t>(i)]);
         return result;
+    }
+
+    PackedByteArray apply_facegen_texture_data(const PackedByteArray& image_data, int64_t width,
+                                               int64_t height, const PackedByteArray& egt_data,
+                                               const PackedFloat32Array& coefficients) const {
+        return apply_facegen_texture(image_data, width, height, egt_data, coefficients);
     }
 
     bool request_nif_meshes(const String& asset_path) {
@@ -447,6 +567,8 @@ protected:
         ClassDB::bind_method(D_METHOD("find_editor_id", "form_id"), &OblivionData::find_editor_id);
         ClassDB::bind_method(D_METHOD("find_record_type", "form_id"), &OblivionData::find_record_type);
         ClassDB::bind_method(D_METHOD("read_asset", "asset_path"), &OblivionData::read_asset);
+        ClassDB::bind_method(D_METHOD("apply_facegen_texture_data", "image_data", "width", "height",
+                                      "egt_data", "coefficients"), &OblivionData::apply_facegen_texture_data);
         ClassDB::bind_method(D_METHOD("request_nif_meshes", "asset_path"), &OblivionData::request_nif_meshes);
         ClassDB::bind_method(D_METHOD("is_asset_loading"), &OblivionData::is_asset_loading);
         ClassDB::bind_method(D_METHOD("get_asset_error"), &OblivionData::get_asset_error);

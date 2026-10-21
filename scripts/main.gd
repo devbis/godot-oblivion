@@ -106,6 +106,8 @@ var _placed_items: Dictionary = {}
 var _pickup_toast_text := ""
 var _pickup_toast_remaining := 0.0
 var _facegen_cache: Dictionary = {}
+var _facegen_texture_cache: Dictionary = {}
+var _race_texture_path_cache: Dictionary = {}
 var _facegen_expression_names: Array[String] = []
 var _active_animation := ""
 var _animation_time := 0.0
@@ -1007,26 +1009,68 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		avatar.add_child(skeleton)
 		_align_avatar_to_floor_origin(avatar, skeleton)
 		var is_female := bool(npc.get("female", false))
-		var actor_parts: Array = (FEMALE_AVATAR_PARTS if is_female else PLAYER_AVATAR_PARTS).duplicate()
-		actor_parts.pop_back()
+		var race_editor_id := str(data_reader.find_editor_id(int(npc.get("race_form_id", 0)))).to_lower()
+		var race_texture_key := _npc_race_texture_key(race_editor_id)
+		var eye_texture_path := _npc_eye_texture_path(npc, race_editor_id)
 		var head_model_path := _npc_head_model_path(npc)
+		var head_part := _npc_head_part_entry(npc)
 		_register_player_face_profile(npc, head_model_path)
-		actor_parts[actor_parts.size() - 1] = head_model_path
 		var face_meshes: Array[MeshInstance3D] = []
-		for model_path: String in actor_parts:
-			if model_path.to_lower() == head_model_path.to_lower():
-				var new_face_meshes: Array[MeshInstance3D] = await _add_actor_model(
-					avatar, skeleton, model_path, "", PackedByteArray(), npc
-				)
-				face_meshes.append_array(new_face_meshes)
-			else:
-				await _add_actor_model(avatar, skeleton, model_path)
+		for body_part: Dictionary in _npc_body_part_entries(npc, is_female):
+			await _add_actor_model(
+				avatar,
+				skeleton,
+				str(body_part.get("model_path", "")),
+				"",
+				PackedByteArray(),
+				{},
+				false,
+				race_texture_key,
+				"",
+				str(body_part.get("texture_path", ""))
+			)
+		var head_meshes: Array[MeshInstance3D] = await _add_actor_model(
+			avatar,
+			skeleton,
+			head_model_path,
+			"",
+			PackedByteArray(),
+			npc,
+			false,
+			race_texture_key,
+			"",
+			str(head_part.get("texture_path", ""))
+		)
+		face_meshes.append_array(head_meshes)
+		for detail_part: Dictionary in _npc_face_detail_entries(npc):
+			var detail_path := str(detail_part.get("model_path", ""))
+			var is_eye_model := int(detail_part.get("index", -1)) >= 7 or detail_path.to_lower().contains("eye")
+			var is_ear_model := int(detail_part.get("index", -1)) == 1 or int(detail_part.get("index", -1)) == 2 or detail_path.to_lower().contains("ear")
+			var detail_face_data: Dictionary = {} if is_ear_model else npc
+			var detail_meshes: Array[MeshInstance3D] = await _add_actor_model(
+				avatar,
+				skeleton,
+				detail_path,
+				"Bip01 Head",
+				PackedByteArray(),
+				detail_face_data,
+				is_eye_model,
+				race_texture_key,
+				eye_texture_path if is_eye_model else "",
+				str(detail_part.get("texture_path", "")),
+				true
+			)
+			face_meshes.append_array(detail_meshes)
 		var hair_form_id := int(npc.get("hair_form_id", 0))
 		var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
 		if hair_path.is_empty():
 			hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
 		var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
-		await _add_actor_model(avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, true)
+		var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
+		await _add_actor_model(
+			avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
+			"", "", "", not hair_is_model_space
+		)
 		var weapon_attached := false
 		var attached_item_names: Array[String] = []
 		for item_form_id: int in _npc_equipment_ids(npc):
@@ -1038,8 +1082,22 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			var item_path := str(data_reader.find_item_model_path(item_form_id, is_female))
 			if item_path.is_empty():
 				continue
-			var attach_bone := "Bip01 R Hand" if item_type == "WEAP" else ""
-			await _add_actor_model(avatar, skeleton, item_path, attach_bone)
+			var attach_bone := ""
+			var adjust_bone_orientation := false
+			if item_type == "WEAP":
+				attach_bone = "Bip01 R Hand"
+			else:
+				var item_slots := int(data_reader.get_item_biped_slots(item_form_id))
+				if (item_slots & 0x2000) != 0:
+					attach_bone = "Bip01 L Hand"
+					adjust_bone_orientation = true
+				elif (item_slots & 0x0003) != 0:
+					attach_bone = "Bip01 Head"
+					adjust_bone_orientation = true
+			await _add_actor_model(
+				avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, false,
+				race_texture_key, "", "", adjust_bone_orientation
+			)
 			attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
 			if item_type == "WEAP":
 				weapon_attached = true
@@ -1101,6 +1159,12 @@ func _clear_cell_actors() -> void:
 	_npc_actors.clear()
 
 func _npc_head_model_path(npc: Dictionary) -> String:
+	var race_head_parts: Array = npc.get("race_head_parts", [])
+	if not race_head_parts.is_empty():
+		var head_entry: Dictionary = race_head_parts[0]
+		var race_head_path := str(head_entry.get("model_path", ""))
+		if not race_head_path.is_empty():
+			return race_head_path
 	var race_form_id := int(npc.get("race_form_id", 0))
 	var race_editor_id := str(data_reader.find_editor_id(race_form_id)).to_lower()
 	match race_editor_id:
@@ -1113,6 +1177,150 @@ func _npc_head_model_path(npc: Dictionary) -> String:
 		_:
 			return "Characters/Imperial/headhuman.nif"
 
+func _npc_head_part_entry(npc: Dictionary) -> Dictionary:
+	var race_head_parts: Array = npc.get("race_head_parts", [])
+	if race_head_parts.is_empty():
+		return {"model_path": _npc_head_model_path(npc), "texture_path": ""}
+	return race_head_parts[0]
+
+func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	var race_body_parts: Array = npc.get("race_body_parts", [])
+	var fallback_parts: Array = FEMALE_AVATAR_PARTS if is_female else PLAYER_AVATAR_PARTS
+	for index in range(mini(4, fallback_parts.size())):
+		var race_part: Dictionary = race_body_parts[index] if index < race_body_parts.size() else {}
+		var model_path := str(race_part.get("model_path", ""))
+		if model_path.is_empty():
+			model_path = str(fallback_parts[index])
+		entries.push_back({
+			"model_path": model_path,
+			"texture_path": str(race_part.get("texture_path", "")),
+		})
+	if race_body_parts.size() > 4:
+		var tail_part: Dictionary = race_body_parts[4]
+		var tail_model_path := str(tail_part.get("model_path", ""))
+		if not tail_model_path.is_empty():
+			entries.push_back({
+				"model_path": tail_model_path,
+				"texture_path": str(tail_part.get("texture_path", "")),
+			})
+	return entries
+
+func _npc_face_detail_entries(npc: Dictionary) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	var race_head_parts: Array = npc.get("race_head_parts", [])
+	if race_head_parts.size() >= 9:
+		var ear_index := 2 if bool(npc.get("female", false)) else 1
+		var ear_part: Dictionary = race_head_parts[ear_index]
+		if str(ear_part.get("model_path", "")).is_empty():
+			ear_index = 1 if ear_index == 2 else 2
+		for part_index in [ear_index, 3, 4, 5, 6, 7, 8]:
+			var part: Dictionary = race_head_parts[part_index]
+			var model_path := str(part.get("model_path", ""))
+			if model_path.is_empty():
+				continue
+			entries.push_back({
+				"index": part_index,
+				"model_path": model_path,
+				"texture_path": str(part.get("texture_path", "")),
+			})
+		if not entries.is_empty():
+			return entries
+	for fallback_path: String in _npc_face_detail_paths(str(data_reader.find_editor_id(int(npc.get("race_form_id", 0)))).to_lower()):
+		entries.push_back({"index": -1, "model_path": fallback_path, "texture_path": ""})
+	return entries
+
+func _npc_race_texture_key(race_editor_id: String) -> String:
+	if race_editor_id in ["argonian", "darkelf", "khajiit", "orc", "redguard"]:
+		return race_editor_id
+	return "imperial"
+
+func _npc_eye_texture_path(npc: Dictionary, race_editor_id: String) -> String:
+	var eye_name := str(data_reader.find_editor_id(int(npc.get("eye_form_id", 0)))).to_lower()
+	match eye_name:
+		"eyedefault", "":
+			match race_editor_id:
+				"argonian": eye_name = "eyeargonian"
+				"khajiit": eye_name = "eyekhajiit"
+				"darkelf": eye_name = "eyedarkelf"
+				"orc": eye_name = "eyeorc"
+				_: eye_name = "eyebrown"
+	return "Textures/Characters/Eyes/%s.dds" % eye_name
+
+func _npc_face_detail_paths(race_editor_id: String) -> Array[String]:
+	var paths: Array[String] = []
+	match race_editor_id:
+		"argonian":
+			paths.append_array([
+				"Characters/Argonian/eyeLeftArgonian.nif",
+				"Characters/Argonian/eyeRightArgonian.nif",
+				"Characters/Argonian/mouthArgonian.nif",
+				"Characters/Argonian/teethUpperArgonian.nif",
+				"Characters/Argonian/teethLowerArgonian.nif",
+				"Characters/Argonian/tongueArgonian.nif",
+			])
+		"khajiit":
+			paths.append_array([
+				"Characters/Khajiit/earsKhajiit.nif",
+				"Characters/Imperial/eyeLeftHuman.nif",
+				"Characters/Imperial/eyeRightHuman.nif",
+				"Characters/Khajiit/khajiitMouth.nif",
+				"Characters/Khajiit/khajiitTeethUpper.nif",
+				"Characters/Khajiit/khajiitTeethLower.nif",
+				"Characters/Khajiit/khajiitTongue.nif",
+			])
+		"orc":
+			paths.append_array([
+				"Characters/Orc/earsOrc.nif",
+				"Characters/Imperial/eyeLeftHuman.nif",
+				"Characters/Imperial/eyeRightHuman.nif",
+				"Characters/Orc/orcMouth.nif",
+				"Characters/Orc/orcTeethUpper.nif",
+				"Characters/Orc/orcTeethLower.nif",
+				"Characters/Orc/orcTongue.nif",
+			])
+		"darkelf":
+			paths.append_array([
+				"Characters/DarkElf/earsDarkElf.nif",
+				"Characters/Imperial/eyeLeftHuman.nif",
+				"Characters/Imperial/eyeRightHuman.nif",
+				"Characters/Imperial/mouthHuman.nif",
+				"Characters/Imperial/teethUpperHuman.nif",
+				"Characters/Imperial/teethLowerHuman.nif",
+				"Characters/Imperial/tongueHuman.nif",
+			])
+		_:
+			paths.append_array(PLAYER_FACE_DETAIL_PARTS)
+	return paths
+
+func _npc_race_texture_path(texture_path: String, race_texture_key: String) -> String:
+	var normalized_path := texture_path.to_lower().replace("\\", "/")
+	const IMPERIAL_TEXTURE_ROOT := "textures/characters/imperial/"
+	if race_texture_key == "imperial" or not normalized_path.begins_with(IMPERIAL_TEXTURE_ROOT):
+		return texture_path
+	var relative_path := normalized_path.substr(IMPERIAL_TEXTURE_ROOT.length())
+	var candidate := "textures/characters/%s/%s" % [race_texture_key, relative_path]
+	if relative_path.begins_with("headhuman"):
+		var race_head_name := ""
+		match race_texture_key:
+			"darkelf": race_head_name = "headdarkelf"
+			"khajiit": race_head_name = "headkhajiit"
+			"orc": race_head_name = "headorc"
+			"argonian": race_head_name = "headargonian"
+		if race_head_name.is_empty():
+			return texture_path
+		candidate = "textures/characters/%s/%s%s" % [
+			race_texture_key,
+			race_head_name,
+			relative_path.substr("headhuman".length()),
+		]
+	if _race_texture_path_cache.has(candidate):
+		return candidate if bool(_race_texture_path_cache[candidate]) else texture_path
+	var texture_bytes: PackedByteArray = data_reader.read_asset(candidate)
+	var found := not texture_bytes.is_empty()
+	_race_texture_path_cache[candidate] = found
+	return candidate if found else texture_path
+
 func _ensure_facegen_data(head_model_path: String) -> Dictionary:
 	var cache_key := head_model_path.to_lower().replace("\\", "/")
 	if _facegen_cache.has(cache_key):
@@ -1120,6 +1328,7 @@ func _ensure_facegen_data(head_model_path: String) -> Dictionary:
 	var asset_stem := head_model_path.replace("\\", "/").get_basename()
 	var egm_bytes: PackedByteArray = data_reader.read_asset("Meshes/" + asset_stem + ".egm")
 	var tri_bytes: PackedByteArray = data_reader.read_asset("Meshes/" + asset_stem + ".tri")
+	var egt_bytes: PackedByteArray = data_reader.read_asset("Meshes/" + asset_stem + ".egt")
 	if egm_bytes.is_empty() or tri_bytes.is_empty():
 		push_warning("Could not read FaceGen data for %s: %s" % [head_model_path, data_reader.get_error()])
 		_facegen_cache[cache_key] = {}
@@ -1144,7 +1353,7 @@ func _ensure_facegen_data(head_model_path: String) -> Dictionary:
 		var morph_name := str(morph_value.get("name", ""))
 		if not _facegen_expression_names.has(morph_name):
 			_facegen_expression_names.push_back(morph_name)
-	var decoded := {"egm": egm, "tri": tri}
+	var decoded := {"egm": egm, "tri": tri, "egt_bytes": egt_bytes}
 	_facegen_cache[cache_key] = decoded
 	print("OpenOB decoded FaceGen for %s: %d vertices, %d symmetric/%d asymmetric modes, %d expression and %d static morphs" % [
 		head_model_path,
@@ -1216,11 +1425,17 @@ func _add_actor_model(
 	attach_bone := "",
 	tint: PackedByteArray = PackedByteArray(),
 	npc_face_data: Dictionary = {},
-	model_space_bone_attachment := false
+	model_space_bone_attachment := false,
+	race_texture_key := "",
+	eye_texture_path := "",
+	texture_override := "",
+	remove_bone_rest_rotation := false
 ) -> Array[MeshInstance3D]:
 	var meshes: Array = await _meshes_for_model(model_path)
 	var attachment: Node3D = avatar
 	var added_instances: Array[MeshInstance3D] = []
+	var actor_head_model_path := _npc_head_model_path(npc_face_data) if not npc_face_data.is_empty() else ""
+	var is_actor_head := not actor_head_model_path.is_empty() and model_path.to_lower() == actor_head_model_path.to_lower()
 	if not attach_bone.is_empty():
 		var bone_attachment := BoneAttachment3D.new()
 		bone_attachment.bone_name = attach_bone
@@ -1234,13 +1449,24 @@ func _add_actor_model(
 				model_to_bone.transform = skeleton.get_bone_global_rest(bone_index).affine_inverse()
 				bone_attachment.add_child(model_to_bone)
 				attachment = model_to_bone
+		elif remove_bone_rest_rotation:
+			var bone_index := skeleton.find_bone(attach_bone)
+			if bone_index >= 0:
+				var align_to_bone := Node3D.new()
+				align_to_bone.name = "AlignModelToBoneAxes"
+				align_to_bone.transform = Transform3D(
+					skeleton.get_bone_global_rest(bone_index).basis.inverse(), Vector3.ZERO
+				)
+				bone_attachment.add_child(align_to_bone)
+				attachment = align_to_bone
 	for mesh_entry: Dictionary in meshes:
 		var instance := MeshInstance3D.new()
 		var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
 		instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
 		var source_mesh := mesh_entry.mesh as ArrayMesh
+		var facegen_data: Dictionary = {}
 		if not npc_face_data.is_empty():
-			var facegen_data := _ensure_facegen_data(model_path)
+			facegen_data = _ensure_facegen_data(model_path)
 			if not facegen_data.is_empty():
 				var face_mesh := FaceGenData.build_head_mesh(
 					source_mesh,
@@ -1254,16 +1480,32 @@ func _add_actor_model(
 				else:
 					push_warning("Could not apply FaceGen data to %s" % str(npc_face_data.get("editor_id", model_path)))
 		instance.mesh = source_mesh
+		var texture_path := str(mesh_entry.diffuse_texture_path)
+		if not texture_override.is_empty():
+			texture_path = _normalize_texture_asset_path(texture_override)
+		elif not race_texture_key.is_empty():
+			texture_path = _npc_race_texture_path(texture_path, race_texture_key)
+		if not eye_texture_path.is_empty() and model_path.to_lower().contains("eye"):
+			texture_path = eye_texture_path
 		var material := await _material_for_texture(
-			str(mesh_entry.diffuse_texture_path),
+			texture_path,
 			bool(mesh_entry.get("alpha_blend", false)),
 			bool(mesh_entry.get("alpha_test", false)),
 			int(mesh_entry.get("alpha_threshold", 128))
 		)
+		if is_actor_head and not facegen_data.get("egt_bytes", PackedByteArray()).is_empty():
+			material = _facegen_texture_material(
+				material,
+				texture_path,
+				facegen_data.egt_bytes,
+				npc_face_data.get("face_texture_coefficients", PackedFloat32Array())
+			)
 		if tint.size() >= 3:
 			material = material.duplicate() as StandardMaterial3D
 			material.albedo_color = Color8(tint[0], tint[1], tint[2], tint[3] if tint.size() > 3 and tint[3] > 0 else 255)
 		instance.material_override = material
+		if is_actor_head:
+			instance.custom_aabb = source_mesh.get_aabb().grow(PLAYER_HEAD_CULL_MARGIN)
 		attachment.add_child(instance)
 		var bone_names: Array = mesh_entry.get("bone_names", [])
 		if not bone_names.is_empty() and attach_bone.is_empty():
@@ -1271,6 +1513,56 @@ func _add_actor_model(
 			instance.skin = _skin_for_mesh(bone_names, skeleton)
 		added_instances.push_back(instance)
 	return added_instances
+
+func _facegen_texture_material(
+	base_material: StandardMaterial3D,
+	texture_path: String,
+	egt_bytes: PackedByteArray,
+	coefficients: PackedFloat32Array
+) -> StandardMaterial3D:
+	if base_material == null or base_material.albedo_texture == null or coefficients.is_empty():
+		return base_material
+	var cache_key := texture_path.to_lower().replace("\\", "/") + ":" + str(coefficients)
+	var face_texture: Texture2D
+	if _facegen_texture_cache.has(cache_key):
+		face_texture = _facegen_texture_cache[cache_key] as Texture2D
+	else:
+		var image := base_material.albedo_texture.get_image()
+		if image == null:
+			return base_material
+		image = image.duplicate()
+		if image.is_compressed():
+			if image.decompress() != OK:
+				push_warning("Could not decompress base face texture %s" % texture_path)
+				return base_material
+		image.convert(Image.FORMAT_RGBA8)
+		image.clear_mipmaps()
+		var source_bytes := image.get_data()
+		var morphed_bytes: PackedByteArray = data_reader.apply_facegen_texture_data(
+			source_bytes,
+			image.get_width(),
+			image.get_height(),
+			egt_bytes,
+			coefficients
+		)
+		if morphed_bytes.size() != source_bytes.size():
+			push_warning("Could not apply FaceGen texture coefficients to %s" % texture_path)
+			return base_material
+		var morphed_image := Image.create_from_data(
+			image.get_width(), image.get_height(), false, Image.FORMAT_RGBA8, morphed_bytes
+		)
+		morphed_image.generate_mipmaps()
+		face_texture = ImageTexture.create_from_image(morphed_image)
+		_facegen_texture_cache[cache_key] = face_texture
+	var material := base_material.duplicate() as StandardMaterial3D
+	material.albedo_texture = face_texture
+	return material
+
+func _normalize_texture_asset_path(texture_path: String) -> String:
+	var normalized := texture_path.strip_edges().replace("\\", "/")
+	if normalized.to_lower().begins_with("characters/"):
+		return "Textures/" + normalized
+	return normalized
 
 func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 	var position: PackedFloat32Array = reference.get("position", PackedFloat32Array())
@@ -1490,7 +1782,12 @@ func _update_npc_actors(delta: float) -> void:
 		)
 		actor["animation_blend_elapsed"] = blend_elapsed
 		var blend_weight := blend_elapsed / ANIMATION_BLEND_DURATION
-		var pose_from: Array[Dictionary] = actor.get("animation_from_pose", [])
+		var pose_from: Array[Dictionary] = []
+		var pose_from_value: Variant = actor.get("animation_from_pose", [])
+		if pose_from_value is Array:
+			for pose_value: Variant in pose_from_value:
+				if pose_value is Dictionary:
+					pose_from.push_back(pose_value)
 		_apply_animation_pose(skeleton, animation, float(actor["animation_time"]), true, pose_from, blend_weight)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
