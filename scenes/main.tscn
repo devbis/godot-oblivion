@@ -131,18 +131,16 @@ layout_mode = 2
 
 [node name="Title" type="Label" parent="StatusLayer/InventoryPanel/Margin/Contents"]
 layout_mode = 2
-text = "Inventory · I to close"
+text = "Inventory · click gear to equip · I to close"
 
 [node name="Scroll" type="ScrollContainer" parent="StatusLayer/InventoryPanel/Margin/Contents"]
 custom_minimum_size = Vector2(330, 210)
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Items" type="Label" parent="StatusLayer/InventoryPanel/Margin/Contents/Scroll"]
+[node name="Items" type="VBoxContainer" parent="StatusLayer/InventoryPanel/Margin/Contents/Scroll"]
 layout_mode = 2
 size_flags_horizontal = 3
-autowrap_mode = 2
-text = "Empty"
 
 [node name="FaceProfile" type="Label" parent="StatusLayer"]
 anchor_left = 1.0

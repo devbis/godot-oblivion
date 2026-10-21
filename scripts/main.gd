@@ -56,7 +56,7 @@ const TEXTURE_FALLBACKS := {
 @onready var status_label: Label = $StatusLayer/StatusPanel/Margin/Status
 @onready var inventory_label: Label = $StatusLayer/Inventory
 @onready var inventory_panel: PanelContainer = $StatusLayer/InventoryPanel
-@onready var inventory_items_label: Label = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
+@onready var inventory_items_container: VBoxContainer = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
 @onready var player: CharacterBody3D = $Player
@@ -739,21 +739,40 @@ func _add_inventory_item(form_id: int, amount: int = 1) -> void:
 
 func _refresh_inventory_hud() -> void:
 	var item_count := 0
-	var item_lines := PackedStringArray()
+	var inventory_form_ids: Array[int] = []
+	for child in inventory_items_container.get_children():
+		child.queue_free()
 	for amount_value: Variant in _player_inventory.values():
 		item_count += int(amount_value)
 	for form_id_value: Variant in _player_inventory.keys():
-		var form_id := int(form_id_value)
+		inventory_form_ids.push_back(int(form_id_value))
+	inventory_form_ids.sort()
+	for form_id: int in inventory_form_ids:
 		var item_name := str(data_reader.find_editor_id(form_id)) if data_reader != null else ""
 		if item_name.is_empty():
 			item_name = "Item %08X" % form_id
 		var item_type := str(data_reader.find_record_type(form_id)) if data_reader != null else ""
 		var equipped := _player_equipment.has(form_id) or _player_weapon_form_id == form_id
 		var equipped_label := " · equipped" if equipped else ""
-		item_lines.push_back("%s  %s ×%d%s" % [item_type, item_name, int(_player_inventory[form_id]), equipped_label])
-	item_lines.sort()
+		var item_button := Button.new()
+		item_button.text = "%s  %s ×%d%s" % [item_type, item_name, int(_player_inventory[form_id]), equipped_label]
+		item_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		item_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		item_button.disabled = item_type not in ["ARMO", "CLOT", "WEAP"]
+		if not item_button.disabled:
+			item_button.pressed.connect(_equip_inventory_item.bind(form_id))
+		inventory_items_container.add_child(item_button)
+	if inventory_form_ids.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "Empty"
+		inventory_items_container.add_child(empty_label)
 	inventory_label.text = "Inventory: %d items · %d types" % [item_count, _player_inventory.size()]
-	inventory_items_label.text = "\n".join(item_lines) if not item_lines.is_empty() else "Empty"
+
+func _equip_inventory_item(form_id: int) -> void:
+	if _world_loading or not _inventory_open:
+		return
+	if await _equip_player_item(form_id):
+		_refresh_inventory_hud()
 
 func _toggle_inventory() -> void:
 	if _world_loading:
