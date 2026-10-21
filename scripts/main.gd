@@ -74,7 +74,6 @@ var _pickup_toast_text := ""
 var _pickup_toast_remaining := 0.0
 var _facegen_cache: Dictionary = {}
 var _facegen_expression_names: Array[String] = []
-var _face_expression_indices: Dictionary = {}
 var _active_animation := ""
 var _animation_time := 0.0
 var _npc_actors: Array[Dictionary] = []
@@ -430,12 +429,13 @@ func _load_player_avatar() -> void:
 		"face_expression_previous": "",
 		"face_expression_previous_weight": 0.0,
 		"face_expression_transition": 0.25,
+		"expression_cycle": _available_face_expression_cycle(_player_face_meshes),
 		"blink_cooldown": randf_range(2.5, 5.5),
 		"blink_remaining": 0.0,
 	}
-	_face_expression_indices["Player"] = 0
 	_apply_face_expression(_player_face_state)
 	_refresh_player_face_profile_hint()
+	print("OpenOB player FaceGen expressions: %s" % str(_player_face_state.expression_cycle))
 	var clothing_count := await _load_player_starting_clothing(avatar)
 	if part_count > 0:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
@@ -509,9 +509,12 @@ func _cycle_player_face_profile() -> void:
 func _cycle_player_face_expression() -> void:
 	if _world_loading or _player_face_state.is_empty():
 		return
-	var expression_index := (int(_face_expression_indices.get("Player", 0)) + 1) % FACE_EXPRESSION_CYCLE.size()
-	_face_expression_indices["Player"] = expression_index
-	var expression_name := str(FACE_EXPRESSION_CYCLE[expression_index])
+	var expression_cycle: Array = _player_face_state.get("expression_cycle", [""])
+	if expression_cycle.size() < 2:
+		return
+	var current_index := expression_cycle.find(str(_player_face_state.get("face_expression", "")))
+	var expression_index := (current_index + 1) % expression_cycle.size()
+	var expression_name := str(expression_cycle[expression_index])
 	_set_face_expression(_player_face_state, expression_name, 0.75)
 	_refresh_player_face_profile_hint()
 	print("OpenOB set player face expression to %s" % (expression_name if not expression_name.is_empty() else "neutral"))
@@ -742,6 +745,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			"Idle": _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE, skeleton),
 			"Forward": _animation_sequence(PLAYER_WALK_KF, "Forward", skeleton),
 		}
+		var expression_cycle := _available_face_expression_cycle(face_meshes)
 		var waypoints := _npc_waypoints(cell, actor_name, npc)
 		if not waypoints.is_empty():
 			routed_actor_count += 1
@@ -751,7 +755,8 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			print("OpenOB route for %s uses %d ESM marker targets at %s m/s" % [actor_name, waypoints.size(), str(route_speeds)])
 		actor_root.call("configure_route", waypoints, actor_name == "ValenDrethRef", 1.2 if not waypoints.is_empty() else 0.0)
 		var initial_expression := "Happy" if actor_name == "ValenDrethRef" else "Fear" if actor_name == "UrielSeptimRef" else ""
-		_face_expression_indices[actor_name] = max(0, FACE_EXPRESSION_CYCLE.find(initial_expression))
+		if not expression_cycle.has(initial_expression):
+			initial_expression = ""
 		var actor_state := {
 			"name": actor_name,
 			"root": actor_root,
@@ -762,6 +767,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			"face_expression_previous": "",
 			"face_expression_previous_weight": 0.0,
 			"face_expression_transition": 0.0,
+			"expression_cycle": expression_cycle,
 			"blink_cooldown": randf_range(2.5, 5.5),
 			"blink_remaining": 0.0,
 			"animations": animations,
@@ -1000,6 +1006,10 @@ func set_npc_expression(actor_name: String, expression_name: String, weight := 1
 	for actor: Dictionary in _npc_actors:
 		if str(actor.get("name", "")) != actor_name:
 			continue
+		var expression_cycle: Array = actor.get("expression_cycle", [""])
+		if not expression_cycle.has(expression_name):
+			push_warning("NPC %s has no FaceGen expression morph named %s" % [actor_name, expression_name])
+			return
 		_set_face_expression(actor, expression_name, weight)
 		return
 
@@ -1027,11 +1037,27 @@ func _cycle_nearest_npc_face_expression() -> void:
 	if nearest_actor.is_empty():
 		return
 	var actor_name := str(nearest_actor.get("name", ""))
-	var expression_index := (int(_face_expression_indices.get(actor_name, 0)) + 1) % FACE_EXPRESSION_CYCLE.size()
-	_face_expression_indices[actor_name] = expression_index
-	var expression_name := str(FACE_EXPRESSION_CYCLE[expression_index])
+	var expression_cycle: Array = nearest_actor.get("expression_cycle", [""])
+	if expression_cycle.size() < 2:
+		return
+	var current_index := expression_cycle.find(str(nearest_actor.get("face_expression", "")))
+	var expression_index := (current_index + 1) % expression_cycle.size()
+	var expression_name := str(expression_cycle[expression_index])
 	set_npc_expression(actor_name, expression_name, 0.75)
 	print("OpenOB set %s face expression to %s" % [actor_name, expression_name if not expression_name.is_empty() else "neutral"])
+
+func _available_face_expression_cycle(face_meshes: Array) -> Array[String]:
+	var expression_cycle: Array[String] = [""]
+	for expression_value: Variant in FACE_EXPRESSION_CYCLE:
+		var expression_name := str(expression_value)
+		if expression_name.is_empty():
+			continue
+		for instance_value: Variant in face_meshes:
+			var instance := instance_value as MeshInstance3D
+			if is_instance_valid(instance) and instance.mesh != null and _blend_shape_index(instance.mesh, StringName(expression_name)) >= 0:
+				expression_cycle.push_back(expression_name)
+				break
+	return expression_cycle
 
 func _apply_face_expression(actor: Dictionary) -> void:
 	for instance_value: Variant in actor.get("face_meshes", []):
