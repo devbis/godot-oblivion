@@ -1581,9 +1581,7 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 	var rotation: PackedFloat32Array = reference.get("rotation", PackedFloat32Array())
 	if position.size() < 3 or rotation.size() < 3:
 		return Transform3D.IDENTITY
-	var source_to_godot := Basis(Vector3.RIGHT, Vector3(0.0, 0.0, -1.0), Vector3(0.0, 1.0, 0.0))
-	var source_rotation := Basis.from_euler(Vector3(rotation[0], rotation[1], rotation[2]))
-	var godot_rotation := (source_to_godot * source_rotation * source_to_godot.inverse()).orthonormalized()
+	var godot_rotation := _reference_rotation(rotation)
 	var godot_position := Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 	return Transform3D(godot_rotation, godot_position)
 
@@ -2227,11 +2225,21 @@ func _reference_transform(reference: Dictionary) -> Transform3D:
 	var rotation: PackedFloat32Array = reference.get("rotation", PackedFloat32Array())
 	if position.size() < 3 or rotation.size() < 3:
 		return Transform3D.IDENTITY
-	var source_to_godot := Basis(Vector3.RIGHT, Vector3(0.0, 0.0, -1.0), Vector3(0.0, 1.0, 0.0))
-	var source_rotation := Basis.from_euler(Vector3(rotation[0], rotation[1], rotation[2]))
-	var godot_rotation := source_to_godot * source_rotation * source_to_godot.inverse()
+	var godot_rotation := _reference_rotation(rotation)
 	var godot_position := Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 	return Transform3D(godot_rotation.scaled(Vector3.ONE * game_units_to_meters), godot_position)
+
+func _reference_rotation(rotation: PackedFloat32Array) -> Basis:
+	if rotation.size() < 3:
+		return Basis.IDENTITY
+	var source_to_godot := Basis(Vector3.RIGHT, Vector3(0.0, 0.0, -1.0), Vector3.UP)
+	# TES4 reference angles use Z-Y-X composition around negative source axes.
+	var source_rotation := (
+		Basis(Vector3(0.0, 0.0, -1.0), rotation[2])
+		* Basis(Vector3(0.0, -1.0, 0.0), rotation[1])
+		* Basis(Vector3(-1.0, 0.0, 0.0), rotation[0])
+	)
+	return (source_to_godot * source_rotation * source_to_godot.inverse()).orthonormalized()
 
 func _place_player_at_start(cell: Dictionary) -> bool:
 	if _place_player_at_start_marker(cell):
@@ -2303,9 +2311,7 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 	await _place_player_on_ground(destination_position)
 	var destination_rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
 	if destination_rotation.size() >= 3:
-		var source_to_godot := Basis(Vector3.RIGHT, Vector3(0.0, 0.0, -1.0), Vector3(0.0, 1.0, 0.0))
-		var source_rotation := Basis.from_euler(Vector3(destination_rotation[0], destination_rotation[1], destination_rotation[2]))
-		var godot_rotation := (source_to_godot * source_rotation * source_to_godot.inverse()).orthonormalized()
+		var godot_rotation := _reference_rotation(destination_rotation)
 		player.set_spawn_yaw(godot_rotation.get_euler().y)
 	await _load_cell_actors(current_cell)
 	player.set_physics_process(true)
