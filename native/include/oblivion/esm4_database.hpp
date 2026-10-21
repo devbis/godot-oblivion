@@ -87,11 +87,21 @@ struct AiPackageRecord {
 
 struct CellRecord {
     std::uint32_t form_id = 0;
+    std::uint32_t worldspace_form_id = 0;
     std::string editor_id;
     std::string display_name;
     bool interior = true;
+    bool exterior_grid_cell = false;
+    bool has_grid = false;
+    bool has_water_level = false;
+    bool has_worldspace_water_level = false;
     std::int32_t grid_x = 0;
     std::int32_t grid_y = 0;
+    float water_height = 0.0f;
+    float worldspace_water_height = 0.0f;
+    std::vector<float> land_heights;
+    std::uint32_t land_texture_form_id = 0;
+    std::string land_texture_path;
     std::vector<PlacedReference> references;
 };
 
@@ -132,6 +142,8 @@ private:
     std::map<std::uint32_t, std::string> world_item_model_by_id_;
     std::map<std::uint32_t, std::string> female_world_item_model_by_id_;
     std::map<std::uint32_t, std::uint16_t> item_biped_slots_by_id_;
+    std::map<std::uint32_t, std::string> land_texture_path_by_id_;
+    std::map<std::uint32_t, float> worldspace_water_level_by_id_;
     std::map<std::uint32_t, std::string> record_type_by_id_;
     std::map<std::uint32_t, std::uint32_t> cell_by_reference_id_;
     std::map<std::string, float> float_game_settings_;
@@ -139,8 +151,8 @@ private:
 
     void parse_file(const std::vector<std::uint8_t>& bytes);
     void parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t flags,
-                      std::uint32_t active_cell_id, const std::uint8_t* data,
-                      std::size_t data_size);
+                      std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
+                      bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size);
 };
 
 } // namespace oblivion

@@ -37,9 +37,6 @@ namespace {
 constexpr std::uint32_t kCompressedRecord = 0x00040000;
 constexpr std::uint32_t kGroup = 0x50555247; // GRUP, little endian
 constexpr std::uint32_t kCellChildGroup = 6;
-constexpr std::uint32_t kCellPersistentGroup = 8;
-constexpr std::uint32_t kCellTemporaryGroup = 9;
-constexpr std::uint32_t kCellVisibleDistanceGroup = 10;
 constexpr std::size_t kTes4RecordHeaderSize = 20;
 // Oblivion's TES4 records and GRUP headers are 20 bytes; later TES5 headers
 // add the two-byte form version and two-byte unknown fields.
@@ -108,8 +105,10 @@ std::vector<std::uint8_t> decompress_record(const std::uint8_t* data, std::size_
 }
 
 bool is_cell_reference_group(std::uint32_t type) {
-    return type == kCellChildGroup || type == kCellPersistentGroup
-        || type == kCellTemporaryGroup || type == kCellVisibleDistanceGroup;
+    // Only type 6 introduces a cell ID. Its type 8/9/10 children inherit it.
+    // Type 8 can also occur directly under a worldspace and holds world-wide
+    // persistent references, so its label must not be treated as a cell ID.
+    return type == kCellChildGroup;
 }
 
 std::string lower_ascii(std::string value) {
@@ -136,12 +135,25 @@ void Esm4Database::open(const std::filesystem::path& path) {
     world_item_model_by_id_.clear();
     female_world_item_model_by_id_.clear();
     item_biped_slots_by_id_.clear();
+    land_texture_path_by_id_.clear();
+    worldspace_water_level_by_id_.clear();
     record_type_by_id_.clear();
     cell_by_reference_id_.clear();
     float_game_settings_.clear();
     record_count_ = 0;
     const auto bytes = read_file(path);
     parse_file(bytes);
+    for (auto& cell : cells_) {
+        if (const auto water = worldspace_water_level_by_id_.find(cell.worldspace_form_id);
+            water != worldspace_water_level_by_id_.end()) {
+            cell.has_worldspace_water_level = true;
+            cell.worldspace_water_height = water->second;
+        }
+        if (const auto texture = land_texture_path_by_id_.find(cell.land_texture_form_id);
+            texture != land_texture_path_by_id_.end())
+            cell.land_texture_path = texture->second.find('/') == std::string::npos
+                ? "textures/landscape/" + texture->second : texture->second;
+    }
     for (const auto& [form_id, editor_id] : base_editor_id_by_id_)
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
@@ -272,7 +284,8 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
     const std::size_t records_begin = kTes4RecordHeaderSize + header_data_size;
 
     auto walk = [&](auto&& self, std::size_t begin, std::size_t end,
-                    std::uint32_t active_cell_id) -> void {
+                    std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
+                    bool exterior_grid_context) -> void {
         std::size_t cursor = begin;
         while (cursor < end) {
             check_range(end, cursor, 4, "record type");
@@ -285,7 +298,12 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
                 if (group_size < kGroupHeaderSize || group_size > end - cursor)
                     throw std::runtime_error("ESM4 GRUP has an invalid size");
                 const auto child_cell_id = is_cell_reference_group(group_type) ? group_label : active_cell_id;
-                self(self, cursor + kGroupHeaderSize, cursor + group_size, child_cell_id);
+                const auto child_worldspace_id = group_type == 1 ? group_label : worldspace_form_id;
+                const bool child_exterior_grid_context = group_type == 4 || group_type == 5
+                    ? true : group_type == 1 || group_type == 2 || group_type == 3
+                        ? false : exterior_grid_context;
+                self(self, cursor + kGroupHeaderSize, cursor + group_size, child_cell_id,
+                     child_worldspace_id, child_exterior_grid_context);
                 cursor += group_size;
                 continue;
             }
@@ -302,9 +320,11 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
                 inflated = decompress_record(record_data, data_size, std::string_view(record_type, 4), form_id);
                 record_data = inflated.data();
                 parse_record(std::string_view(record_type, 4), form_id, flags, active_cell_id,
+                             worldspace_form_id, exterior_grid_context,
                              record_data, inflated.size());
             } else {
                 parse_record(std::string_view(record_type, 4), form_id, flags, active_cell_id,
+                             worldspace_form_id, exterior_grid_context,
                              record_data, data_size);
             }
             ++record_count_;
@@ -314,12 +334,12 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
 
     if (records_begin > bytes.size())
         throw std::runtime_error("ESM header record extends beyond the file");
-    walk(walk, records_begin, bytes.size(), 0);
+    walk(walk, records_begin, bytes.size(), 0, 0, false);
 }
 
 void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t,
-                                std::uint32_t active_cell_id, const std::uint8_t* data,
-                                std::size_t data_size) {
+                                std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
+                                bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size) {
     bool is_cell = type == "CELL";
     bool is_reference = type == "REFR" || type == "ACHR" || type == "ACRE";
     bool is_game_setting = type == "GMST";
@@ -327,6 +347,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_race = type == "RACE";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
+    bool is_land = type == "LAND";
+    bool is_land_texture = type == "LTEX";
+    bool is_worldspace = type == "WRLD";
     const bool is_item_model = type == "ARMO" || type == "CLOT" || type == "WEAP"
         || type == "HAIR" || type == "EYES" || type == "ALCH" || type == "AMMO"
         || type == "APPA" || type == "BOOK" || type == "INGR" || type == "KEYM"
@@ -344,6 +367,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     outfit.form_id = form_id;
     AiPackageRecord ai_package;
     ai_package.form_id = form_id;
+    std::vector<float> land_heights;
+    std::map<std::uint32_t, std::size_t> land_texture_usage;
     int race_part_section = -1;
     int race_part_index = -1;
     bool race_part_female = false;
@@ -383,11 +408,42 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             cell.display_name = read_zstring(value, subrecord_size);
         } else if (tag == "FULL" && is_npc_base) {
             npc.name = read_zstring(value, subrecord_size);
-        } else if (tag == "DATA" && is_cell && subrecord_size >= 2) {
-            cell.interior = (u16(value) & 0x0001) != 0;
+        } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
+            const std::uint16_t cell_flags = subrecord_size >= 2 ? u16(value) : value[0];
+            cell.interior = (cell_flags & 0x0001) != 0;
         } else if (tag == "XCLC" && is_cell && subrecord_size >= 8) {
             cell.grid_x = static_cast<std::int32_t>(u32(value));
             cell.grid_y = static_cast<std::int32_t>(u32(value + 4));
+            cell.has_grid = true;
+        } else if (tag == "XCLW" && is_cell && subrecord_size >= 4) {
+            cell.water_height = f32(value);
+            cell.has_water_level = true;
+        } else if (tag == "ICON" && is_land_texture) {
+            const auto texture_path = read_zstring(value, subrecord_size);
+            if (!texture_path.empty()) land_texture_path_by_id_[form_id] = texture_path;
+        } else if (tag == "DNAM" && is_worldspace && subrecord_size >= 8) {
+            worldspace_water_level_by_id_[form_id] = f32(value + 4);
+        } else if (tag == "VHGT" && is_land && subrecord_size >= 4 + 33 * 33) {
+            constexpr std::size_t side = 33;
+            land_heights.resize(side * side);
+            float row_offset = f32(value);
+            for (std::size_t y = 0; y < side; ++y) {
+                row_offset += static_cast<std::int8_t>(value[4 + y * side]);
+                land_heights[y * side] = row_offset * 8.0f;
+                float column_offset = row_offset;
+                for (std::size_t x = 1; x < side; ++x) {
+                    column_offset += static_cast<std::int8_t>(value[4 + y * side + x]);
+                    land_heights[y * side + x] = column_offset * 8.0f;
+                }
+            }
+        } else if (tag == "VTEX" && is_land && subrecord_size % 4 == 0) {
+            for (std::size_t offset = 0; offset < subrecord_size; offset += 4) {
+                const auto texture_id = u32(value + offset);
+                if (texture_id != 0) ++land_texture_usage[texture_id];
+            }
+        } else if ((tag == "BTXT" || tag == "ATXT") && is_land && subrecord_size >= 4) {
+            const auto texture_id = u32(value);
+            if (texture_id != 0) ++land_texture_usage[texture_id];
         } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT")) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
@@ -511,11 +567,23 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
 
     if (is_cell) {
+        cell.worldspace_form_id = worldspace_form_id;
+        cell.exterior_grid_cell = exterior_grid_context;
         cell_by_id_[form_id] = cells_.size();
         cells_.push_back(std::move(cell));
     } else if (is_reference && active_cell_id != 0) {
         if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end())
             cells_[cell_it->second].references.push_back(std::move(reference));
+    } else if (is_land && active_cell_id != 0) {
+        if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end()) {
+            CellRecord& parent_cell = cells_[cell_it->second];
+            if (!land_heights.empty()) parent_cell.land_heights = std::move(land_heights);
+            if (!land_texture_usage.empty()) {
+                const auto dominant = std::max_element(land_texture_usage.begin(), land_texture_usage.end(),
+                    [](const auto& left, const auto& right) { return left.second < right.second; });
+                parent_cell.land_texture_form_id = dominant->first;
+            }
+        }
     }
     if (is_npc_base)
         npc_by_id_[form_id] = std::move(npc);
@@ -525,6 +593,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         outfit_by_id_[form_id] = std::move(outfit);
     if (is_ai_package)
         ai_package_by_id_[form_id] = std::move(ai_package);
+    if (is_worldspace)
+        worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
     record_type_by_id_[form_id] = std::string(type);
     if (!base_editor_id.empty())
         base_editor_id_by_id_[form_id] = std::move(base_editor_id);

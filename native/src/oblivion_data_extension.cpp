@@ -24,6 +24,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 
 namespace godot {
 namespace {
@@ -214,6 +215,72 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return result;
         for (const auto& cell : data_->cells()) result.push_back(cell_to_dictionary(cell));
+        return result;
+    }
+
+    Dictionary find_exterior_region(int64_t grid_x, int64_t grid_y,
+                                    int64_t worldspace_form_id, int64_t radius) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto& cells = data_->cells();
+        const oblivion::CellRecord* center = nullptr;
+        for (const auto& cell : cells) {
+            if (cell.exterior_grid_cell && !cell.interior && cell.has_grid
+                && cell.worldspace_form_id == static_cast<std::uint32_t>(worldspace_form_id)
+                && cell.grid_x == grid_x && cell.grid_y == grid_y) {
+                center = &cell;
+                break;
+            }
+        }
+        if (!center) return {};
+
+        const auto range = std::max<int64_t>(0, std::min<int64_t>(radius, 3));
+        Dictionary result = cell_to_dictionary(*center);
+        Array references;
+        Array land_cells;
+        Array water_cells;
+        std::unordered_set<std::uint32_t> seen_references;
+        for (const auto& cell : cells) {
+            if (cell.worldspace_form_id != center->worldspace_form_id) continue;
+            if (cell.exterior_grid_cell && !cell.interior && cell.has_grid
+                && std::abs(static_cast<int64_t>(cell.grid_x) - grid_x) <= range
+                && std::abs(static_cast<int64_t>(cell.grid_y) - grid_y) <= range) {
+                if (cell.land_heights.size() == 33 * 33) {
+                    Dictionary land;
+                    land["grid_x"] = cell.grid_x;
+                    land["grid_y"] = cell.grid_y;
+                    PackedFloat32Array heights;
+                    heights.resize(static_cast<int64_t>(cell.land_heights.size()));
+                    for (int64_t i = 0; i < heights.size(); ++i)
+                        heights.set(i, cell.land_heights[static_cast<std::size_t>(i)]);
+                    land["heights"] = heights;
+                    land["texture_path"] = as_string(cell.land_texture_path);
+                    land_cells.push_back(land);
+                }
+                if (cell.has_water_level || center->has_worldspace_water_level) {
+                    Dictionary water;
+                    water["grid_x"] = cell.grid_x;
+                    water["grid_y"] = cell.grid_y;
+                    water["height"] = cell.has_water_level
+                        ? cell.water_height : center->worldspace_water_height;
+                    water_cells.push_back(water);
+                }
+            }
+            for (const auto& reference : cell.references) {
+                const auto reference_grid_x = static_cast<int64_t>(std::floor(reference.position[0] / 4096.0f));
+                const auto reference_grid_y = static_cast<int64_t>(std::floor(reference.position[1] / 4096.0f));
+                if (std::abs(reference_grid_x - grid_x) > range
+                    || std::abs(reference_grid_y - grid_y) > range
+                    || !seen_references.insert(reference.form_id).second)
+                    continue;
+                references.push_back(reference_to_dictionary(reference));
+            }
+        }
+        result["references"] = references;
+        result["land_cells"] = land_cells;
+        result["water_cells"] = water_cells;
+        result["display_name"] = String("Exterior (") + String::num_int64(grid_x)
+            + ", " + String::num_int64(grid_y) + ")";
         return result;
     }
 
@@ -556,6 +623,8 @@ protected:
         ClassDB::bind_method(D_METHOD("get_error"), &OblivionData::get_error);
         ClassDB::bind_method(D_METHOD("get_summary"), &OblivionData::get_summary);
         ClassDB::bind_method(D_METHOD("list_cells"), &OblivionData::list_cells);
+        ClassDB::bind_method(D_METHOD("find_exterior_region", "grid_x", "grid_y", "worldspace_form_id", "radius"),
+                             &OblivionData::find_exterior_region);
         ClassDB::bind_method(D_METHOD("find_cell", "editor_id"), &OblivionData::find_cell);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
@@ -578,32 +647,53 @@ protected:
 private:
     static String as_string(const std::string& value) { return String::utf8(value.c_str()); }
 
+    static Dictionary reference_to_dictionary(const oblivion::PlacedReference& reference) {
+        Dictionary entry;
+        entry["form_id"] = static_cast<int64_t>(reference.form_id);
+        entry["base_form_id"] = static_cast<int64_t>(reference.base_form_id);
+        entry["record_type"] = as_string(reference.record_type);
+        entry["reference_name"] = as_string(reference.reference_name);
+        entry["base_editor_id"] = as_string(reference.base_editor_id);
+        entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};
+        entry["rotation"] = PackedFloat32Array{reference.rotation[0], reference.rotation[1], reference.rotation[2]};
+        entry["teleport_ref_id"] = static_cast<int64_t>(reference.teleport_ref_id);
+        entry["teleport_cell_id"] = static_cast<int64_t>(reference.teleport_cell_id);
+        entry["teleport_position"] = PackedFloat32Array{reference.teleport_position[0], reference.teleport_position[1], reference.teleport_position[2]};
+        entry["teleport_rotation"] = PackedFloat32Array{reference.teleport_rotation[0], reference.teleport_rotation[1], reference.teleport_rotation[2]};
+        entry["editor_id"] = as_string(reference.editor_id);
+        entry["model_path"] = as_string(reference.model_path);
+        return entry;
+    }
+
     static Dictionary cell_to_dictionary(const oblivion::CellRecord& cell) {
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(cell.form_id);
+        result["worldspace_form_id"] = static_cast<int64_t>(cell.worldspace_form_id);
         result["editor_id"] = as_string(cell.editor_id);
         result["display_name"] = as_string(cell.display_name);
         result["interior"] = cell.interior;
+        result["exterior_grid_cell"] = cell.exterior_grid_cell;
+        result["has_grid"] = cell.has_grid;
+        result["has_water_level"] = cell.has_water_level;
+        result["has_worldspace_water_level"] = cell.has_worldspace_water_level;
         result["grid_x"] = cell.grid_x;
         result["grid_y"] = cell.grid_y;
-        Array references;
-        for (const auto& reference : cell.references) {
-            Dictionary entry;
-            entry["form_id"] = static_cast<int64_t>(reference.form_id);
-            entry["base_form_id"] = static_cast<int64_t>(reference.base_form_id);
-            entry["record_type"] = as_string(reference.record_type);
-            entry["reference_name"] = as_string(reference.reference_name);
-            entry["base_editor_id"] = as_string(reference.base_editor_id);
-            entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};
-            entry["rotation"] = PackedFloat32Array{reference.rotation[0], reference.rotation[1], reference.rotation[2]};
-            entry["teleport_ref_id"] = static_cast<int64_t>(reference.teleport_ref_id);
-            entry["teleport_cell_id"] = static_cast<int64_t>(reference.teleport_cell_id);
-            entry["teleport_position"] = PackedFloat32Array{reference.teleport_position[0], reference.teleport_position[1], reference.teleport_position[2]};
-            entry["teleport_rotation"] = PackedFloat32Array{reference.teleport_rotation[0], reference.teleport_rotation[1], reference.teleport_rotation[2]};
-            entry["editor_id"] = as_string(reference.editor_id);
-            entry["model_path"] = as_string(reference.model_path);
-            references.push_back(entry);
+        result["water_height"] = cell.water_height;
+        result["worldspace_water_height"] = cell.worldspace_water_height;
+        if (cell.land_heights.size() == 33 * 33) {
+            Dictionary land;
+            land["grid_x"] = cell.grid_x;
+            land["grid_y"] = cell.grid_y;
+            PackedFloat32Array heights;
+            heights.resize(static_cast<int64_t>(cell.land_heights.size()));
+            for (int64_t i = 0; i < heights.size(); ++i)
+                heights.set(i, cell.land_heights[static_cast<std::size_t>(i)]);
+            land["heights"] = heights;
+            land["texture_path"] = as_string(cell.land_texture_path);
+            result["land"] = land;
         }
+        Array references;
+        for (const auto& reference : cell.references) references.push_back(reference_to_dictionary(reference));
         result["references"] = references;
         return result;
     }

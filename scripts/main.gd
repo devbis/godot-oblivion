@@ -40,6 +40,10 @@ const PLAYER_FACE_DETAIL_PARTS := [
 const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const LINKED_DOOR_INTERACTION_DISTANCE := 2.5
+const EXTERIOR_CELL_SIZE := 4096.0
+const EXTERIOR_STREAM_RADIUS := 1
+const EXTERIOR_REFERENCE_RENDER_DISTANCE := 30.0
+const EXTERIOR_COLLISION_DISTANCE := 18.0
 const PLAYER_AVATAR_PARTS := [
 	"Characters/_male/upperbody.nif",
 	"Characters/_male/lowerbody.nif",
@@ -74,6 +78,7 @@ const TEXTURE_FALLBACKS := {
 @onready var face_view_button: Button = $StatusLayer/FaceView
 @onready var fly_mode_button: Button = $StatusLayer/FlyMode
 @onready var player: CharacterBody3D = $Player
+@onready var world_environment: WorldEnvironment = $WorldEnvironment
 
 var data_reader: Object
 var current_cell: Dictionary = {}
@@ -85,6 +90,11 @@ var _material_cache: Dictionary = {}
 var _texture_cache: Dictionary = {}
 var _cell_load_generation := 0
 var _cell_material: StandardMaterial3D
+var _interior_environment: Environment
+var _exterior_environment: Environment
+var _land_mesh_cache: Dictionary = {}
+var _land_collision_cache: Dictionary = {}
+var _water_material: StandardMaterial3D
 var _world_loading := true
 var _interact_ready := true
 var _player_skeleton: Skeleton3D
@@ -130,9 +140,34 @@ func _ready() -> void:
 	_cell_material.albedo_color = Color(0.62, 0.58, 0.5)
 	_cell_material.roughness = 0.9
 	_cell_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_interior_environment = world_environment.environment
+	_exterior_environment = _make_exterior_environment()
 	status_label.text = "OpenOB data reader starting…"
 	fly_mode_button.pressed.connect(_toggle_fly_mode)
 	_load_game_data()
+
+func _make_exterior_environment() -> Environment:
+	var sky_material := ProceduralSkyMaterial.new()
+	sky_material.sky_top_color = Color(0.12, 0.22, 0.38)
+	sky_material.sky_horizon_color = Color(0.58, 0.69, 0.78)
+	sky_material.ground_bottom_color = Color(0.17, 0.19, 0.16)
+	sky_material.ground_horizon_color = Color(0.48, 0.52, 0.48)
+	var sky := Sky.new()
+	sky.sky_material = sky_material
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_SKY
+	environment.sky = sky
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	environment.ambient_light_energy = 0.45
+	environment.ambient_light_sky_contribution = 0.35
+	return environment
+
+func _set_cell_environment(cell: Dictionary) -> void:
+	var is_exterior := not bool(cell.get("interior", true))
+	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
+	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+	if camera != null:
+		camera.far = 70.0 if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
 	_pickup_toast_remaining = maxf(0.0, _pickup_toast_remaining - _delta)
@@ -153,6 +188,8 @@ func _process(_delta: float) -> void:
 			await _pick_up_placed_item(nearby_item)
 			if not Input.is_action_pressed("interact"):
 				_interact_ready = true
+	if not _world_loading and not current_cell.is_empty() and not bool(current_cell.get("interior", true)):
+		await _stream_exterior_if_needed()
 	if _player_skeleton != null and not _world_loading:
 		if not _inventory_open:
 			_update_player_animation(_delta)
@@ -202,20 +239,38 @@ func _load_game_data() -> void:
 		status_label.text = "Data load failed: %s" % data_reader.get_error()
 		return
 
-	current_cell = data_reader.find_cell(START_CELL_ID)
-	if current_cell.is_empty():
-		status_label.text = "Loaded game data, but %s was not found." % START_CELL_ID
-		return
+	var sewer_exit_spawn: Dictionary = {}
+	if OS.get_cmdline_user_args().has("--start-at-sewer-exit"):
+		sewer_exit_spawn = _sewer_exit_start_data()
+		if sewer_exit_spawn.is_empty():
+			status_label.text = "Could not find the Imperial Sewer exit. Start without --start-at-sewer-exit to begin in the prison."
+			return
+		current_cell = sewer_exit_spawn.get("cell", {})
+	else:
+		current_cell = data_reader.find_cell(START_CELL_ID)
+		if current_cell.is_empty():
+			status_label.text = "Loaded game data, but %s was not found." % START_CELL_ID
+			return
 
 	var summary: Dictionary = data_reader.get_summary()
-	status_label.text = "Imperial Prison index ready (%d references, %d cells, %d archives). Loading NIF meshes…" % [
+	var start_label := "Imperial Prison" if sewer_exit_spawn.is_empty() else "Imperial Sewer exit"
+	status_label.text = "%s index ready (%d references, %d cells, %d archives). Loading NIF meshes…" % [
+		start_label,
 		current_cell.references.size(), summary.cell_count, summary.archive_count
 	]
 	print("OpenOB indexed %s: %d references, %d cells, %d archives" % [
-		START_CELL_ID, current_cell.references.size(), summary.cell_count, summary.archive_count
+		start_label, current_cell.references.size(), summary.cell_count, summary.archive_count
 	])
+	if not sewer_exit_spawn.is_empty():
+		_player_start_position = sewer_exit_spawn.get("position", Vector3.ZERO)
+		player.global_position = _player_start_position
+		var spawn_rotation: Vector3 = sewer_exit_spawn.get("rotation", Vector3.ZERO)
+		player.set_spawn_yaw(spawn_rotation.y)
 	await _load_cell_geometry(current_cell)
-	_place_player_at_start(current_cell)
+	if sewer_exit_spawn.is_empty():
+		_place_player_at_start(current_cell)
+	else:
+		print("OpenOB started at the sewer exit: %s" % str(player.global_position))
 	await _place_player_on_ground(_player_start_position)
 	await _load_player_avatar()
 	await _load_cell_actors(current_cell)
@@ -225,6 +280,40 @@ func _load_game_data() -> void:
 	player.capture_mouse()
 	await get_tree().create_timer(1.0).timeout
 	_log_runtime_spawn_positions()
+
+func _sewer_exit_start_data() -> Dictionary:
+	var sewer_cell: Dictionary = data_reader.find_cell("ImperialSewerSystemN01")
+	if sewer_cell.is_empty():
+		return {}
+	for reference: Dictionary in sewer_cell.get("references", []):
+		if str(reference.get("base_editor_id", "")).to_lower() != "sewerexitgate02":
+			continue
+		var destination_cell: Dictionary = data_reader.find_cell_by_id(int(reference.get("teleport_cell_id", 0)))
+		if destination_cell.is_empty() or bool(destination_cell.get("interior", true)):
+			continue
+		var destination: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
+		if destination.size() < 3:
+			continue
+		var grid_x := floori(destination[0] / EXTERIOR_CELL_SIZE)
+		var grid_y := floori(destination[1] / EXTERIOR_CELL_SIZE)
+		var exterior_cell: Dictionary = data_reader.find_exterior_region(
+			grid_x,
+			grid_y,
+			int(destination_cell.get("worldspace_form_id", 0)),
+			EXTERIOR_STREAM_RADIUS
+		)
+		if exterior_cell.is_empty():
+			continue
+		var rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
+		var spawn_rotation := Vector3.ZERO
+		if rotation.size() >= 3:
+			spawn_rotation = _reference_rotation(rotation).get_euler()
+		return {
+			"cell": exterior_cell,
+			"position": Vector3(destination[0], destination[2], -destination[1]) * game_units_to_meters,
+			"rotation": spawn_rotation,
+		}
+	return {}
 
 func _place_fallback_support(feet_position: Vector3) -> void:
 	if not is_instance_valid(_fallback_support):
@@ -324,9 +413,11 @@ func _game_data_path() -> String:
 func _load_cell_geometry(cell: Dictionary) -> void:
 	_cell_load_generation += 1
 	var generation := _cell_load_generation
+	_set_cell_environment(cell)
 	_placed_items.clear()
 	if has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = true
+		$TestFloor/CollisionShape3D.disabled = false
 	for child in cell_visual_root.get_children():
 		child.queue_free()
 	await get_tree().process_frame
@@ -334,11 +425,35 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	var instance_count := 0
 	var reference_count := 0
 	var collision_count := 0
+	var culled_reference_count := 0
+	var skipped_gate_count := 0
+	var terrain_cells: Array = cell.get("land_cells", [])
+	if terrain_cells.is_empty() and cell.has("land"):
+		terrain_cells.push_back(cell.get("land"))
+	for land_value: Variant in terrain_cells:
+		if generation != _cell_load_generation:
+			return
+		var land: Dictionary = land_value
+		if await _add_land_cell(land):
+			instance_count += 1
+			collision_count += 1
+	for water_value: Variant in cell.get("water_cells", []):
+		if generation != _cell_load_generation:
+			return
+		if _add_water_cell(water_value):
+			instance_count += 1
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
 			return
 		var model_path := str(reference.get("model_path", ""))
 		if model_path.is_empty() or not model_path.to_lower().ends_with(".nif"):
+			continue
+		var reference_transform := _reference_transform(reference)
+		if not bool(cell.get("interior", true)) and reference_transform.origin.distance_to(player.global_position) > EXTERIOR_REFERENCE_RENDER_DISTANCE:
+			culled_reference_count += 1
+			continue
+		if _is_early_oblivion_gate(reference, model_path):
+			skipped_gate_count += 1
 			continue
 		var base_form_id := int(reference.get("base_form_id", 0))
 		var base_type := str(data_reader.find_record_type(base_form_id))
@@ -358,7 +473,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 				bool(mesh_entry.get("alpha_test", false)),
 				int(mesh_entry.get("alpha_threshold", 128))
 			)
-			instance.transform = _reference_transform(reference)
+			instance.transform = reference_transform
 			cell_visual_root.add_child(instance)
 			if is_pickup_item:
 				item_mesh_instances.push_back(instance)
@@ -370,10 +485,13 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 				"base_form_id": base_form_id,
 				"record_type": base_type,
 				"editor_id": str(data_reader.find_editor_id(base_form_id)),
-				"position": _reference_transform(reference).origin,
+				"position": reference_transform.origin,
 				"mesh_instances": item_mesh_instances,
 			}
-		if not is_pickup_item and _should_collide_model(model_path):
+		if not is_pickup_item and _should_collide_model(model_path) and (
+			bool(cell.get("interior", true))
+			or reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_DISTANCE
+		):
 			var model_key := model_path.to_lower().replace("\\", "/")
 			var collision_shape := _collision_cache.get(model_key) as ConcavePolygonShape3D
 			if collision_shape != null:
@@ -381,7 +499,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 				static_body.name = "GeneratedStaticMeshCollision"
 				static_body.collision_layer = 2
 				static_body.collision_mask = 0
-				static_body.transform = _reference_transform(reference)
+				static_body.transform = reference_transform
 				var collision_instance := CollisionShape3D.new()
 				collision_instance.shape = collision_shape
 				static_body.add_child(collision_instance)
@@ -394,18 +512,150 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 
 	if generation != _cell_load_generation:
 		return
-	if instance_count > 0 and has_node("TestFloor/MeshInstance3D"):
-		$TestFloor/MeshInstance3D.visible = false
+	if has_node("TestFloor/MeshInstance3D"):
+		$TestFloor/MeshInstance3D.visible = collision_count == 0
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
-	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
-		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
+	var cell_label := str(cell.get("display_name", ""))
+	if cell_label.is_empty():
+		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
+	status_label.text = "Cell: %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
+		cell_label, cell.references.size(), instance_count, collision_count
 	]
 	_update_interaction_hint({}, {})
 	_refresh_inventory_hud()
-	print("OpenOB displayed %s: %d placed NIF references, %d meshes" % [
-		cell.get("editor_id", "(unnamed)"), reference_count, instance_count
+	print("OpenOB displayed %s: %d NIF references, %d meshes, %d terrain tiles; culled %d distant references, skipped %d gates" % [
+		cell_label, reference_count, instance_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
+
+func _add_land_cell(land: Dictionary) -> bool:
+	var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
+	if heights.size() != 33 * 33:
+		return false
+	var grid_x := int(land.get("grid_x", 0))
+	var grid_y := int(land.get("grid_y", 0))
+	var cache_key := "%d,%d" % [grid_x, grid_y]
+	var mesh := _land_mesh_cache.get(cache_key) as ArrayMesh
+	if mesh == null:
+		mesh = _build_land_mesh(heights)
+		if mesh == null:
+			return false
+		_land_mesh_cache[cache_key] = mesh
+	var instance := MeshInstance3D.new()
+	instance.name = "Terrain_%d_%d" % [grid_x, grid_y]
+	instance.mesh = mesh
+	var texture_path := str(land.get("texture_path", ""))
+	if texture_path.is_empty():
+		texture_path = "textures/landscape/terrainhddirt01.dds"
+	instance.material_override = await _material_for_texture(texture_path)
+	instance.scale = Vector3.ONE * game_units_to_meters
+	instance.position = Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
+	cell_visual_root.add_child(instance)
+
+	var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
+	if collision == null:
+		collision = _build_concave_shape(mesh.get_faces())
+		if collision != null:
+			_land_collision_cache[cache_key] = collision
+	if collision != null:
+		var body := StaticBody3D.new()
+		body.name = "TerrainCollision_%d_%d" % [grid_x, grid_y]
+		body.collision_layer = 2
+		body.collision_mask = 0
+		body.scale = Vector3.ONE * game_units_to_meters
+		body.position = instance.position
+		var collision_instance := CollisionShape3D.new()
+		collision_instance.shape = collision
+		body.add_child(collision_instance)
+		cell_visual_root.add_child(body)
+	return collision != null
+
+func _build_land_mesh(heights: PackedFloat32Array) -> ArrayMesh:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for y in range(32):
+		for x in range(32):
+			var top_left := _land_vertex(x, y, heights)
+			var top_right := _land_vertex(x + 1, y, heights)
+			var bottom_left := _land_vertex(x, y + 1, heights)
+			var bottom_right := _land_vertex(x + 1, y + 1, heights)
+			var uv_top_left := Vector2(float(x) * 12.0 / 32.0, float(y) * 12.0 / 32.0)
+			var uv_top_right := Vector2(float(x + 1) * 12.0 / 32.0, float(y) * 12.0 / 32.0)
+			var uv_bottom_left := Vector2(float(x) * 12.0 / 32.0, float(y + 1) * 12.0 / 32.0)
+			var uv_bottom_right := Vector2(float(x + 1) * 12.0 / 32.0, float(y + 1) * 12.0 / 32.0)
+			surface.set_uv(uv_top_left)
+			surface.add_vertex(top_left)
+			surface.set_uv(uv_top_right)
+			surface.add_vertex(top_right)
+			surface.set_uv(uv_bottom_left)
+			surface.add_vertex(bottom_left)
+			surface.set_uv(uv_top_right)
+			surface.add_vertex(top_right)
+			surface.set_uv(uv_bottom_right)
+			surface.add_vertex(bottom_right)
+			surface.set_uv(uv_bottom_left)
+			surface.add_vertex(bottom_left)
+	surface.index()
+	surface.generate_normals()
+	return surface.commit() as ArrayMesh
+
+func _land_vertex(x: int, y: int, heights: PackedFloat32Array) -> Vector3:
+	return Vector3(float(x) * 128.0, heights[y * 33 + x], -float(y) * 128.0)
+
+func _add_water_cell(water: Dictionary) -> bool:
+	if _water_material == null:
+		_water_material = StandardMaterial3D.new()
+		_water_material.albedo_color = Color(0.08, 0.3, 0.43, 0.72)
+		_water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_water_material.roughness = 0.24
+		_water_material.metallic = 0.08
+		_water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var grid_x := int(water.get("grid_x", 0))
+	var grid_y := int(water.get("grid_y", 0))
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(EXTERIOR_CELL_SIZE, EXTERIOR_CELL_SIZE)
+	var instance := MeshInstance3D.new()
+	instance.name = "Water_%d_%d" % [grid_x, grid_y]
+	instance.mesh = plane
+	instance.material_override = _water_material
+	instance.scale = Vector3.ONE * game_units_to_meters
+	instance.position = Vector3(
+		(grid_x + 0.5) * EXTERIOR_CELL_SIZE,
+		float(water.get("height", 0.0)),
+		-(grid_y + 0.5) * EXTERIOR_CELL_SIZE
+	) * game_units_to_meters
+	cell_visual_root.add_child(instance)
+	return true
+
+func _is_early_oblivion_gate(reference: Dictionary, model_path: String) -> bool:
+	var identifiers := ("%s %s %s %s" % [
+		str(reference.get("editor_id", "")),
+		str(reference.get("base_editor_id", "")),
+		str(reference.get("reference_name", "")),
+		model_path,
+	]).to_lower().replace("_", "").replace(" ", "")
+	return (identifiers.contains("oblivion") and identifiers.contains("gate")) or identifiers.contains("obgate")
+
+func _stream_exterior_if_needed() -> void:
+	var worldspace_form_id := int(current_cell.get("worldspace_form_id", 0))
+	var cell_size_meters := EXTERIOR_CELL_SIZE * game_units_to_meters
+	var grid_x := floori(player.global_position.x / cell_size_meters)
+	var grid_y := floori(-player.global_position.z / cell_size_meters)
+	if grid_x == int(current_cell.get("grid_x", 0)) and grid_y == int(current_cell.get("grid_y", 0)):
+		return
+	var exterior_region: Dictionary = data_reader.find_exterior_region(
+		grid_x, grid_y, worldspace_form_id, EXTERIOR_STREAM_RADIUS
+	)
+	if exterior_region.is_empty():
+		return
+	_world_loading = true
+	player.set_physics_process(false)
+	_clear_cell_actors()
+	current_cell = exterior_region
+	await _load_cell_geometry(current_cell)
+	await _load_cell_actors(current_cell)
+	player.set_physics_process(true)
+	_world_loading = false
 
 func _meshes_for_model(model_path: String) -> Array:
 	var key := model_path.to_lower().replace("\\", "/")
@@ -988,6 +1238,11 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		var reference: Dictionary = reference_value
 		if str(reference.get("record_type", "")) != "ACHR":
 			continue
+		if not bool(cell.get("interior", true)):
+			if _is_early_oblivion_gate(reference, str(reference.get("model_path", ""))):
+				continue
+			if _actor_reference_transform(reference).origin.distance_to(player.global_position) > EXTERIOR_REFERENCE_RENDER_DISTANCE:
+				continue
 		var npc: Dictionary = data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
 		if npc.is_empty():
 			continue
@@ -2346,14 +2601,33 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 		status_label.text = "Linked door target 0x%08X is not indexed." % target_id
 		_world_loading = false
 		return
-	player.set_physics_process(false)
-	_clear_cell_actors()
-	current_cell = target
-	await _load_cell_geometry(current_cell)
 	var destination: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
+	if not bool(target.get("interior", true)):
+		if destination.size() < 2:
+			status_label.text = "Exterior door is missing its destination coordinates."
+			_world_loading = false
+			return
+		var grid_x := floori(destination[0] / EXTERIOR_CELL_SIZE)
+		var grid_y := floori(destination[1] / EXTERIOR_CELL_SIZE)
+		var exterior_region: Dictionary = data_reader.find_exterior_region(
+			grid_x,
+			grid_y,
+			int(target.get("worldspace_form_id", 0)),
+			EXTERIOR_STREAM_RADIUS
+		)
+		if exterior_region.is_empty():
+			status_label.text = "Exterior cell %d,%d was not found." % [grid_x, grid_y]
+			_world_loading = false
+			return
+		target = exterior_region
 	var destination_position := player.global_position
 	if destination.size() >= 3:
 		destination_position = Vector3(destination[0], destination[2], -destination[1]) * game_units_to_meters
+	player.set_physics_process(false)
+	_clear_cell_actors()
+	player.global_position = destination_position
+	current_cell = target
+	await _load_cell_geometry(current_cell)
 	await _place_player_on_ground(destination_position)
 	var destination_rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
 	if destination_rotation.size() >= 3:
