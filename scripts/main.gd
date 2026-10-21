@@ -54,7 +54,7 @@ const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
 const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.08
 const EXTERIOR_CAMERA_FAR := 430.0
 const EXTERIOR_SHADOW_DISTANCE := 28.0
-const STARTUP_NEAR_REFERENCE_DISTANCE := 28.0
+const STARTUP_NEAR_REFERENCE_DISTANCE := 18.0
 const STARTUP_NEAR_TERRAIN_DISTANCE := 86.0
 const NPC_NEAR_LOAD_DISTANCE := 18.0
 const NPC_VISIBLE_LOAD_DISTANCE := 72.0
@@ -308,13 +308,13 @@ func _load_game_data() -> void:
 		_place_player_at_start(current_cell)
 	else:
 		print("OpenOB started at the sewer exit: %s" % str(player.global_position))
+	await _load_player_avatar()
 	await _load_cell_geometry(
 		current_cell, 0.0,
 		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
 		true
 	)
 	await _place_player_on_ground(_player_start_position)
-	await _load_player_avatar()
 	player.set_physics_process(true)
 	_world_loading = false
 	_npc_stream_enabled = false
