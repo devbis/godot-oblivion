@@ -358,7 +358,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	if instance_count > 0 and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = false
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
-	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
+	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
 		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
 	]
 	_update_interaction_hint({})

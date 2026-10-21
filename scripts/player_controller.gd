@@ -66,6 +66,14 @@ func handle_camera_input(event: InputEvent) -> void:
 		)
 		_apply_camera_orbit()
 		get_viewport().set_input_as_handled()
+	elif event is InputEventPanGesture:
+		if not is_zero_approx(event.delta.y):
+			_set_camera_distance(_target_camera_distance + event.delta.y * camera_zoom_speed * 0.01)
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMagnifyGesture:
+		if event.factor > 0.0 and not is_equal_approx(event.factor, 1.0):
+			_set_camera_distance(_target_camera_distance / event.factor)
+			get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_set_camera_distance(_target_camera_distance - camera_zoom_speed * 0.25)
