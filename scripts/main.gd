@@ -25,6 +25,7 @@ const PLAYER_JUMP_KFS := {
 	"JumpLand": ["Characters/_male/jumpland.kf", "JumpLand"],
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
+const ANIMATION_BLEND_DURATION := 0.18
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_HEAD_CULL_MARGIN := 128.0
 const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
@@ -108,6 +109,8 @@ var _facegen_cache: Dictionary = {}
 var _facegen_expression_names: Array[String] = []
 var _active_animation := ""
 var _animation_time := 0.0
+var _player_animation_from_pose: Array[Dictionary] = []
+var _player_animation_blend_elapsed := ANIMATION_BLEND_DURATION
 var _player_was_on_floor := true
 var _npc_actors: Array[Dictionary] = []
 var _player_start_position := Vector3.ZERO
@@ -1077,6 +1080,8 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			"animations": animations,
 			"active_animation": "",
 			"animation_time": 0.0,
+			"animation_from_pose": [],
+			"animation_blend_elapsed": ANIMATION_BLEND_DURATION,
 		}
 		_npc_actors.push_back(actor_state)
 		_apply_face_expression(actor_state)
@@ -1474,10 +1479,21 @@ func _update_npc_actors(delta: float) -> void:
 		if animation.is_empty():
 			continue
 		if requested_animation != str(actor.get("active_animation", "")):
+			actor["animation_from_pose"] = _capture_skeleton_pose(skeleton)
+			actor["animation_blend_elapsed"] = 0.0
 			actor["active_animation"] = requested_animation
 			actor["animation_time"] = float(animation.get("start_time", 0.0))
 		actor["animation_time"] = float(actor.get("animation_time", 0.0)) + delta
-		_apply_animation_pose(skeleton, animation, float(actor["animation_time"]))
+		var blend_elapsed := minf(
+			float(actor.get("animation_blend_elapsed", ANIMATION_BLEND_DURATION)) + delta,
+			ANIMATION_BLEND_DURATION
+		)
+		actor["animation_blend_elapsed"] = blend_elapsed
+		var blend_weight := blend_elapsed / ANIMATION_BLEND_DURATION
+		var pose_from: Array[Dictionary] = actor.get("animation_from_pose", [])
+		_apply_animation_pose(skeleton, animation, float(actor["animation_time"]), true, pose_from, blend_weight)
+		if blend_weight >= 1.0:
+			actor["animation_from_pose"] = []
 
 func _build_player_skeleton(node_data: Array) -> Skeleton3D:
 	if node_data.is_empty():
@@ -1594,12 +1610,26 @@ func _update_player_animation(delta: float) -> void:
 	if animation.is_empty():
 		return
 	_animation_time += delta
+	_player_animation_blend_elapsed = minf(
+		_player_animation_blend_elapsed + delta,
+		ANIMATION_BLEND_DURATION
+	)
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
 	var duration := stop_time - start_time
 	if duration <= 0.0:
 		return
-	_apply_animation_pose(_player_skeleton, animation, _animation_time, _active_animation not in ["JumpStart", "JumpLand"])
+	var blend_weight := _player_animation_blend_elapsed / ANIMATION_BLEND_DURATION
+	_apply_animation_pose(
+		_player_skeleton,
+		animation,
+		_animation_time,
+		_active_animation not in ["JumpStart", "JumpLand"],
+		_player_animation_from_pose,
+		blend_weight
+	)
+	if blend_weight >= 1.0:
+		_player_animation_from_pose.clear()
 
 func _player_locomotion_animation(horizontal_speed: float) -> String:
 	if horizontal_speed <= 0.08:
@@ -1617,10 +1647,31 @@ func _set_player_animation(animation_name: String) -> void:
 	var animation: Dictionary = _player_animations.get(animation_name, {})
 	if animation.is_empty() or animation_name == _active_animation:
 		return
+	if _player_skeleton != null:
+		_player_animation_from_pose = _capture_skeleton_pose(_player_skeleton)
+		_player_animation_blend_elapsed = 0.0
 	_active_animation = animation_name
 	_animation_time = float(animation.get("start_time", 0.0))
 
-func _apply_animation_pose(skeleton: Skeleton3D, animation: Dictionary, time: float, looping: bool = true) -> void:
+func _capture_skeleton_pose(skeleton: Skeleton3D) -> Array[Dictionary]:
+	var pose: Array[Dictionary] = []
+	pose.resize(skeleton.get_bone_count())
+	for bone_index in range(skeleton.get_bone_count()):
+		pose[bone_index] = {
+			"position": skeleton.get_bone_pose_position(bone_index),
+			"rotation": skeleton.get_bone_pose_rotation(bone_index),
+			"scale": skeleton.get_bone_pose_scale(bone_index),
+		}
+	return pose
+
+func _apply_animation_pose(
+	skeleton: Skeleton3D,
+	animation: Dictionary,
+	time: float,
+	looping: bool = true,
+	pose_from: Array[Dictionary] = [],
+	blend_weight := 1.0
+) -> void:
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
 	var duration := stop_time - start_time
@@ -1644,6 +1695,23 @@ func _apply_animation_pose(skeleton: Skeleton3D, animation: Dictionary, time: fl
 		if scales.size() >= 2:
 			var scale_value := _sample_scalar_keys(scales, sample_time)
 			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * scale_value)
+	if pose_from.size() != skeleton.get_bone_count() or blend_weight >= 1.0:
+		return
+	var weight := clampf(blend_weight, 0.0, 1.0)
+	for bone_index in range(skeleton.get_bone_count()):
+		var source_pose: Dictionary = pose_from[bone_index]
+		skeleton.set_bone_pose_position(
+			bone_index,
+			Vector3(source_pose.position).lerp(skeleton.get_bone_pose_position(bone_index), weight)
+		)
+		skeleton.set_bone_pose_rotation(
+			bone_index,
+			Quaternion(source_pose.rotation).slerp(skeleton.get_bone_pose_rotation(bone_index), weight)
+		)
+		skeleton.set_bone_pose_scale(
+			bone_index,
+			Vector3(source_pose.scale).lerp(skeleton.get_bone_pose_scale(bone_index), weight)
+		)
 
 func _sample_vector_keys(keys: PackedFloat32Array, stride: int, time: float) -> Vector3:
 	var key_count := keys.size() / stride
