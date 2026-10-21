@@ -64,6 +64,13 @@ Bytes id_subrecord(std::string_view tag, std::uint32_t value) {
     subrecord(result, tag, data);
     return result;
 }
+Bytes float_subrecord(std::string_view tag, const std::vector<float>& values) {
+    Bytes data;
+    for (const float value : values) f32(data, value);
+    Bytes result;
+    subrecord(result, tag, data);
+    return result;
+}
 Bytes record(std::string_view tag, std::uint32_t form_id, const Bytes& data) {
     Bytes result;
     raw(result, tag);
@@ -190,6 +197,37 @@ void test_esm4(const std::filesystem::path& directory) {
     auto stat = record("DOOR", 0x100, stat_data);
     records.insert(records.end(), stat.begin(), stat.end());
 
+    Bytes race_data;
+    auto race_edid = string_subrecord("EDID", "FixtureRace");
+    race_data.insert(race_data.end(), race_edid.begin(), race_edid.end());
+    subrecord(race_data, "FNAM", {});
+    auto race_symmetric = float_subrecord("FGGS", {0.25f, -0.5f});
+    race_data.insert(race_data.end(), race_symmetric.begin(), race_symmetric.end());
+    auto race_asymmetric = float_subrecord("FGGA", {0.75f});
+    race_data.insert(race_data.end(), race_asymmetric.begin(), race_asymmetric.end());
+    auto race = record("RACE", 0x300, race_data);
+    records.insert(records.end(), race.begin(), race.end());
+
+    auto make_npc_record = [](std::uint32_t id, std::uint32_t flags, std::string_view editor_id) {
+        Bytes data;
+        auto edid = string_subrecord("EDID", editor_id);
+        data.insert(data.end(), edid.begin(), edid.end());
+        Bytes acbs;
+        u32(acbs, flags);
+        subrecord(data, "ACBS", acbs);
+        auto rnam = id_subrecord("RNAM", 0x300);
+        data.insert(data.end(), rnam.begin(), rnam.end());
+        auto symmetric = float_subrecord("FGGS", {1.0f, 2.0f});
+        data.insert(data.end(), symmetric.begin(), symmetric.end());
+        auto asymmetric = float_subrecord("FGGA", {3.0f});
+        data.insert(data.end(), asymmetric.begin(), asymmetric.end());
+        return record("NPC_", id, data);
+    };
+    auto male_npc = make_npc_record(0x301, 0, "FixtureMale");
+    records.insert(records.end(), male_npc.begin(), male_npc.end());
+    auto female_npc = make_npc_record(0x302, 1, "FixtureFemale");
+    records.insert(records.end(), female_npc.begin(), female_npc.end());
+
     Bytes first_children;
     auto cell_a = cell_record(0x10, "StartCell", "Fixture Start");
     first_children.insert(first_children.end(), cell_a.begin(), cell_a.end());
@@ -231,6 +269,15 @@ void test_esm4(const std::filesystem::path& directory) {
     assert(door.teleport_ref_id == 0x202);
     assert(door.teleport_cell_id == 0x20);
     assert(door.position[0] == 1.0f && door.position[2] == 3.0f);
+    const auto* fixture_race = database.find_race_face_gen(0x300);
+    assert(fixture_race != nullptr);
+    assert(fixture_race->face_symmetric == std::vector<float>({0.25f, -0.5f}));
+    assert(fixture_race->face_asymmetric == std::vector<float>({0.75f}));
+    const auto* fixture_male = database.find_npc_base(0x301);
+    const auto* fixture_female = database.find_npc_base(0x302);
+    assert(fixture_male != nullptr && fixture_female != nullptr);
+    assert(fixture_male->race_form_id == 0x300 && fixture_male->face_symmetric == std::vector<float>({1.0f, 2.0f}));
+    assert(fixture_female->race_form_id == 0x300 && fixture_female->face_asymmetric == std::vector<float>({3.0f}));
 }
 
 void test_nif_mesh_decoder() {

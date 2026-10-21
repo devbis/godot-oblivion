@@ -16,6 +16,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_item_model_path(std::uint32_t form_id, bool female) const;

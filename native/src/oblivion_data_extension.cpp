@@ -13,6 +13,7 @@
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,36 @@
 #include <thread>
 
 namespace godot {
+namespace {
+
+PackedFloat32Array as_packed_coefficients(const std::vector<float>& coefficients) {
+    PackedFloat32Array result;
+    result.resize(static_cast<int64_t>(coefficients.size()));
+    for (int64_t i = 0; i < static_cast<int64_t>(coefficients.size()); ++i)
+        result.set(i, coefficients[static_cast<std::size_t>(i)]);
+    return result;
+}
+
+PackedFloat32Array add_face_coefficients(const std::vector<float>& race,
+                                         const std::vector<float>& individual) {
+    const auto count = std::max(race.size(), individual.size());
+    PackedFloat32Array result;
+    result.resize(static_cast<int64_t>(count));
+    for (int64_t i = 0; i < static_cast<int64_t>(count); ++i) {
+        const auto index = static_cast<std::size_t>(i);
+        result.set(i, (index < race.size() ? race[index] : 0.0f)
+            + (index < individual.size() ? individual[index] : 0.0f));
+    }
+    return result;
+}
+
+const std::vector<float>& race_shape_coefficients(const oblivion::RaceFaceGenRecord* race, bool symmetric) {
+    static const std::vector<float> empty;
+    if (!race) return empty;
+    return symmetric ? race->face_symmetric : race->face_asymmetric;
+}
+
+} // namespace
 
 class OblivionData final : public RefCounted {
     GDCLASS(OblivionData, RefCounted)
@@ -106,6 +137,9 @@ public:
         if (!data_) return {};
         const auto* npc = data_->find_npc_base(static_cast<uint32_t>(form_id));
         if (!npc) return {};
+        const auto* race = data_->find_race_face_gen(npc->race_form_id);
+        const auto& race_symmetric = race_shape_coefficients(race, true);
+        const auto& race_asymmetric = race_shape_coefficients(race, false);
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(npc->form_id);
         result["editor_id"] = as_string(npc->editor_id);
@@ -121,16 +155,12 @@ public:
         for (int64_t i = 0; i < static_cast<int64_t>(npc->hair_color.size()); ++i)
             hair_color.set(i, npc->hair_color[static_cast<std::size_t>(i)]);
         result["hair_color"] = hair_color;
-        PackedFloat32Array face_symmetric;
-        face_symmetric.resize(static_cast<int64_t>(npc->face_symmetric.size()));
-        for (int64_t i = 0; i < static_cast<int64_t>(npc->face_symmetric.size()); ++i)
-            face_symmetric.set(i, npc->face_symmetric[static_cast<std::size_t>(i)]);
-        result["face_symmetric"] = face_symmetric;
-        PackedFloat32Array face_asymmetric;
-        face_asymmetric.resize(static_cast<int64_t>(npc->face_asymmetric.size()));
-        for (int64_t i = 0; i < static_cast<int64_t>(npc->face_asymmetric.size()); ++i)
-            face_asymmetric.set(i, npc->face_asymmetric[static_cast<std::size_t>(i)]);
-        result["face_asymmetric"] = face_asymmetric;
+        result["face_symmetric"] = add_face_coefficients(race_symmetric, npc->face_symmetric);
+        result["face_asymmetric"] = add_face_coefficients(race_asymmetric, npc->face_asymmetric);
+        result["face_symmetric_race"] = as_packed_coefficients(race_symmetric);
+        result["face_asymmetric_race"] = as_packed_coefficients(race_asymmetric);
+        result["face_symmetric_individual"] = as_packed_coefficients(npc->face_symmetric);
+        result["face_asymmetric_individual"] = as_packed_coefficients(npc->face_asymmetric);
         PackedByteArray face_texture;
         face_texture.resize(static_cast<int64_t>(npc->face_texture.size()));
         for (int64_t i = 0; i < static_cast<int64_t>(npc->face_texture.size()); ++i)

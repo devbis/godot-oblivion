@@ -128,6 +128,7 @@ void Esm4Database::open(const std::filesystem::path& path) {
     base_editor_id_by_id_.clear();
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
+    race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
     item_model_by_id_.clear();
@@ -194,6 +195,11 @@ const CellRecord* Esm4Database::find_cell(std::uint32_t form_id) const {
 const NpcBaseRecord* Esm4Database::find_npc_base(std::uint32_t form_id) const {
     const auto it = npc_by_id_.find(form_id);
     return it == npc_by_id_.end() ? nullptr : &it->second;
+}
+
+const RaceFaceGenRecord* Esm4Database::find_race_face_gen(std::uint32_t form_id) const {
+    const auto it = race_face_gen_by_id_.find(form_id);
+    return it == race_face_gen_by_id_.end() ? nullptr : &it->second;
 }
 
 const OutfitRecord* Esm4Database::find_outfit(std::uint32_t form_id) const {
@@ -318,6 +324,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_reference = type == "REFR" || type == "ACHR" || type == "ACRE";
     bool is_game_setting = type == "GMST";
     bool is_npc_base = type == "NPC_";
+    bool is_race = type == "RACE";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
     const bool is_item_model = type == "ARMO" || type == "CLOT" || type == "WEAP"
@@ -331,6 +338,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     reference.form_id = form_id;
     NpcBaseRecord npc;
     npc.form_id = form_id;
+    RaceFaceGenRecord race_face_gen;
+    race_face_gen.form_id = form_id;
     OutfitRecord outfit;
     outfit.form_id = form_id;
     AiPackageRecord ai_package;
@@ -412,6 +421,13 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             target.reserve(subrecord_size / 4);
             for (std::size_t offset = 0; offset < subrecord_size; offset += 4)
                 target.push_back(f32(value + offset));
+        } else if ((tag == "FGGS" || tag == "FGGA") && is_race && subrecord_size % 4 == 0) {
+            // TES4 stores a single race shape basis even when these fields follow FNAM.
+            auto& target = tag == "FGGS" ? race_face_gen.face_symmetric : race_face_gen.face_asymmetric;
+            target.clear();
+            target.reserve(subrecord_size / 4);
+            for (std::size_t offset = 0; offset < subrecord_size; offset += 4)
+                target.push_back(f32(value + offset));
         } else if (tag == "FGTS" && is_npc_base) {
             npc.face_texture.assign(value, value + subrecord_size);
         } else if (tag == "DOFT" && is_npc_base && subrecord_size >= 4) {
@@ -459,6 +475,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_npc_base)
         npc_by_id_[form_id] = std::move(npc);
+    if (is_race)
+        race_face_gen_by_id_[form_id] = std::move(race_face_gen);
     if (is_outfit)
         outfit_by_id_[form_id] = std::move(outfit);
     if (is_ai_package)

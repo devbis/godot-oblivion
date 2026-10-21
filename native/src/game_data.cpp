@@ -66,6 +66,10 @@ const NpcBaseRecord* GameData::find_npc_base(std::uint32_t form_id) const {
     return esm_.find_npc_base(form_id);
 }
 
+const RaceFaceGenRecord* GameData::find_race_face_gen(std::uint32_t form_id) const {
+    return esm_.find_race_face_gen(form_id);
+}
+
 const OutfitRecord* GameData::find_outfit(std::uint32_t form_id) const {
     return esm_.find_outfit(form_id);
 }

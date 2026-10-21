@@ -53,6 +53,12 @@ struct NpcBaseRecord {
     std::vector<std::uint32_t> ai_package_form_ids;
 };
 
+struct RaceFaceGenRecord {
+    std::uint32_t form_id = 0;
+    std::vector<float> face_symmetric;
+    std::vector<float> face_asymmetric;
+};
+
 struct OutfitRecord {
     std::uint32_t form_id = 0;
     std::string editor_id;
@@ -85,6 +91,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_item_model_path(std::uint32_t form_id, bool female) const;
@@ -107,6 +114,7 @@ private:
     std::map<std::uint32_t, std::string> base_editor_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
+    std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;
     std::map<std::uint32_t, std::string> item_model_by_id_;
