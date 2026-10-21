@@ -22,6 +22,14 @@ add_library(oblivion_data_core STATIC
 target_include_directories(oblivion_data_core PUBLIC include)
 target_link_libraries(oblivion_data_core PUBLIC ZLIB::ZLIB nifly)
 set_target_properties(oblivion_data_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# ESM/BSA indexing is CPU-bound and runs during startup. Keep the data-reader
+# optimized even when the surrounding Godot project uses an unconfigured CMake
+# build type (which otherwise compiles this code without optimization).
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(oblivion_data_core PRIVATE -O2)
+elseif(MSVC)
+    target_compile_options(oblivion_data_core PRIVATE /O2)
+endif()
 
 add_executable(oblivion-inspect src/inspect_main.cpp)
 target_link_libraries(oblivion-inspect PRIVATE oblivion_data_core)

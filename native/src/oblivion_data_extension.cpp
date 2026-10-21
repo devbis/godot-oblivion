@@ -175,7 +175,7 @@ public:
         worker_ = std::thread([this, path]() {
             try {
                 auto data = std::make_unique<oblivion::GameData>();
-                data->open(path);
+                data->open(path, oblivion::GameData::LoadProfile::RuntimeVisuals);
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 data_ = std::move(data);
             } catch (const std::exception& error) {

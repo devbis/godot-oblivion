@@ -23,6 +23,7 @@
 #include "oblivion/esm4_database.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -118,9 +119,26 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+bool is_runtime_visual_record(std::string_view type) {
+    static constexpr std::array relevant_types = {
+        std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
+        std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"),
+        std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"),
+        std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
+        std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
+        std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
+        std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"),
+        std::string_view("HAIR"), std::string_view("EYES"), std::string_view("ALCH"),
+        std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
+        std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
+        std::string_view("SLGM"), std::string_view("SGST"),
+    };
+    return std::find(relevant_types.begin(), relevant_types.end(), type) != relevant_types.end();
+}
+
 } // namespace
 
-void Esm4Database::open(const std::filesystem::path& path) {
+void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_only) {
     cells_.clear();
     cell_by_id_.clear();
     base_model_by_id_.clear();
@@ -143,7 +161,7 @@ void Esm4Database::open(const std::filesystem::path& path) {
     float_game_settings_.clear();
     record_count_ = 0;
     const auto bytes = read_file(path);
-    parse_file(bytes);
+    parse_file(bytes, runtime_visuals_only);
     for (auto& cell : cells_) {
         if (const auto water = worldspace_water_level_by_id_.find(cell.worldspace_form_id);
             water != worldspace_water_level_by_id_.end()) {
@@ -288,7 +306,7 @@ const std::string* Esm4Database::find_record_type(std::uint32_t form_id) const {
     return it == record_type_by_id_.end() ? nullptr : &it->second;
 }
 
-void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
+void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only) {
     if (bytes.size() < kTes4RecordHeaderSize)
         throw std::runtime_error("ESM file is too small");
     if (std::memcmp(bytes.data(), "TES4", 4) != 0)
@@ -329,17 +347,20 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes) {
             check_range(end, cursor + kRecordHeaderSize, data_size, "record data");
             const auto* record_data = bytes.data() + cursor + kRecordHeaderSize;
             const auto* record_type = reinterpret_cast<const char*>(bytes.data() + cursor);
-            std::vector<std::uint8_t> inflated;
-            if (flags & kCompressedRecord) {
-                inflated = decompress_record(record_data, data_size, std::string_view(record_type, 4), form_id);
-                record_data = inflated.data();
-                parse_record(std::string_view(record_type, 4), form_id, flags, active_cell_id,
-                             worldspace_form_id, exterior_grid_context,
-                             record_data, inflated.size());
-            } else {
-                parse_record(std::string_view(record_type, 4), form_id, flags, active_cell_id,
-                             worldspace_form_id, exterior_grid_context,
-                             record_data, data_size);
+            const std::string_view record_type_view(record_type, 4);
+            if (!runtime_visuals_only || is_runtime_visual_record(record_type_view)) {
+                std::vector<std::uint8_t> inflated;
+                if (flags & kCompressedRecord) {
+                    inflated = decompress_record(record_data, data_size, record_type_view, form_id);
+                    record_data = inflated.data();
+                    parse_record(record_type_view, form_id, flags, active_cell_id,
+                                 worldspace_form_id, exterior_grid_context,
+                                 record_data, inflated.size());
+                } else {
+                    parse_record(record_type_view, form_id, flags, active_cell_id,
+                                 worldspace_form_id, exterior_grid_context,
+                                 record_data, data_size);
+                }
             }
             ++record_count_;
             cursor += kRecordHeaderSize + data_size;

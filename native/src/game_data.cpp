@@ -1,8 +1,11 @@
 #include "oblivion/game_data.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 
 namespace oblivion {
@@ -17,7 +20,9 @@ std::string lower_ascii(std::string value) {
 
 } // namespace
 
-void GameData::open(const std::filesystem::path& data_directory) {
+void GameData::open(const std::filesystem::path& data_directory, LoadProfile profile) {
+    const auto startup_started = std::chrono::steady_clock::now();
+    const bool visual_runtime = profile == LoadProfile::RuntimeVisuals;
     if (!std::filesystem::is_directory(data_directory))
         throw std::runtime_error("not a game Data directory: " + data_directory.string());
 
@@ -36,6 +41,20 @@ void GameData::open(const std::filesystem::path& data_directory) {
     std::sort(bsa_paths.begin(), bsa_paths.end(), [](const auto& a, const auto& b) {
         return lower_ascii(a.filename().string()) < lower_ascii(b.filename().string());
     });
+    const auto discovered_archive_count = bsa_paths.size();
+    if (visual_runtime) {
+        constexpr std::array<std::string_view, 3> visual_archives = {
+            "oblivion - meshes.bsa",
+            "oblivion - textures - compressed.bsa",
+            "oblivion - misc.bsa",
+        };
+        std::erase_if(bsa_paths, [&visual_archives](const auto& path) {
+            const auto filename = lower_ascii(path.filename().string());
+            return std::find(visual_archives.begin(), visual_archives.end(), filename) == visual_archives.end();
+        });
+    }
+
+    const auto archives_started = std::chrono::steady_clock::now();
     std::vector<BsaArchive> archives;
     std::vector<std::filesystem::path> archive_paths;
     for (const auto& bsa_path : bsa_paths) {
@@ -44,9 +63,18 @@ void GameData::open(const std::filesystem::path& data_directory) {
         archives.push_back(std::move(archive));
         archive_paths.push_back(bsa_path);
     }
+    const auto archives_finished = std::chrono::steady_clock::now();
 
     Esm4Database esm;
-    esm.open(esm_path);
+    esm.open(esm_path, visual_runtime);
+    const auto startup_finished = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> archive_duration = archives_finished - archives_started;
+    const std::chrono::duration<double> esm_duration = startup_finished - archives_finished;
+    const std::chrono::duration<double> total_duration = startup_finished - startup_started;
+    std::clog << "OpenOB data index: " << archive_paths.size() << "/" << discovered_archive_count
+              << " BSA archives in " << archive_duration.count() << "s; ESM in "
+              << esm_duration.count() << "s; total " << total_duration.count() << "s"
+              << (visual_runtime ? " (runtime visuals profile)" : " (full profile)") << '\n';
     data_directory_ = data_directory;
     archives_ = std::move(archives);
     archive_paths_ = std::move(archive_paths);

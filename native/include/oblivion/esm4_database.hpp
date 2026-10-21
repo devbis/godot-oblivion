@@ -117,7 +117,7 @@ struct CellRecord {
 
 class Esm4Database {
 public:
-    void open(const std::filesystem::path& path);
+    void open(const std::filesystem::path& path, bool runtime_visuals_only = false);
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
@@ -160,7 +160,7 @@ private:
     std::map<std::string, float> float_game_settings_;
     std::size_t record_count_ = 0;
 
-    void parse_file(const std::vector<std::uint8_t>& bytes);
+    void parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only);
     void parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t flags,
                       std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
                       bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size);

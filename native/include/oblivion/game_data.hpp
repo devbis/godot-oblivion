@@ -12,7 +12,9 @@ namespace oblivion {
 
 class GameData {
 public:
-    void open(const std::filesystem::path& data_directory);
+    enum class LoadProfile { Full, RuntimeVisuals };
+
+    void open(const std::filesystem::path& data_directory, LoadProfile profile = LoadProfile::Full);
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
