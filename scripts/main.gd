@@ -285,24 +285,31 @@ func _load_game_data() -> void:
 	_log_runtime_spawn_positions()
 
 func _sewer_exit_start_data() -> Dictionary:
-	var sewer_cell: Dictionary = data_reader.find_cell("ImperialSewerSystemN01")
+	var sewer_cell: Dictionary = data_reader.find_cell("ImperialSewers03")
 	if sewer_cell.is_empty():
 		return {}
+	var exit_cell: Dictionary = data_reader.find_cell("ICPrisonSewerExit01")
+	if exit_cell.is_empty() or bool(exit_cell.get("interior", true)):
+		return {}
 	for reference: Dictionary in sewer_cell.get("references", []):
-		if str(reference.get("base_editor_id", "")).to_lower() != "sewerexitgate02":
+		if str(reference.get("base_editor_id", "")).to_lower() != "cgsewerexitgate01":
 			continue
 		var destination_cell: Dictionary = data_reader.find_cell_by_id(int(reference.get("teleport_cell_id", 0)))
 		if destination_cell.is_empty() or bool(destination_cell.get("interior", true)):
+			continue
+		if int(destination_cell.get("worldspace_form_id", 0)) != int(exit_cell.get("worldspace_form_id", 0)):
 			continue
 		var destination: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
 		if destination.size() < 3:
 			continue
 		var grid_x := floori(destination[0] / EXTERIOR_CELL_SIZE)
 		var grid_y := floori(destination[1] / EXTERIOR_CELL_SIZE)
+		if grid_x != int(exit_cell.get("grid_x", -1)) or grid_y != int(exit_cell.get("grid_y", -1)):
+			continue
 		var exterior_cell: Dictionary = data_reader.find_exterior_region(
 			grid_x,
 			grid_y,
-			int(destination_cell.get("worldspace_form_id", 0)),
+			int(exit_cell.get("worldspace_form_id", 0)),
 			EXTERIOR_STREAM_RADIUS
 		)
 		if exterior_cell.is_empty():
