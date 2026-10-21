@@ -687,7 +687,7 @@ func _meshes_for_model(model_path: String) -> Array:
 		var mesh_data: Dictionary = raw_meshes[index]
 		var builder := Callable(self, "_build_godot_mesh").bind(mesh_data)
 		var resource := DerivedResourceCache.load_or_build(
-			source_bytes, "nif-arraymesh-%d" % index, builder
+			source_bytes, "nif-arraymesh-normal-orientation-v2-%d" % index, builder
 		) as ArrayMesh
 		if resource != null:
 			godot_meshes.push_back({
@@ -2491,6 +2491,10 @@ func _build_godot_mesh(mesh_data: Dictionary) -> ArrayMesh:
 	var weights: PackedFloat32Array = mesh_data.get("bone_weights", PackedFloat32Array())
 	if vertices.is_empty() or indices.is_empty():
 		return null
+	# The converted Oblivion model normals shade opposite the intended sun side in
+	# Godot. Flip shading normals only; triangle winding still drives geometry and shadows.
+	for normal_index in range(normals.size()):
+		normals[normal_index] = -normals[normal_index]
 
 	if normals.size() != vertices.size():
 		var surface := SurfaceTool.new()
@@ -2508,7 +2512,15 @@ func _build_godot_mesh(mesh_data: Dictionary) -> ArrayMesh:
 				surface.set_weights(vertex_weights)
 			surface.add_vertex(vertices[index])
 		surface.generate_normals()
-		return surface.commit()
+		var generated_mesh := surface.commit() as ArrayMesh
+		var generated_arrays := generated_mesh.surface_get_arrays(0)
+		var generated_normals: PackedVector3Array = generated_arrays[Mesh.ARRAY_NORMAL]
+		for normal_index in range(generated_normals.size()):
+			generated_normals[normal_index] = -generated_normals[normal_index]
+		generated_arrays[Mesh.ARRAY_NORMAL] = generated_normals
+		var flipped_mesh := ArrayMesh.new()
+		flipped_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, generated_arrays)
+		return flipped_mesh
 
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
