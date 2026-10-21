@@ -90,6 +90,7 @@ var _interact_ready := true
 var _player_skeleton: Skeleton3D
 var _player_avatar: Node3D
 var _player_face_meshes: Array[MeshInstance3D] = []
+var _player_hair_meshes: Array[MeshInstance3D] = []
 var _player_face_source_meshes: Array[ArrayMesh] = []
 var _player_facegen_mesh_data: Array[Dictionary] = []
 var _player_face_profiles: Array[Dictionary] = []
@@ -495,6 +496,7 @@ func _is_debug_service_model(model_path: String) -> bool:
 func _load_player_avatar() -> void:
 	if data_reader == null:
 		return
+	_player_hair_meshes.clear()
 	status_label.text += "\nLoading original Imperial character meshes…"
 	var avatar := Node3D.new()
 	avatar.name = "OriginalImperialAvatar"
@@ -570,6 +572,8 @@ func _load_player_avatar() -> void:
 				_player_face_meshes.push_back(instance)
 				_player_face_source_meshes.push_back(source_mesh)
 				_player_facegen_mesh_data.push_back(facegen_data)
+			if is_player_hair:
+				_player_hair_meshes.push_back(instance)
 			instance.material_override = await _material_for_texture(
 				str(mesh_entry.diffuse_texture_path),
 				bool(mesh_entry.get("alpha_blend", false)),
@@ -800,7 +804,19 @@ func _equip_player_item(form_id: int) -> bool:
 	for equipped_id in replaced_item_ids:
 		_player_equipment.erase(equipped_id)
 	_player_equipment[form_id] = {"slots": slots, "meshes": item_meshes}
+	_refresh_player_hair_visibility()
 	return true
+
+func _refresh_player_hair_visibility() -> void:
+	var headwear_equipped := false
+	for equipment_value: Variant in _player_equipment.values():
+		var equipment: Dictionary = equipment_value
+		if (int(equipment.get("slots", 0)) & 0x0003) != 0:
+			headwear_equipped = true
+			break
+	for hair_mesh: MeshInstance3D in _player_hair_meshes:
+		if is_instance_valid(hair_mesh):
+			hair_mesh.visible = not headwear_equipped
 
 func _nearest_placed_item() -> Dictionary:
 	var nearest_item: Dictionary = {}
@@ -1017,10 +1033,13 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		var head_part := _npc_head_part_entry(npc)
 		var equipment_ids := _npc_equipment_ids(npc)
 		var covered_body_slots := 0
+		var covered_head_slots := 0
 		for equipment_form_id: int in equipment_ids:
 			var equipment_type := str(data_reader.find_record_type(equipment_form_id))
 			if equipment_type in ["ARMO", "CLOT"]:
-				covered_body_slots |= int(data_reader.get_item_biped_slots(equipment_form_id))
+				var equipment_slots := int(data_reader.get_item_biped_slots(equipment_form_id))
+				covered_body_slots |= equipment_slots
+				covered_head_slots |= equipment_slots & 0x0003
 		_register_player_face_profile(npc, head_model_path)
 		var face_meshes: Array[MeshInstance3D] = []
 		for body_part: Dictionary in _npc_body_part_entries(npc, is_female):
@@ -1073,16 +1092,17 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				not uses_head_bone_rotation
 			)
 			face_meshes.append_array(detail_meshes)
-		var hair_form_id := int(npc.get("hair_form_id", 0))
-		var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
-		if hair_path.is_empty():
-			hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
-		var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
-		var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
-		await _add_actor_model(
-			avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
-			"", "", "", not hair_is_model_space
-		)
+		if covered_head_slots == 0:
+			var hair_form_id := int(npc.get("hair_form_id", 0))
+			var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
+			if hair_path.is_empty():
+				hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
+			var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
+			var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
+			await _add_actor_model(
+				avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
+				"", "", "", not hair_is_model_space
+			)
 		var weapon_attached := false
 		var attached_item_names: Array[String] = []
 		for item_form_id: int in equipment_ids:
