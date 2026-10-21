@@ -52,6 +52,10 @@ func capture_mouse() -> void:
 	_capture_mouse_on_focus = true
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
+func release_mouse() -> void:
+	_capture_mouse_on_focus = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
 func _process(delta: float) -> void:
 	rotation.y = _camera_yaw
 	_apply_camera_orbit()
@@ -89,8 +93,7 @@ func handle_camera_input(event: InputEvent) -> void:
 		_set_camera_distance(camera_distance if _third_person else camera_zoom_min)
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_cancel"):
-		_capture_mouse_on_focus = false
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		release_mouse()
 		get_viewport().set_input_as_handled()
 
 func _notification(what: int) -> void:

@@ -55,6 +55,8 @@ const TEXTURE_FALLBACKS := {
 
 @onready var status_label: Label = $StatusLayer/StatusPanel/Margin/Status
 @onready var inventory_label: Label = $StatusLayer/Inventory
+@onready var inventory_panel: PanelContainer = $StatusLayer/InventoryPanel
+@onready var inventory_items_label: Label = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
 @onready var player: CharacterBody3D = $Player
@@ -84,6 +86,8 @@ var _player_animations: Dictionary = {}
 var _player_inventory: Dictionary = {}
 var _player_equipment: Dictionary = {}
 var _player_weapon_meshes: Array[MeshInstance3D] = []
+var _player_weapon_form_id := 0
+var _inventory_open := false
 var _placed_items: Dictionary = {}
 var _pickup_toast_text := ""
 var _pickup_toast_remaining := 0.0
@@ -116,7 +120,7 @@ func _process(_delta: float) -> void:
 		_update_interaction_hint(nearby_item)
 	if Input.is_action_just_released("interact"):
 		_interact_ready = true
-	if not _world_loading and _interact_ready and Input.is_action_just_pressed("interact"):
+	if not _world_loading and not _inventory_open and _interact_ready and Input.is_action_just_pressed("interact"):
 		_interact_ready = false
 		if nearby_item.is_empty():
 			_transition_to_next_linked_cell()
@@ -125,7 +129,8 @@ func _process(_delta: float) -> void:
 			if not Input.is_action_pressed("interact"):
 				_interact_ready = true
 	if _player_skeleton != null and not _world_loading:
-		_update_player_animation(_delta)
+		if not _inventory_open:
+			_update_player_animation(_delta)
 		_update_npc_actors(_delta)
 		if not _player_face_state.is_empty():
 			_update_face_blink(_player_face_state, _delta)
@@ -144,6 +149,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cycle_player_face_profile()
 	elif event.keycode == KEY_G:
 		_cycle_player_face_expression()
+	elif event.keycode == KEY_I:
+		_toggle_inventory()
 
 func _load_game_data() -> void:
 	if not ClassDB.class_exists("OblivionData"):
@@ -358,7 +365,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	if instance_count > 0 and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = false
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
-	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
+	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
 		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
 	]
 	_update_interaction_hint({})
@@ -669,6 +676,7 @@ func _equip_player_item(form_id: int) -> bool:
 			if is_instance_valid(previous_mesh):
 				previous_mesh.queue_free()
 		_player_weapon_meshes = item_meshes
+		_player_weapon_form_id = form_id
 		return true
 	var slots := int(data_reader.get_item_biped_slots(form_id))
 	if slots == 0:
@@ -731,9 +739,32 @@ func _add_inventory_item(form_id: int, amount: int = 1) -> void:
 
 func _refresh_inventory_hud() -> void:
 	var item_count := 0
+	var item_lines := PackedStringArray()
 	for amount_value: Variant in _player_inventory.values():
 		item_count += int(amount_value)
+	for form_id_value: Variant in _player_inventory.keys():
+		var form_id := int(form_id_value)
+		var item_name := str(data_reader.find_editor_id(form_id)) if data_reader != null else ""
+		if item_name.is_empty():
+			item_name = "Item %08X" % form_id
+		var item_type := str(data_reader.find_record_type(form_id)) if data_reader != null else ""
+		var equipped := _player_equipment.has(form_id) or _player_weapon_form_id == form_id
+		var equipped_label := " · equipped" if equipped else ""
+		item_lines.push_back("%s  %s ×%d%s" % [item_type, item_name, int(_player_inventory[form_id]), equipped_label])
+	item_lines.sort()
 	inventory_label.text = "Inventory: %d items · %d types" % [item_count, _player_inventory.size()]
+	inventory_items_label.text = "\n".join(item_lines) if not item_lines.is_empty() else "Empty"
+
+func _toggle_inventory() -> void:
+	if _world_loading:
+		return
+	_inventory_open = not _inventory_open
+	inventory_panel.visible = _inventory_open
+	player.set_physics_process(not _inventory_open)
+	if _inventory_open:
+		player.release_mouse()
+	else:
+		player.capture_mouse()
 
 func _update_interaction_hint(nearby_item: Dictionary) -> void:
 	if _world_loading:
