@@ -1046,6 +1046,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			var detail_path := str(detail_part.get("model_path", ""))
 			var is_eye_model := int(detail_part.get("index", -1)) >= 7 or detail_path.to_lower().contains("eye")
 			var is_ear_model := int(detail_part.get("index", -1)) == 1 or int(detail_part.get("index", -1)) == 2 or detail_path.to_lower().contains("ear")
+			var uses_head_bone_rotation := _face_detail_uses_head_bone_rotation(
+				int(detail_part.get("index", -1)), detail_path
+			)
 			var detail_face_data: Dictionary = {} if is_ear_model else npc
 			var detail_meshes: Array[MeshInstance3D] = await _add_actor_model(
 				avatar,
@@ -1054,11 +1057,11 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				"Bip01 Head",
 				PackedByteArray(),
 				detail_face_data,
-				is_eye_model,
+				false,
 				race_texture_key,
 				eye_texture_path if is_eye_model else "",
 				str(detail_part.get("texture_path", "")),
-				true
+				not uses_head_bone_rotation
 			)
 			face_meshes.append_array(detail_meshes)
 		var hair_form_id := int(npc.get("hair_form_id", 0))
@@ -1229,6 +1232,15 @@ func _npc_face_detail_entries(npc: Dictionary) -> Array[Dictionary]:
 	for fallback_path: String in _npc_face_detail_paths(str(data_reader.find_editor_id(int(npc.get("race_form_id", 0)))).to_lower()):
 		entries.push_back({"index": -1, "model_path": fallback_path, "texture_path": ""})
 	return entries
+
+func _face_detail_uses_head_bone_rotation(part_index: int, model_path: String) -> bool:
+	# Mouth, teeth, and tongue assets are authored in the head bone's local axes.
+	# Eyes, ears, and other rigid face parts use character axes and need the bind
+	# rotation cancelled when attached to the animated head bone.
+	if part_index >= 0:
+		return part_index in [3, 4, 5, 6]
+	var lower_path := model_path.to_lower()
+	return lower_path.contains("mouth") or lower_path.contains("teeth") or lower_path.contains("tongue")
 
 func _npc_race_texture_key(race_editor_id: String) -> String:
 	if race_editor_id in ["argonian", "darkelf", "khajiit", "orc", "redguard"]:
