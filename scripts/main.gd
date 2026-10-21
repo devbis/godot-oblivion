@@ -44,6 +44,12 @@ const EXTERIOR_CELL_SIZE := 4096.0
 const EXTERIOR_STREAM_RADIUS := 1
 const EXTERIOR_REFERENCE_RENDER_DISTANCE := 30.0
 const EXTERIOR_COLLISION_DISTANCE := 18.0
+const UNSUPPORTED_PARTICLE_MODEL_FILENAMES := [
+	"fxdustcloudfaint01.nif",
+	"fxdustcloud01.nif",
+	"dustcloudhorizontal01.nif",
+	"fxlightbeamdust01.nif",
+]
 const PLAYER_AVATAR_PARTS := [
 	"Characters/_male/upperbody.nif",
 	"Characters/_male/lowerbody.nif",
@@ -671,6 +677,10 @@ func _meshes_for_model(model_path: String) -> Array:
 	var key := model_path.to_lower().replace("\\", "/")
 	if _model_cache.has(key):
 		return _model_cache[key]
+	# These original particle effect NIFs are not static meshes and the reader cannot decode them.
+	if key.get_file() in UNSUPPORTED_PARTICLE_MODEL_FILENAMES:
+		_model_cache[key] = []
+		return []
 	if data_reader == null or not data_reader.request_nif_meshes(model_path):
 		return []
 	while data_reader.is_asset_loading():
