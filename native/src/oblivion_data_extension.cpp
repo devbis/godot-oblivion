@@ -301,6 +301,9 @@ public:
             Dictionary item;
             item["name"] = String::utf8(mesh.name.c_str());
             item["diffuse_texture_path"] = String::utf8(mesh.diffuse_texture_path.c_str());
+            item["alpha_blend"] = mesh.alpha_blend;
+            item["alpha_test"] = mesh.alpha_test;
+            item["alpha_threshold"] = mesh.alpha_threshold;
             PackedVector3Array vertices;
             vertices.resize(static_cast<int64_t>(mesh.vertices.size()));
             for (int64_t i = 0; i < static_cast<int64_t>(mesh.vertices.size()); ++i) {

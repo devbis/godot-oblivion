@@ -41,7 +41,7 @@ The in-game reader searches for `Oblivion.esm` and all `.bsa` files in that dire
 - Base-game ESM4 CELL, placed-reference, door-target, NPC AI-package, item world/equipment model-path, and float GMST indexing. ARMO/CLOT world models come from `MOD2`/`MOD4`; wearable models use `MODL`/`MOD3`.
 - Imperial Prison discovery through editor ID `ImperialDungeon01`.
 - Asynchronous ESM/BSA indexing and NIF parsing through `OblivionData`, plus case-insensitive loose/BSA asset lookup.
-- Static NIF mesh extraction with node transforms, triangle/UV/normal arrays, and diffuse texture paths; parsing runs on a worker thread and Godot resource creation runs on the main thread.
+- Static NIF mesh extraction with node transforms, triangle/UV/normal arrays, diffuse texture paths, and per-shape alpha blend/test flags; parsing runs on a worker thread and Godot resource creation runs on the main thread.
 - Diffuse DDS, TGA, PNG, and JPEG loading from loose files or BSA archives. DDS files with incomplete mip chains are decoded from their top mip and receive a regenerated mip chain.
 - The Imperial male body is assembled from original upper body, lower body, hand, and foot meshes, with the original human head and hair. Skin weights bind those meshes to `Characters/_male/skeleton.nif`.
 - The default male avatar is currently dressed with the base game's `LowerShirt05` and `LowerPants05` CLOT models, looked up by ESM editor ID and skinned to the same skeleton. This outfit choice is a prototype default; its match to the original player's starting inventory has not been verified. Female model paths are available from the same records.

@@ -313,7 +313,11 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 			instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
 			instance.mesh = mesh_entry.mesh
 			instance.material_override = await _material_for_reference(
-				model_path, str(mesh_entry.diffuse_texture_path)
+				model_path,
+				str(mesh_entry.diffuse_texture_path),
+				bool(mesh_entry.get("alpha_blend", false)),
+				bool(mesh_entry.get("alpha_test", false)),
+				int(mesh_entry.get("alpha_threshold", 128))
 			)
 			instance.transform = _reference_transform(reference)
 			cell_visual_root.add_child(instance)
@@ -398,6 +402,9 @@ func _meshes_for_model(model_path: String) -> Array:
 				"mesh": resource,
 				"mesh_name": str(mesh_data.get("name", "")),
 				"diffuse_texture_path": str(mesh_data.get("diffuse_texture_path", "")),
+				"alpha_blend": bool(mesh_data.get("alpha_blend", false)),
+				"alpha_test": bool(mesh_data.get("alpha_test", false)),
+				"alpha_threshold": int(mesh_data.get("alpha_threshold", 128)),
 				"bone_names": mesh_data.get("bone_names", []),
 			})
 			var shape_name := str(mesh_data.get("name", "")).to_lower()
@@ -424,8 +431,14 @@ func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
 	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx")
 
-func _material_for_reference(model_path: String, texture_path: String) -> StandardMaterial3D:
-	var material := await _material_for_texture(texture_path)
+func _material_for_reference(
+	model_path: String,
+	texture_path: String,
+	alpha_blend := false,
+	alpha_test := false,
+	alpha_threshold := 128
+) -> StandardMaterial3D:
+	var material := await _material_for_texture(texture_path, alpha_blend, alpha_test, alpha_threshold)
 	if not _is_debug_service_model(model_path):
 		return material
 	var translucent := material.duplicate() as StandardMaterial3D
@@ -1014,7 +1027,12 @@ func _add_actor_model(
 				else:
 					push_warning("Could not apply FaceGen data to %s" % str(npc_face_data.get("editor_id", model_path)))
 		instance.mesh = source_mesh
-		var material := await _material_for_texture(str(mesh_entry.diffuse_texture_path))
+		var material := await _material_for_texture(
+			str(mesh_entry.diffuse_texture_path),
+			bool(mesh_entry.get("alpha_blend", false)),
+			bool(mesh_entry.get("alpha_test", false)),
+			int(mesh_entry.get("alpha_threshold", 128))
+		)
 		if tint.size() >= 3:
 			material = material.duplicate() as StandardMaterial3D
 			material.albedo_color = Color8(tint[0], tint[1], tint[2], tint[3] if tint.size() > 3 and tint[3] > 0 else 255)
@@ -1432,11 +1450,17 @@ func _sample_scalar_keys(keys: PackedFloat32Array, time: float) -> float:
 	var last := (key_count - 1) * 2
 	return keys[last + 1]
 
-func _material_for_texture(texture_path: String) -> StandardMaterial3D:
+func _material_for_texture(
+	texture_path: String,
+	alpha_blend := false,
+	alpha_test := false,
+	alpha_threshold := 128
+) -> StandardMaterial3D:
 	var normalized_path := texture_path.strip_edges().replace("\\", "/")
 	if normalized_path.is_empty():
 		return _cell_material
-	var key := normalized_path.to_lower()
+	var alpha_mode := "blend" if alpha_blend else "scissor" if alpha_test else "opaque"
+	var key := "%s|%s|%d" % [normalized_path.to_lower(), alpha_mode, alpha_threshold]
 	if _material_cache.has(key):
 		return _material_cache[key]
 
@@ -1444,6 +1468,11 @@ func _material_for_texture(texture_path: String) -> StandardMaterial3D:
 	material.albedo_color = Color.WHITE
 	material.roughness = 0.9
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if alpha_blend:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	elif alpha_test:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		material.alpha_scissor_threshold = float(alpha_threshold) / 255.0
 	var texture := await _texture_for_path(normalized_path)
 	if texture != null:
 		material.albedo_texture = texture

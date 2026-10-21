@@ -49,6 +49,11 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
 
     output.name = shape.name.get();
     file.GetTextureSlot(&shape, output.diffuse_texture_path, 0);
+    if (const auto* alpha = file.GetAlphaProperty(&shape)) {
+        output.alpha_blend = (alpha->flags & 0x0001U) != 0;
+        output.alpha_test = (alpha->flags & 0x0200U) != 0;
+        output.alpha_threshold = alpha->threshold;
+    }
     output.vertices.reserve(geometry->vertices.size());
     for (const auto& vertex : geometry->vertices)
         output.vertices.push_back(to_godot(transform.ApplyTransform(vertex)));

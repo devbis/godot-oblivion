@@ -10,6 +10,9 @@ namespace oblivion {
 struct NifMeshData {
     std::string name;
     std::string diffuse_texture_path;
+    bool alpha_blend = false;
+    bool alpha_test = false;
+    std::uint8_t alpha_threshold = 128;
     std::vector<std::string> bone_names;
     std::vector<std::array<float, 3>> vertices;
     std::vector<std::array<float, 3>> normals;
