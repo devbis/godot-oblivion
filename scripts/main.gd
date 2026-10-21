@@ -9,7 +9,22 @@ const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
-const PLAYER_WALK_KF := "Characters/_male/walkforward.kf"
+const PLAYER_DIRECTIONAL_KFS := {
+	"Forward": ["Characters/_male/walkforward.kf", "Forward"],
+	"Backward": ["Characters/_male/walkbackward.kf", "Backward"],
+	"Left": ["Characters/_male/walkleft.kf", "Left"],
+	"Right": ["Characters/_male/walkright.kf", "Right"],
+	"FastForward": ["Characters/_male/walkfastforward.kf", "FastForward"],
+	"FastBackward": ["Characters/_male/walkfastbackward.kf", "FastBackward"],
+	"FastLeft": ["Characters/_male/walkfastleft.kf", "FastLeft"],
+	"FastRight": ["Characters/_male/walkfastright.kf", "FastRight"],
+}
+const PLAYER_JUMP_KFS := {
+	"JumpStart": ["Characters/_male/jumpstart.kf", "JumpStart"],
+	"JumpLoop": ["Characters/_male/jumploop.kf", "JumpLoop"],
+	"JumpLand": ["Characters/_male/jumpland.kf", "JumpLand"],
+}
+const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
@@ -76,6 +91,7 @@ var _facegen_cache: Dictionary = {}
 var _facegen_expression_names: Array[String] = []
 var _active_animation := ""
 var _animation_time := 0.0
+var _player_was_on_floor := true
 var _npc_actors: Array[Dictionary] = []
 var _player_start_position := Vector3.ZERO
 var _fallback_support: StaticBody3D
@@ -208,11 +224,13 @@ func _place_player_on_ground(feet_position: Vector3) -> void:
 	if not result.is_empty() and hit_normal.dot(Vector3.UP) >= 0.55:
 		player.global_position = Vector3(feet_position.x, hit_position.y + 0.02, feet_position.z)
 		player.velocity = Vector3.ZERO
+		_player_was_on_floor = true
 		print("OpenOB grounded player at cell floor: marker_y=%.3f floor_y=%.3f offset=%.3fm" % [
 			feet_position.y, hit_position.y, hit_position.y - feet_position.y
 		])
 		return
 	_place_fallback_support(feet_position)
+	_player_was_on_floor = true
 	push_warning("No walkable cell floor was found below the player start; using temporary support at the start marker")
 
 func _log_runtime_spawn_positions() -> void:
@@ -336,7 +354,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	if instance_count > 0 and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = false
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
-	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and idle/walk KF load from the game files; Havok collision and game scale remain unverified." % [
+	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
 		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
 	]
 	_update_interaction_hint({})
@@ -439,9 +457,24 @@ func _load_player_avatar() -> void:
 		avatar.add_child(_player_skeleton)
 		_align_avatar_to_floor_origin(avatar, _player_skeleton)
 	await _meshes_for_model(PLAYER_IDLE_KF)
-	await _meshes_for_model(PLAYER_WALK_KF)
 	_player_animations["Idle"] = _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE)
-	_player_animations["Forward"] = _animation_sequence(PLAYER_WALK_KF, "Forward")
+	for animation_name: String in PLAYER_DIRECTIONAL_KFS:
+		var animation_info: Array = PLAYER_DIRECTIONAL_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await _meshes_for_model(asset_path)
+		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	for animation_name: String in PLAYER_JUMP_KFS:
+		var animation_info: Array = PLAYER_JUMP_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await _meshes_for_model(asset_path)
+		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	var loaded_animation_names: Array[String] = []
+	for animation_name_value: Variant in _player_animations.keys():
+		var animation_name := str(animation_name_value)
+		if _player_animations[animation_name].is_empty():
+			push_warning("Original player KF sequence %s was not found" % animation_name)
+		else:
+			loaded_animation_names.push_back(animation_name)
 	_initialize_player_face_profiles()
 	var part_count := 0
 	for model_path: String in PLAYER_AVATAR_PARTS:
@@ -483,17 +516,17 @@ func _load_player_avatar() -> void:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
 		if body_proxy != null:
 			body_proxy.visible = false
-		status_label.text += "\nOriginal Imperial male rig loaded (%d body/head shapes, %d bones); idle/walk KF playback active.\nLoaded %d base-game clothing pieces." % [
+		status_label.text += "\nOriginal Imperial male rig loaded (%d body/head shapes, %d bones); idle, directional, fast, and jump KF playback active.\nLoaded %d base-game clothing pieces." % [
 			part_count,
 			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
 			clothing_count,
 		]
-		print("OpenOB loaded original Imperial actor: %d body/head shapes, %d rig bones, %d base-game clothing pieces, idle=%s, forward=%s" % [
+		print("OpenOB loaded original Imperial actor: %d body/head shapes, %d rig bones, %d base-game clothing pieces, idle=%s, KF sequences=%s" % [
 			part_count,
 			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
 			clothing_count,
 			str(not _player_animations.get("Idle", {}).is_empty()),
-			str(not _player_animations.get("Forward", {}).is_empty())
+			", ".join(loaded_animation_names)
 		])
 
 func _initialize_player_face_profiles() -> void:
@@ -783,10 +816,12 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				weapon_attached = true
 		print("OpenOB attached equipment to %s: %s" % [actor_name, str(attached_item_names)])
 		await _meshes_for_model(PLAYER_IDLE_KF)
-		await _meshes_for_model(PLAYER_WALK_KF)
+		await _meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
+		await _meshes_for_model(PLAYER_FAST_FORWARD_KF)
 		var animations := {
 			"Idle": _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE, skeleton),
-			"Forward": _animation_sequence(PLAYER_WALK_KF, "Forward", skeleton),
+			"Forward": _animation_sequence(PLAYER_DIRECTIONAL_KFS["Forward"][0], "Forward", skeleton),
+			"FastForward": _animation_sequence(PLAYER_FAST_FORWARD_KF, "FastForward", skeleton),
 		}
 		var expression_cycle := _available_face_expression_cycle(face_meshes)
 		var waypoints := _npc_waypoints(cell, actor_name, npc)
@@ -820,9 +855,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		_npc_actors.push_back(actor_state)
 		_apply_face_expression(actor_state)
 		actor_count += 1
-	print("OpenOB assembled %d placed NPCs, %d with ESM marker routes, original idle/walk animations, and FaceGen head morphs" % [actor_count, routed_actor_count])
+	print("OpenOB assembled %d placed NPCs, %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, routed_actor_count])
 	if actor_count > 0:
-		status_label.text += "\nLoaded %d placed NPCs with original rigs, outfit meshes, FaceGen head shapes, and idle/walk animations. F cycles the nearest NPC's expression." % actor_count
+		status_label.text += "\nLoaded %d placed NPCs with original rigs, outfit meshes, FaceGen head shapes, and walk/fast-walk animations. F cycles the nearest NPC's expression." % actor_count
 
 func _clear_cell_actors() -> void:
 	for actor: Dictionary in _npc_actors:
@@ -1168,9 +1203,15 @@ func _update_npc_actors(delta: float) -> void:
 		_update_face_blink(actor, delta)
 		_update_face_expression(actor, delta)
 		var walking := bool(actor_root.get("is_walking"))
-		var requested_animation := "Forward" if walking else "Idle"
+		var horizontal_speed := Vector2(actor_root.velocity.x, actor_root.velocity.z).length()
+		var requested_animation := "Idle"
+		if walking:
+			requested_animation = "FastForward" if horizontal_speed > 2.2 else "Forward"
 		var animations: Dictionary = actor.get("animations", {})
 		var animation: Dictionary = animations.get(requested_animation, {})
+		if animation.is_empty() and requested_animation == "FastForward":
+			requested_animation = "Forward"
+			animation = animations.get(requested_animation, {})
 		if animation.is_empty():
 			continue
 		if requested_animation != str(actor.get("active_animation", "")):
@@ -1271,28 +1312,62 @@ func _update_player_animation(delta: float) -> void:
 	if _player_skeleton == null:
 		return
 	var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
-	var requested_animation := "Forward" if horizontal_speed > 0.08 else "Idle"
-	var animation: Dictionary = _player_animations.get(requested_animation, {})
+	var is_on_floor_now := player.is_on_floor()
+	if _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
+		_set_player_animation("JumpStart" if not _player_animations.get("JumpStart", {}).is_empty() else "JumpLoop")
+	elif not _player_was_on_floor and is_on_floor_now:
+		_set_player_animation("JumpLand" if not _player_animations.get("JumpLand", {}).is_empty() else _player_locomotion_animation(horizontal_speed))
+	elif not is_on_floor_now:
+		if _active_animation == "JumpStart":
+			var jump_start: Dictionary = _player_animations.get("JumpStart", {})
+			if _animation_time >= float(jump_start.get("stop_time", 0.0)):
+				_set_player_animation("JumpLoop")
+		elif _active_animation != "JumpLoop":
+			_set_player_animation("JumpLoop")
+	elif _active_animation == "JumpLand":
+		var jump_land: Dictionary = _player_animations.get("JumpLand", {})
+		if _animation_time >= float(jump_land.get("stop_time", 0.0)):
+			_set_player_animation(_player_locomotion_animation(horizontal_speed))
+	else:
+		_set_player_animation(_player_locomotion_animation(horizontal_speed))
+	_player_was_on_floor = is_on_floor_now
+	var animation: Dictionary = _player_animations.get(_active_animation, {})
 	if animation.is_empty():
 		return
-	if requested_animation != _active_animation:
-		_active_animation = requested_animation
-		_animation_time = float(animation.get("start_time", 0.0))
 	_animation_time += delta
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
 	var duration := stop_time - start_time
 	if duration <= 0.0:
 		return
-	_apply_animation_pose(_player_skeleton, animation, _animation_time)
+	_apply_animation_pose(_player_skeleton, animation, _animation_time, _active_animation not in ["JumpStart", "JumpLand"])
 
-func _apply_animation_pose(skeleton: Skeleton3D, animation: Dictionary, time: float) -> void:
+func _player_locomotion_animation(horizontal_speed: float) -> String:
+	if horizontal_speed <= 0.08:
+		return "Idle"
+	var local_velocity := Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z)
+	var is_fast := Input.is_action_pressed("run")
+	var direction_name := "Forward"
+	if absf(local_velocity.x) > absf(local_velocity.z):
+		direction_name = "Left" if local_velocity.x < 0.0 else "Right"
+	else:
+		direction_name = "Backward" if local_velocity.z > 0.0 else "Forward"
+	return ("Fast" + direction_name) if is_fast else direction_name
+
+func _set_player_animation(animation_name: String) -> void:
+	var animation: Dictionary = _player_animations.get(animation_name, {})
+	if animation.is_empty() or animation_name == _active_animation:
+		return
+	_active_animation = animation_name
+	_animation_time = float(animation.get("start_time", 0.0))
+
+func _apply_animation_pose(skeleton: Skeleton3D, animation: Dictionary, time: float, looping: bool = true) -> void:
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
 	var duration := stop_time - start_time
 	if duration <= 0.0:
 		return
-	var sample_time := start_time + fposmod(time - start_time, duration)
+	var sample_time := start_time + fposmod(time - start_time, duration) if looping else clampf(time, start_time, stop_time)
 	skeleton.reset_bone_poses()
 	for track_value: Variant in animation.get("tracks", []):
 		var track: Dictionary = track_value
