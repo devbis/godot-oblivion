@@ -157,9 +157,12 @@ func _make_exterior_environment() -> Environment:
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_SKY
 	environment.sky = sky
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	environment.ambient_light_energy = 0.45
-	environment.ambient_light_sky_contribution = 0.35
+	# A modest neutral fill keeps asset meshes readable in cast shadow. Sky-only
+	# ambient is too weak for Oblivion's dark, texture-heavy NIFs in Godot's
+	# compatibility renderer, while the directional sun still defines shadows.
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.ambient_light_color = Color(0.58, 0.64, 0.74)
+	environment.ambient_light_energy = 0.72
 	return environment
 
 func _set_cell_environment(cell: Dictionary) -> void:
