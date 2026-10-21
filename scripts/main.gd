@@ -534,7 +534,7 @@ func _load_player_avatar() -> void:
 			if PLAYER_FACE_DETAIL_PARTS.has(model_path):
 				var face_detail_to_head := Node3D.new()
 				face_detail_to_head.name = "FaceDetailToHeadSpace"
-				face_detail_to_head.transform = _player_face_detail_to_head_transform()
+				face_detail_to_head.transform = _player_face_detail_to_head_transform(model_path)
 				head_attachment.add_child(face_detail_to_head)
 				attachment = face_detail_to_head
 			elif is_player_hair:
@@ -562,7 +562,9 @@ func _load_player_avatar() -> void:
 				int(mesh_entry.get("alpha_threshold", 128))
 			)
 			if model_path.to_lower() == PLAYER_FACE_HEAD_MODEL.to_lower():
-				instance.extra_cull_margin = 1.0
+				# The skinned head can extend beyond its static NIF bounds during
+				# close camera views. Keep it inside the frustum across head poses.
+				instance.custom_aabb = source_mesh.get_aabb().grow(24.0)
 			attachment.add_child(instance)
 			var bone_names: Array = mesh_entry.get("bone_names", [])
 			if _player_skeleton != null and not bone_names.is_empty():
@@ -856,24 +858,28 @@ func _player_face_camera_anchor() -> Vector3:
 	if head_bone_index < 0:
 		return Vector3(0.0, 1.5, 0.0)
 	var head_pose := _player_skeleton.get_bone_global_pose(head_bone_index)
-	var face_detail_to_head := _player_face_detail_to_head_transform()
-	var face_target_in_skeleton := head_pose * (face_detail_to_head * Vector3(0.0, 4.0, -8.0))
+	var model_to_head := _player_head_model_to_head_transform()
+	var face_target_in_skeleton := head_pose * (model_to_head * Vector3(0.0, 4.0, -9.5))
 	return player.to_local(_player_skeleton.to_global(face_target_in_skeleton))
 
-func _player_face_detail_to_head_transform() -> Transform3D:
+
+func _player_face_detail_to_head_transform(model_path: String) -> Transform3D:
+	var normalized_path := model_path.to_lower()
+	if normalized_path.ends_with("eyeleftHuman.nif".to_lower()) or normalized_path.ends_with("eyerightHuman.nif".to_lower()):
+		return _player_head_model_to_head_transform()
+	return Transform3D.IDENTITY
+
+func _player_head_model_to_head_transform() -> Transform3D:
 	if _player_skeleton == null:
 		return Transform3D.IDENTITY
 	var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
 	if head_bone_index < 0:
 		return Transform3D.IDENTITY
-	var head_metadata: Dictionary = _nif_metadata_cache.get(PLAYER_FACE_HEAD_MODEL.to_lower(), {})
-	var face_model_head_transform := Transform3D.IDENTITY
-	for node_value: Variant in head_metadata.get("nodes", []):
-		var node: Dictionary = node_value
-		if str(node.get("name", "")) == "Bip01 Head":
-			face_model_head_transform = _godot_node_rest(node)
-			break
-	return _player_skeleton.get_bone_global_rest(head_bone_index).affine_inverse() * face_model_head_transform
+	# Eye NIF vertices are offsets from the head bone origin in the model's
+	# unrotated frame. Cancel only the rest rotation; removing the translation
+	# would move the eyes down by the height of the head.
+	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
+	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
 func _update_interaction_hint(nearby_item: Dictionary) -> void:
 	if _world_loading:

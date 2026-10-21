@@ -31,7 +31,7 @@ var face_preview_enabled := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
 var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
-const FACE_PREVIEW_MIN_DISTANCE := 0.005
+const FACE_PREVIEW_MIN_DISTANCE := 0.025
 var _capture_mouse_on_focus := false
 
 func _ready() -> void:
@@ -67,7 +67,7 @@ func toggle_face_preview(face_anchor: Vector3) -> bool:
 		_saved_camera_pitch = _camera_pitch
 		_saved_camera_distance = _target_camera_distance
 		_saved_camera_pivot_position = camera_pivot.position
-		camera.near = 0.005
+		camera.near = 0.001
 		_camera_pitch = 0.0
 		camera_pivot.position = face_anchor
 		_set_camera_distance(0.08)
@@ -88,8 +88,8 @@ func handle_camera_input(event: InputEvent) -> void:
 		_camera_yaw = wrapf(_camera_yaw - event.relative.x * mouse_sensitivity, -PI, PI)
 		_camera_pitch = clampf(
 			_camera_pitch - event.relative.y * mouse_sensitivity,
-			deg_to_rad(camera_pitch_min_degrees),
-			deg_to_rad(camera_pitch_max_degrees)
+			deg_to_rad(-20.0 if face_preview_enabled else camera_pitch_min_degrees),
+			deg_to_rad(20.0 if face_preview_enabled else camera_pitch_max_degrees)
 		)
 		_apply_camera_orbit()
 		get_viewport().set_input_as_handled()
