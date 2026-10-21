@@ -37,6 +37,7 @@ const PLAYER_FACE_DETAIL_PARTS := [
 ]
 const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
+const LINKED_DOOR_INTERACTION_DISTANCE := 2.5
 const PLAYER_AVATAR_PARTS := [
 	"Characters/_male/upperbody.nif",
 	"Characters/_male/lowerbody.nif",
@@ -79,7 +80,6 @@ var _nif_metadata_cache: Dictionary = {}
 var _collision_cache: Dictionary = {}
 var _material_cache: Dictionary = {}
 var _texture_cache: Dictionary = {}
-var _transition_index := 0
 var _cell_load_generation := 0
 var _cell_material: StandardMaterial3D
 var _world_loading := true
@@ -128,15 +128,18 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	_pickup_toast_remaining = maxf(0.0, _pickup_toast_remaining - _delta)
 	var nearby_item: Dictionary = {}
+	var nearby_door: Dictionary = {}
 	if not _world_loading:
 		nearby_item = _nearest_placed_item()
-		_update_interaction_hint(nearby_item)
+		nearby_door = _nearest_linked_door()
+		_update_interaction_hint(nearby_item, nearby_door)
 	if Input.is_action_just_released("interact"):
 		_interact_ready = true
 	if not _world_loading and not _inventory_open and _interact_ready and Input.is_action_just_pressed("interact"):
 		_interact_ready = false
 		if nearby_item.is_empty():
-			_transition_to_next_linked_cell()
+			if not nearby_door.is_empty():
+				await _transition_to_linked_cell(nearby_door)
 		else:
 			await _pick_up_placed_item(nearby_item)
 			if not Input.is_action_pressed("interact"):
@@ -384,7 +387,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and movement KF load from the game files; Havok collision and game scale remain unverified." % [
 		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
 	]
-	_update_interaction_hint({})
+	_update_interaction_hint({}, {})
 	_refresh_inventory_hud()
 	print("OpenOB displayed %s: %d placed NIF references, %d meshes" % [
 		cell.get("editor_id", "(unnamed)"), reference_count, instance_count
@@ -772,6 +775,25 @@ func _nearest_placed_item() -> Dictionary:
 			nearest_item = item
 	return nearest_item
 
+func _nearest_linked_door() -> Dictionary:
+	var nearest_door: Dictionary = {}
+	var nearest_distance_squared := LINKED_DOOR_INTERACTION_DISTANCE * LINKED_DOOR_INTERACTION_DISTANCE
+	var player_position := player.global_position
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if int(reference.get("teleport_cell_id", 0)) == 0:
+			continue
+		var door_position := _reference_transform(reference).origin
+		var horizontal_offset := Vector2(
+			player_position.x - door_position.x,
+			player_position.z - door_position.z
+		)
+		var distance_squared := horizontal_offset.length_squared()
+		if distance_squared < nearest_distance_squared:
+			nearest_distance_squared = distance_squared
+			nearest_door = reference
+	return nearest_door
+
 func _pick_up_placed_item(item: Dictionary) -> void:
 	var reference_id := int(item.get("reference_id", 0))
 	_placed_items.erase(reference_id)
@@ -881,7 +903,7 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
-func _update_interaction_hint(nearby_item: Dictionary) -> void:
+func _update_interaction_hint(nearby_item: Dictionary, nearby_door: Dictionary) -> void:
 	if _world_loading:
 		interaction_hint_label.visible = false
 		return
@@ -889,8 +911,11 @@ func _update_interaction_hint(nearby_item: Dictionary) -> void:
 		interaction_hint_label.text = _pickup_toast_text
 	elif not nearby_item.is_empty():
 		interaction_hint_label.text = "E · Pick up %s" % str(nearby_item.get("editor_id", "item"))
+	elif not nearby_door.is_empty():
+		interaction_hint_label.text = "E · Enter linked door"
 	else:
-		interaction_hint_label.text = "E · Follow next linked door"
+		interaction_hint_label.visible = false
+		return
 	interaction_hint_label.visible = true
 
 func _load_cell_actors(cell: Dictionary) -> void:
@@ -1838,30 +1863,14 @@ func _place_player_at_start_marker(cell: Dictionary) -> bool:
 		return true
 	return false
 
-func _transition_to_next_linked_cell() -> void:
+func _transition_to_linked_cell(reference: Dictionary) -> void:
 	if _world_loading or data_reader == null or current_cell.is_empty():
 		return
 	_world_loading = true
-	var linked_refs: Array = []
-	var same_cell_refs: Array = []
-	var current_id := int(current_cell.get("form_id", 0))
-	for reference: Dictionary in current_cell.references:
-		var target_id := int(reference.get("teleport_cell_id", 0))
-		if target_id == 0:
-			continue
-		if target_id == current_id:
-			same_cell_refs.push_back(reference)
-		else:
-			linked_refs.push_back(reference)
-	if linked_refs.is_empty():
-		linked_refs = same_cell_refs
-	if linked_refs.is_empty():
+	var target_id := int(reference.get("teleport_cell_id", 0))
+	if target_id == 0:
 		_world_loading = false
 		return
-	_transition_index %= linked_refs.size()
-	var reference: Dictionary = linked_refs[_transition_index]
-	_transition_index += 1
-	var target_id := int(reference.teleport_cell_id)
 	var target: Dictionary = data_reader.find_cell_by_id(target_id)
 	if target.is_empty():
 		status_label.text = "Linked door target 0x%08X is not indexed." % target_id
@@ -1870,7 +1879,6 @@ func _transition_to_next_linked_cell() -> void:
 	player.set_physics_process(false)
 	_clear_cell_actors()
 	current_cell = target
-	_transition_index = 0
 	await _load_cell_geometry(current_cell)
 	var destination: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
 	var destination_position := player.global_position
