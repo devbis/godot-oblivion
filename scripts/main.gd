@@ -1088,6 +1088,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				continue
 			var attach_bone := ""
 			var adjust_bone_orientation := false
+			var model_space_bone_attachment := false
 			if item_type == "WEAP":
 				attach_bone = "Bip01 R Hand"
 			else:
@@ -1098,8 +1099,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				elif (item_slots & 0x0003) != 0:
 					attach_bone = "Bip01 Head"
 					adjust_bone_orientation = true
+					model_space_bone_attachment = await _uses_model_space_head_attachment(item_path)
 			await _add_actor_model(
-				avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, false,
+				avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, model_space_bone_attachment,
 				race_texture_key, "", "", adjust_bone_orientation
 			)
 			attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
@@ -1430,6 +1432,18 @@ func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
 	for item_id: int in inventory_weapons:
 		item_ids.push_back(item_id)
 	return item_ids
+
+func _uses_model_space_head_attachment(model_path: String) -> bool:
+	var normalized_path := model_path.to_lower().replace("\\", "/")
+	await _meshes_for_model(model_path)
+	var metadata: Dictionary = _nif_metadata_cache.get(normalized_path, {})
+	for node_value: Variant in metadata.get("nodes", []):
+		var node: Dictionary = node_value
+		if str(node.get("name", "")) == "Bip01 Head":
+			# Some headgear NIFs keep their vertices at full character height;
+			# local headgear is centered near the origin instead.
+			return absf(float((node.get("translation", Vector3.ZERO) as Vector3).y)) > 50.0
+	return false
 
 func _add_actor_model(
 	avatar: Node3D,
