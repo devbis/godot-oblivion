@@ -646,7 +646,8 @@ func _initialize_player_face_profiles() -> void:
 	_refresh_player_face_profile_hint()
 
 func _register_player_face_profile(npc: Dictionary, head_model_path: String) -> void:
-	if head_model_path.to_lower() != PLAYER_FACE_HEAD_MODEL.to_lower():
+	var normalized_head_path := head_model_path.to_lower().replace("\\", "/")
+	if normalized_head_path != PLAYER_FACE_HEAD_MODEL.to_lower():
 		return
 	var profile_id := int(npc.get("form_id", 0))
 	if profile_id == 0 or _player_face_profile_ids.has(profile_id):
