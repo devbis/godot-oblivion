@@ -54,6 +54,10 @@ const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
 const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.08
 const EXTERIOR_CAMERA_FAR := 430.0
 const EXTERIOR_SHADOW_DISTANCE := 28.0
+const STARTUP_NEAR_REFERENCE_DISTANCE := 28.0
+const STARTUP_NEAR_TERRAIN_DISTANCE := 86.0
+const NPC_NEAR_LOAD_DISTANCE := 18.0
+const NPC_VISIBLE_LOAD_DISTANCE := 72.0
 const UNSUPPORTED_PARTICLE_MODEL_FILENAMES := [
 	"fxdustcloudfaint01.nif",
 	"fxdustcloud01.nif",
@@ -106,6 +110,14 @@ var _collision_cache: Dictionary = {}
 var _material_cache: Dictionary = {}
 var _texture_cache: Dictionary = {}
 var _cell_load_generation := 0
+var _deferred_world_generation := 0
+var _npc_stream_generation := 0
+var _npc_stream_enabled := false
+var _npc_stream_busy := false
+var _npc_stream_scan_cooldown := 0.0
+var _npc_loaded_reference_ids: Dictionary = {}
+var _player_deferred_assets_ready := false
+var _player_deferred_assets_loading := false
 var _cell_material: StandardMaterial3D
 var _interior_environment: Environment
 var _exterior_environment: Environment
@@ -146,6 +158,7 @@ var _player_animation_from_pose: Array[Dictionary] = []
 var _player_animation_blend_elapsed := ANIMATION_BLEND_DURATION
 var _player_was_on_floor := true
 var _npc_actors: Array[Dictionary] = []
+var _npc_pending_roots: Array[Node3D] = []
 var _player_start_position := Vector3.ZERO
 var _fallback_support: StaticBody3D
 
@@ -218,6 +231,7 @@ func _process(_delta: float) -> void:
 		if not _inventory_open:
 			_update_player_animation(_delta)
 		_update_npc_actors(_delta)
+		_update_npc_streaming()
 		if not _player_face_state.is_empty():
 			_update_face_blink(_player_face_state, _delta)
 			_update_face_expression(_player_face_state, _delta)
@@ -290,19 +304,23 @@ func _load_game_data() -> void:
 		player.global_position = _player_start_position
 		var spawn_rotation: Vector3 = sewer_exit_spawn.get("rotation", Vector3.ZERO)
 		player.set_spawn_yaw(spawn_rotation.y)
-	await _load_cell_geometry(current_cell)
 	if sewer_exit_spawn.is_empty():
 		_place_player_at_start(current_cell)
 	else:
 		print("OpenOB started at the sewer exit: %s" % str(player.global_position))
+	await _load_cell_geometry(
+		current_cell, 0.0,
+		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
+		true
+	)
 	await _place_player_on_ground(_player_start_position)
 	await _load_player_avatar()
-	await _load_cell_actors(current_cell)
 	player.set_physics_process(true)
 	_world_loading = false
+	_npc_stream_enabled = false
 	face_view_button.disabled = false
 	player.capture_mouse()
-	await get_tree().create_timer(1.0).timeout
+	_start_deferred_cell_loading()
 	_log_runtime_spawn_positions()
 
 func _sewer_exit_start_data() -> Dictionary:
@@ -408,7 +426,7 @@ func _log_runtime_spawn_positions() -> void:
 			str(player.is_on_floor()),
 		])
 	if _npc_actors.is_empty():
-		print("OpenOB spawn check after physics: player=%s; no NPC actors" % str(player.global_position))
+		print("OpenOB spawn check after physics: player=%s; NPCs will stream when nearby or in view" % str(player.global_position))
 		return
 	var first_actor: Dictionary = _npc_actors[0]
 	var first_root := first_actor.get("root") as Node3D
@@ -443,18 +461,24 @@ func _game_data_path() -> String:
 		return str(config.get_value("game", "data_directory", ""))
 	return ""
 
-func _load_cell_geometry(cell: Dictionary) -> void:
+func _load_cell_geometry(
+	cell: Dictionary,
+	min_distance: float = 0.0,
+	max_distance: float = INF,
+	clear_existing: bool = true
+) -> bool:
 	_cell_load_generation += 1
 	var generation := _cell_load_generation
 	_set_cell_environment(cell)
-	_placed_items.clear()
-	_linked_door_candidates.clear()
-	if has_node("TestFloor/MeshInstance3D"):
-		$TestFloor/MeshInstance3D.visible = true
-		$TestFloor/CollisionShape3D.disabled = false
-	for child in cell_visual_root.get_children():
-		child.queue_free()
-	await get_tree().process_frame
+	if clear_existing:
+		_placed_items.clear()
+		_linked_door_candidates.clear()
+		if has_node("TestFloor/MeshInstance3D"):
+			$TestFloor/MeshInstance3D.visible = true
+			$TestFloor/CollisionShape3D.disabled = false
+		for child in cell_visual_root.get_children():
+			child.queue_free()
+		await get_tree().process_frame
 
 	var instance_count := 0
 	var reference_count := 0
@@ -471,26 +495,45 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 		terrain_cells.push_back(cell.get("land"))
 	for land_value: Variant in terrain_cells:
 		if generation != _cell_load_generation:
-			return
+			return false
 		var land: Dictionary = land_value
-		var land_result: Dictionary = await _add_land_cell(land)
+		var land_position := Vector3(
+			(float(land.get("grid_x", 0)) + 0.5) * EXTERIOR_CELL_SIZE,
+			0.0,
+			-(float(land.get("grid_y", 0)) + 0.5) * EXTERIOR_CELL_SIZE
+		) * game_units_to_meters
+		var land_distance := land_position.distance_to(player.global_position)
+		if (min_distance > 0.0 and land_distance <= min_distance) or land_distance > max_distance:
+			continue
+		var land_result: Dictionary = await _add_land_cell(land, generation)
 		if bool(land_result.get("rendered", false)):
 			instance_count += 1
 		if bool(land_result.get("collider", false)):
 			collision_count += 1
 	if generation != _cell_load_generation:
-		return
-	if _add_water_region(cell.get("water_cells", [])):
+		return false
+	if clear_existing and _add_water_region(cell.get("water_cells", [])):
 		instance_count += 1
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
-			return
-		if int(reference.get("teleport_cell_id", 0)) != 0:
-			_linked_door_candidates.push_back({
-				"reference": reference,
-				"position": _reference_transform(reference).origin,
-			})
+			return false
 		var reference_transform := _reference_transform(reference)
+		var reference_distance := reference_transform.origin.distance_to(player.global_position)
+		if (min_distance > 0.0 and reference_distance <= min_distance) or reference_distance > max_distance:
+			continue
+		if int(reference.get("teleport_cell_id", 0)) != 0:
+			var door_id := int(reference.get("form_id", 0))
+			var already_added := false
+			for door_candidate: Dictionary in _linked_door_candidates:
+				if int(door_candidate.get("reference_id", 0)) == door_id:
+					already_added = true
+					break
+			if not already_added:
+				_linked_door_candidates.push_back({
+					"reference_id": door_id,
+					"reference": reference,
+					"position": reference_transform.origin,
+				})
 		if is_exterior and bool(reference.get("is_tree", false)):
 			var tree_distance := reference_transform.origin.distance_to(player.global_position)
 			if tree_distance > EXTERIOR_TREE_RENDER_DISTANCE:
@@ -505,12 +548,14 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 			var tree_mesh := _tree_billboard_mesh(tree_width, tree_height, use_single_billboard)
 			var tree_texture := await _texture_for_path(tree_texture_path)
 			if generation != _cell_load_generation:
-				return
+				return false
 			if tree_mesh == null or tree_texture == null:
 				continue
 			var tree_material := await _material_for_texture(
 				tree_texture_path, false, true, 128, use_single_billboard
 			)
+			if generation != _cell_load_generation:
+				return false
 			var batch_x := floori(reference_transform.origin.x / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
 			var batch_z := floori(reference_transform.origin.z / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
 			var tree_key := "%s|%.1f|%.1f|%s|%d|%d|%d" % [
@@ -551,6 +596,8 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 		var is_pickup_item := base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]
 		reference_count += 1
 		var meshes: Array = await _meshes_for_model(model_path)
+		if generation != _cell_load_generation:
+			return false
 		var should_collide := (
 			not is_pickup_item
 			and _should_collide_model(model_path)
@@ -579,6 +626,8 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 						bool(mesh_entry.get("alpha_test", false)),
 						int(mesh_entry.get("alpha_threshold", 128))
 					)
+					if generation != _cell_load_generation:
+						return false
 					exterior_batch_materials[material_key] = batch_material
 				var batch_x := floori(reference_transform.origin.x / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
 				var batch_z := floori(reference_transform.origin.z / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
@@ -613,6 +662,8 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 					bool(mesh_entry.get("alpha_test", false)),
 					int(mesh_entry.get("alpha_threshold", 128))
 				)
+				if generation != _cell_load_generation:
+					return false
 				instance.transform = reference_transform
 				cell_visual_root.add_child(instance)
 				if is_pickup_item:
@@ -646,6 +697,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
 				cell.get("editor_id", "cell"), reference_count, instance_count
 			]
+			await get_tree().process_frame
 
 	for batches: Dictionary in [exterior_batches, exterior_tree_batches]:
 		for batch_key: String in batches:
@@ -674,8 +726,8 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 			instance_count += 1
 
 	if generation != _cell_load_generation:
-		return
-	if has_node("TestFloor/MeshInstance3D"):
+		return false
+	if clear_existing and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = collision_count == 0
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
 	var cell_label := str(cell.get("display_name", ""))
@@ -690,8 +742,9 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 		cell_label, reference_count, tree_reference_count, instance_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
+	return true
 
-func _add_land_cell(land: Dictionary) -> Dictionary:
+func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 	var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
 	if heights.size() != 33 * 33:
 		return {}
@@ -716,6 +769,8 @@ func _add_land_cell(land: Dictionary) -> Dictionary:
 	if texture_path.is_empty():
 		texture_path = "textures/landscape/terrainhddirt01.dds"
 	instance.material_override = await _material_for_texture(texture_path)
+	if generation >= 0 and generation != _cell_load_generation:
+		return {}
 	instance.scale = Vector3.ONE * game_units_to_meters
 	instance.position = position
 	cell_visual_root.add_child(instance)
@@ -872,14 +927,17 @@ func _stream_exterior_if_needed() -> void:
 	)
 	if exterior_region.is_empty():
 		return
+	_deferred_world_generation += 1
+	_npc_stream_enabled = false
 	_world_loading = true
 	player.set_physics_process(false)
 	_clear_cell_actors()
 	current_cell = exterior_region
-	await _load_cell_geometry(current_cell)
-	await _load_cell_actors(current_cell)
+	await _load_cell_geometry(current_cell, 0.0, STARTUP_NEAR_TERRAIN_DISTANCE, true)
+	await _place_player_on_ground(player.global_position)
 	player.set_physics_process(true)
 	_world_loading = false
+	_start_deferred_cell_loading()
 
 func _meshes_for_model(model_path: String) -> Array:
 	var key := model_path.to_lower().replace("\\", "/")
@@ -993,16 +1051,6 @@ func _load_player_avatar() -> void:
 		_align_avatar_to_floor_origin(avatar, _player_skeleton)
 	await _meshes_for_model(PLAYER_IDLE_KF)
 	_player_animations["Idle"] = _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE)
-	for animation_name: String in PLAYER_DIRECTIONAL_KFS:
-		var animation_info: Array = PLAYER_DIRECTIONAL_KFS[animation_name]
-		var asset_path := str(animation_info[0])
-		await _meshes_for_model(asset_path)
-		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
-	for animation_name: String in PLAYER_JUMP_KFS:
-		var animation_info: Array = PLAYER_JUMP_KFS[animation_name]
-		var asset_path := str(animation_info[0])
-		await _meshes_for_model(asset_path)
-		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
 	var loaded_animation_names: Array[String] = []
 	for animation_name_value: Variant in _player_animations.keys():
 		var animation_name := str(animation_name_value)
@@ -1014,8 +1062,6 @@ func _load_player_avatar() -> void:
 	var part_count := 0
 	var player_model_paths: Array[String] = []
 	for model_path_value: Variant in PLAYER_AVATAR_PARTS:
-		player_model_paths.push_back(str(model_path_value))
-	for model_path_value: Variant in PLAYER_FACE_DETAIL_PARTS:
 		player_model_paths.push_back(str(model_path_value))
 	for model_path: String in player_model_paths:
 		var meshes: Array = await _meshes_for_model(model_path)
@@ -1098,11 +1144,13 @@ func _load_player_avatar() -> void:
 	_refresh_player_face_profile_hint()
 	print("OpenOB player FaceGen expressions: %s" % str(_player_face_state.expression_cycle))
 	var clothing_count := await _load_player_starting_clothing(avatar)
+	_active_animation = ""
+	_player_was_on_floor = true
 	if part_count > 0:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
 		if body_proxy != null:
 			body_proxy.visible = false
-		status_label.text += "\nOriginal Imperial male rig loaded (%d body/head shapes, %d bones); idle, directional, fast, and jump KF playback active.\nLoaded %d base-game clothing pieces." % [
+		status_label.text += "\nOriginal Imperial male rig loaded (%d body/head shapes, %d bones); idle KF ready, other movement animations loading in background.\nLoaded %d base-game clothing pieces." % [
 			part_count,
 			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
 			clothing_count,
@@ -1114,6 +1162,87 @@ func _load_player_avatar() -> void:
 			str(not _player_animations.get("Idle", {}).is_empty()),
 			", ".join(loaded_animation_names)
 		])
+
+func _load_player_face_detail_part(model_path: String) -> void:
+	var meshes: Array = await _meshes_for_model(model_path)
+	var facegen_data := _ensure_facegen_data(model_path)
+	var head_attachment := BoneAttachment3D.new()
+	head_attachment.name = model_path.get_file().get_basename() + "Attachment"
+	head_attachment.bone_name = "Bip01 Head"
+	var attachment: Node3D = _player_avatar
+	if _player_skeleton != null:
+		_player_skeleton.add_child(head_attachment)
+		var face_detail_to_head := Node3D.new()
+		face_detail_to_head.name = "FaceDetailToHeadSpace"
+		face_detail_to_head.transform = _player_face_detail_to_head_transform(model_path)
+		head_attachment.add_child(face_detail_to_head)
+		attachment = face_detail_to_head
+	for mesh_entry: Dictionary in meshes:
+		var instance := MeshInstance3D.new()
+		var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
+		instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
+		var source_mesh := mesh_entry.mesh as ArrayMesh
+		instance.mesh = source_mesh
+		_player_face_meshes.push_back(instance)
+		_player_face_source_meshes.push_back(source_mesh)
+		_player_facegen_mesh_data.push_back(facegen_data)
+		instance.material_override = await _material_for_texture(
+			str(mesh_entry.diffuse_texture_path),
+			bool(mesh_entry.get("alpha_blend", false)),
+			bool(mesh_entry.get("alpha_test", false)),
+			int(mesh_entry.get("alpha_threshold", 128))
+		)
+		attachment.add_child(instance)
+		var bone_names: Array = mesh_entry.get("bone_names", [])
+		if _player_skeleton != null and not bone_names.is_empty():
+			instance.skeleton = NodePath("../Skeleton3D")
+			instance.skin = _skin_for_mesh(bone_names, _player_skeleton)
+
+func _load_deferred_player_assets() -> void:
+	if _player_avatar == null or _player_skeleton == null:
+		return
+	for model_path_value: Variant in PLAYER_FACE_DETAIL_PARTS:
+		await _load_player_face_detail_part(str(model_path_value))
+	_player_face_state["expression_cycle"] = _available_face_expression_cycle(_player_face_meshes)
+	_apply_face_expression(_player_face_state)
+	for animation_name: String in PLAYER_DIRECTIONAL_KFS:
+		var animation_info: Array = PLAYER_DIRECTIONAL_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await _meshes_for_model(asset_path)
+		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	for animation_name: String in PLAYER_JUMP_KFS:
+		var animation_info: Array = PLAYER_JUMP_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await _meshes_for_model(asset_path)
+		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	print("OpenOB loaded deferred player face parts and %d original movement animations" % _player_animations.size())
+
+func _start_deferred_cell_loading() -> void:
+	_deferred_world_generation += 1
+	_npc_stream_enabled = false
+	_load_deferred_cell_assets(_deferred_world_generation, current_cell)
+
+func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
+	while _player_deferred_assets_loading:
+		await get_tree().process_frame
+		if generation != _deferred_world_generation:
+			return
+	if not _player_deferred_assets_ready:
+		_player_deferred_assets_loading = true
+		await _load_deferred_player_assets()
+		_player_deferred_assets_loading = false
+		_player_deferred_assets_ready = true
+	if generation != _deferred_world_generation:
+		return
+	var is_exterior := not bool(cell.get("interior", true))
+	var near_distance := STARTUP_NEAR_REFERENCE_DISTANCE if not is_exterior else STARTUP_NEAR_TERRAIN_DISTANCE
+	var far_distance := INF if not is_exterior else EXTERIOR_CAMERA_FAR
+	status_label.text = "Loading the rest of %s while you can explore…" % str(cell.get("display_name", cell.get("editor_id", "cell")))
+	var geometry_complete: bool = await _load_cell_geometry(cell, near_distance, far_distance, false)
+	if not geometry_complete or generation != _deferred_world_generation:
+		return
+	_npc_stream_enabled = true
+	print("OpenOB nearby world pass complete; NPC streaming enabled for %s" % str(cell.get("editor_id", "cell")))
 
 func _initialize_player_face_profiles() -> void:
 	_player_face_profiles.clear()
@@ -1546,8 +1675,10 @@ func _update_interaction_hint(nearby_item: Dictionary, nearby_door: Dictionary) 
 		return
 	interaction_hint_label.visible = true
 
-func _load_cell_actors(cell: Dictionary) -> void:
-	_clear_cell_actors()
+func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
+	if clear_existing:
+		_clear_cell_actors()
+	var stream_generation := _npc_stream_generation
 	var actor_count := 0
 	var routed_actor_count := 0
 	var grounded_actor_count := 0
@@ -1555,6 +1686,13 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		var reference: Dictionary = reference_value
 		if str(reference.get("record_type", "")) != "ACHR":
 			continue
+		var reference_id := int(reference.get("form_id", 0))
+		if target_reference_id >= 0 and reference_id != target_reference_id:
+			continue
+		if _npc_loaded_reference_ids.has(reference_id):
+			continue
+		if target_reference_id >= 0:
+			_npc_loaded_reference_ids[reference_id] = true
 		if not bool(cell.get("interior", true)):
 			if _is_early_oblivion_gate(reference, str(reference.get("model_path", ""))):
 				continue
@@ -1576,6 +1714,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 		actor_root.transform = _actor_reference_transform(reference)
 		add_child(actor_root)
+		_npc_pending_roots.push_back(actor_root)
 		var actor_collision := CollisionShape3D.new()
 		actor_collision.name = "ApproximateActorCollision"
 		var actor_capsule := CapsuleShape3D.new()
@@ -1593,7 +1732,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		var skeleton_metadata: Dictionary = _nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
 		var skeleton := _build_player_skeleton(skeleton_metadata.get("nodes", []))
 		if skeleton == null:
-			actor_root.queue_free()
+			_discard_pending_npc(actor_root)
 			continue
 		avatar.add_child(skeleton)
 		_align_avatar_to_floor_origin(avatar, skeleton)
@@ -1629,6 +1768,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				"",
 				str(body_part.get("texture_path", ""))
 			)
+			if stream_generation != _npc_stream_generation:
+				_discard_pending_npc(actor_root)
+				return
 		var head_meshes: Array[MeshInstance3D] = await _add_actor_model(
 			avatar,
 			skeleton,
@@ -1641,6 +1783,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			"",
 			str(head_part.get("texture_path", ""))
 		)
+		if stream_generation != _npc_stream_generation:
+			_discard_pending_npc(actor_root)
+			return
 		face_meshes.append_array(head_meshes)
 		for detail_part: Dictionary in _npc_face_detail_entries(npc):
 			var detail_path := str(detail_part.get("model_path", ""))
@@ -1664,6 +1809,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				not uses_head_bone_rotation
 			)
 			face_meshes.append_array(detail_meshes)
+			if stream_generation != _npc_stream_generation:
+				_discard_pending_npc(actor_root)
+				return
 		if covered_head_slots == 0:
 			var hair_form_id := int(npc.get("hair_form_id", 0))
 			var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
@@ -1675,6 +1823,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
 				"", "", "", not hair_is_model_space
 			)
+			if stream_generation != _npc_stream_generation:
+				_discard_pending_npc(actor_root)
+				return
 		var weapon_attached := false
 		var attached_item_names: Array[String] = []
 		for item_form_id: int in equipment_ids:
@@ -1704,6 +1855,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 				avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, model_space_bone_attachment,
 				race_texture_key, "", "", adjust_bone_orientation
 			)
+			if stream_generation != _npc_stream_generation:
+				_discard_pending_npc(actor_root)
+				return
 			attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
 			if item_type == "WEAP":
 				weapon_attached = true
@@ -1711,6 +1865,9 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		await _meshes_for_model(PLAYER_IDLE_KF)
 		await _meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
 		await _meshes_for_model(PLAYER_FAST_FORWARD_KF)
+		if stream_generation != _npc_stream_generation:
+			_discard_pending_npc(actor_root)
+			return
 		var animations := {
 			"Idle": _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE, skeleton),
 			"Forward": _animation_sequence(PLAYER_DIRECTIONAL_KFS["Forward"][0], "Forward", skeleton),
@@ -1748,13 +1905,73 @@ func _load_cell_actors(cell: Dictionary) -> void:
 			"animation_blend_elapsed": ANIMATION_BLEND_DURATION,
 		}
 		_npc_actors.push_back(actor_state)
+		_npc_pending_roots.erase(actor_root)
+		_npc_loaded_reference_ids[reference_id] = true
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count, routed_actor_count])
 	if actor_count > 0:
 		status_label.text += "\nLoaded %d placed NPCs with original rigs, outfit meshes, FaceGen head shapes, and walk/fast-walk animations. F cycles the nearest NPC's expression." % actor_count
+		await get_tree().process_frame
+
+func _update_npc_streaming() -> void:
+	if not _npc_stream_enabled or _npc_stream_busy or _world_loading or data_reader == null:
+		return
+	_npc_stream_scan_cooldown = maxf(0.0, _npc_stream_scan_cooldown - get_process_delta_time())
+	if _npc_stream_scan_cooldown > 0.0:
+		return
+	_npc_stream_scan_cooldown = 0.25
+	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+	var is_exterior := not bool(current_cell.get("interior", true))
+	var visible_distance := 110.0 if is_exterior else NPC_VISIBLE_LOAD_DISTANCE
+	var selected_reference_id := -1
+	var selected_priority := INF
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("record_type", "")) != "ACHR":
+			continue
+		var reference_id := int(reference.get("form_id", 0))
+		if _npc_loaded_reference_ids.has(reference_id):
+			continue
+		if is_exterior and _is_early_oblivion_gate(reference, str(reference.get("model_path", ""))):
+			continue
+		var position := _actor_reference_transform(reference).origin
+		var distance_to_player := position.distance_to(player.global_position)
+		var is_near := distance_to_player <= NPC_NEAR_LOAD_DISTANCE
+		var is_visible := (
+			camera != null
+			and distance_to_player <= visible_distance
+			and camera.is_position_in_frustum(position)
+		)
+		if not is_near and not is_visible:
+			continue
+		var priority := distance_to_player + (0.0 if is_near else 1000.0)
+		if priority < selected_priority:
+			selected_priority = priority
+			selected_reference_id = reference_id
+	if selected_reference_id < 0:
+		return
+	_npc_stream_busy = true
+	_load_next_streamed_npc.call_deferred(current_cell, selected_reference_id, _npc_stream_generation)
+
+func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generation: int) -> void:
+	if stream_generation != _npc_stream_generation:
+		return
+	await _load_cell_actors(cell, reference_id, false)
+	if stream_generation == _npc_stream_generation:
+		_npc_stream_busy = false
 
 func _clear_cell_actors() -> void:
+	_npc_stream_generation += 1
+	_npc_stream_busy = false
+	_npc_loaded_reference_ids.clear()
+	for actor_root: Node3D in _npc_pending_roots:
+		if not is_instance_valid(actor_root):
+			continue
+		actor_root.set_physics_process(false)
+		actor_root.set_process(false)
+		actor_root.queue_free()
+	_npc_pending_roots.clear()
 	for actor: Dictionary in _npc_actors:
 		var actor_root := actor.get("root") as Node3D
 		if not is_instance_valid(actor_root):
@@ -1763,6 +1980,14 @@ func _clear_cell_actors() -> void:
 		actor_root.set_process(false)
 		actor_root.queue_free()
 	_npc_actors.clear()
+
+func _discard_pending_npc(actor_root: Node3D) -> void:
+	_npc_pending_roots.erase(actor_root)
+	if not is_instance_valid(actor_root):
+		return
+	actor_root.set_physics_process(false)
+	actor_root.set_process(false)
+	actor_root.queue_free()
 
 func _npc_head_model_path(npc: Dictionary) -> String:
 	var race_head_parts: Array = npc.get("race_head_parts", [])
@@ -2957,16 +3182,22 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 	var destination_position := player.global_position
 	if destination.size() >= 3:
 		destination_position = Vector3(destination[0], destination[2], -destination[1]) * game_units_to_meters
+	_deferred_world_generation += 1
+	_npc_stream_enabled = false
 	player.set_physics_process(false)
 	_clear_cell_actors()
 	player.global_position = destination_position
 	current_cell = target
-	await _load_cell_geometry(current_cell)
+	await _load_cell_geometry(
+		current_cell, 0.0,
+		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
+		true
+	)
 	await _place_player_on_ground(destination_position)
 	var destination_rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
 	if destination_rotation.size() >= 3:
 		var godot_rotation := _reference_rotation(destination_rotation)
 		player.set_spawn_yaw(godot_rotation.get_euler().y)
-	await _load_cell_actors(current_cell)
 	player.set_physics_process(true)
 	_world_loading = false
+	_start_deferred_cell_loading()
