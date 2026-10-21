@@ -41,9 +41,13 @@ const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const LINKED_DOOR_INTERACTION_DISTANCE := 2.5
 const EXTERIOR_CELL_SIZE := 4096.0
-const EXTERIOR_STREAM_RADIUS := 1
-const EXTERIOR_REFERENCE_RENDER_DISTANCE := 30.0
+const EXTERIOR_STREAM_RADIUS := 2
+const EXTERIOR_REFERENCE_RENDER_DISTANCE := 60.0
 const EXTERIOR_COLLISION_DISTANCE := 18.0
+const EXTERIOR_TERRAIN_COLLISION_DISTANCE := 65.0
+const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
+const EXTERIOR_CAMERA_FAR := 130.0
+const EXTERIOR_SHADOW_DISTANCE := 28.0
 const UNSUPPORTED_PARTICLE_MODEL_FILENAMES := [
 	"fxdustcloudfaint01.nif",
 	"fxdustcloud01.nif",
@@ -120,6 +124,7 @@ var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
 var _inventory_open := false
 var _placed_items: Dictionary = {}
+var _linked_door_candidates: Array[Dictionary] = []
 var _pickup_toast_text := ""
 var _pickup_toast_remaining := 0.0
 var _facegen_cache: Dictionary = {}
@@ -176,7 +181,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	if camera != null:
-		camera.far = 70.0 if is_exterior else 4000.0
+		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
 	_pickup_toast_remaining = maxf(0.0, _pickup_toast_remaining - _delta)
@@ -431,6 +436,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	var generation := _cell_load_generation
 	_set_cell_environment(cell)
 	_placed_items.clear()
+	_linked_door_candidates.clear()
 	if has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = true
 		$TestFloor/CollisionShape3D.disabled = false
@@ -443,6 +449,9 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	var collision_count := 0
 	var culled_reference_count := 0
 	var skipped_gate_count := 0
+	var exterior_batches: Dictionary = {}
+	var exterior_batch_materials: Dictionary = {}
+	var is_exterior := not bool(cell.get("interior", true))
 	var terrain_cells: Array = cell.get("land_cells", [])
 	if terrain_cells.is_empty() and cell.has("land"):
 		terrain_cells.push_back(cell.get("land"))
@@ -450,8 +459,10 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 		if generation != _cell_load_generation:
 			return
 		var land: Dictionary = land_value
-		if await _add_land_cell(land):
+		var land_result: Dictionary = await _add_land_cell(land)
+		if bool(land_result.get("rendered", false)):
 			instance_count += 1
+		if bool(land_result.get("collider", false)):
 			collision_count += 1
 	for water_value: Variant in cell.get("water_cells", []):
 		if generation != _cell_load_generation:
@@ -461,11 +472,16 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
 			return
+		if int(reference.get("teleport_cell_id", 0)) != 0:
+			_linked_door_candidates.push_back({
+				"reference": reference,
+				"position": _reference_transform(reference).origin,
+			})
 		var model_path := str(reference.get("model_path", ""))
 		if model_path.is_empty() or not model_path.to_lower().ends_with(".nif"):
 			continue
 		var reference_transform := _reference_transform(reference)
-		if not bool(cell.get("interior", true)) and reference_transform.origin.distance_to(player.global_position) > EXTERIOR_REFERENCE_RENDER_DISTANCE:
+		if is_exterior and reference_transform.origin.distance_to(player.global_position) > EXTERIOR_REFERENCE_RENDER_DISTANCE:
 			culled_reference_count += 1
 			continue
 		if _is_early_oblivion_gate(reference, model_path):
@@ -476,24 +492,72 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 		var is_pickup_item := base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]
 		reference_count += 1
 		var meshes: Array = await _meshes_for_model(model_path)
+		var should_collide := (
+			not is_pickup_item
+			and _should_collide_model(model_path)
+			and (not is_exterior or reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_DISTANCE)
+		)
+		if should_collide:
+			_ensure_collision_shape(model_path)
 		var item_mesh_instances: Array[MeshInstance3D] = []
-		for mesh_entry: Dictionary in meshes:
-			var instance := MeshInstance3D.new()
-			var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
-			instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
-			instance.mesh = mesh_entry.mesh
-			instance.material_override = await _material_for_reference(
-				model_path,
-				str(mesh_entry.diffuse_texture_path),
-				bool(mesh_entry.get("alpha_blend", false)),
-				bool(mesh_entry.get("alpha_test", false)),
-				int(mesh_entry.get("alpha_threshold", 128))
+		for mesh_index in range(meshes.size()):
+			var mesh_entry: Dictionary = meshes[mesh_index]
+			var model_key := model_path.to_lower().replace("\\", "/")
+			var can_batch := (
+				is_exterior
+				and not is_pickup_item
+				and not _is_debug_service_model(model_path)
+				and not bool(mesh_entry.get("alpha_blend", false))
 			)
-			instance.transform = reference_transform
-			cell_visual_root.add_child(instance)
-			if is_pickup_item:
-				item_mesh_instances.push_back(instance)
-			instance_count += 1
+			if can_batch:
+				var material_key := "%s|%d" % [model_key, mesh_index]
+				var batch_material := exterior_batch_materials.get(material_key) as Material
+				if batch_material == null:
+					batch_material = await _material_for_reference(
+						model_path,
+						str(mesh_entry.diffuse_texture_path),
+						bool(mesh_entry.get("alpha_blend", false)),
+						bool(mesh_entry.get("alpha_test", false)),
+						int(mesh_entry.get("alpha_threshold", 128))
+					)
+					exterior_batch_materials[material_key] = batch_material
+				var batch_x := floori(reference_transform.origin.x / EXTERIOR_BATCH_SIZE_METERS)
+				var batch_z := floori(reference_transform.origin.z / EXTERIOR_BATCH_SIZE_METERS)
+				var batch_key := "%s|%d|%d" % [material_key, batch_x, batch_z]
+				var batch: Dictionary = exterior_batches.get(batch_key, {})
+				if batch.is_empty():
+					batch = {
+						"mesh": mesh_entry.mesh,
+						"mesh_name": str(mesh_entry.get("mesh_name", "Mesh")),
+						"material": batch_material,
+						"origin": Vector3(
+							batch_x * EXTERIOR_BATCH_SIZE_METERS,
+							0.0,
+							batch_z * EXTERIOR_BATCH_SIZE_METERS
+						),
+						"transforms": [],
+					}
+					exterior_batches[batch_key] = batch
+				var relative_transform := reference_transform
+				relative_transform.origin -= batch.origin
+				batch.transforms.push_back(relative_transform)
+			else:
+				var instance := MeshInstance3D.new()
+				var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
+				instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
+				instance.mesh = mesh_entry.mesh
+				instance.material_override = await _material_for_reference(
+					model_path,
+					str(mesh_entry.diffuse_texture_path),
+					bool(mesh_entry.get("alpha_blend", false)),
+					bool(mesh_entry.get("alpha_test", false)),
+					int(mesh_entry.get("alpha_threshold", 128))
+				)
+				instance.transform = reference_transform
+				cell_visual_root.add_child(instance)
+				if is_pickup_item:
+					item_mesh_instances.push_back(instance)
+				instance_count += 1
 		if is_pickup_item and not item_mesh_instances.is_empty():
 			var reference_id := int(reference.get("form_id", 0))
 			_placed_items[reference_id] = {
@@ -504,10 +568,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 				"position": reference_transform.origin,
 				"mesh_instances": item_mesh_instances,
 			}
-		if not is_pickup_item and _should_collide_model(model_path) and (
-			bool(cell.get("interior", true))
-			or reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_DISTANCE
-		):
+		if should_collide:
 			var model_key := model_path.to_lower().replace("\\", "/")
 			var collision_shape := _collision_cache.get(model_key) as ConcavePolygonShape3D
 			if collision_shape != null:
@@ -525,6 +586,31 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
 				cell.get("editor_id", "cell"), reference_count, instance_count
 			]
+
+	for batch_key: String in exterior_batches:
+		var batch: Dictionary = exterior_batches[batch_key]
+		var transforms: Array = batch.transforms
+		if transforms.is_empty():
+			continue
+		var multimesh := MultiMesh.new()
+		multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		multimesh.mesh = batch.mesh
+		multimesh.instance_count = transforms.size()
+		for transform_index in range(transforms.size()):
+			multimesh.set_instance_transform(transform_index, transforms[transform_index])
+		multimesh.custom_aabb = AABB(
+			Vector3(-20.0, -100.0, -20.0),
+			Vector3(EXTERIOR_BATCH_SIZE_METERS + 40.0, 200.0, EXTERIOR_BATCH_SIZE_METERS + 40.0)
+		)
+		var batch_instance := MultiMeshInstance3D.new()
+		batch_instance.name = "ExteriorBatch_" + str(batch.mesh_name).replace(":", "_")
+		batch_instance.multimesh = multimesh
+		batch_instance.material_override = batch.material
+		batch_instance.position = batch.origin
+		if batch.origin.distance_to(player.global_position) > EXTERIOR_SHADOW_DISTANCE:
+			batch_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		cell_visual_root.add_child(batch_instance)
+		instance_count += 1
 
 	if generation != _cell_load_generation:
 		return
@@ -544,10 +630,10 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
 
-func _add_land_cell(land: Dictionary) -> bool:
+func _add_land_cell(land: Dictionary) -> Dictionary:
 	var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
 	if heights.size() != 33 * 33:
-		return false
+		return {}
 	var grid_x := int(land.get("grid_x", 0))
 	var grid_y := int(land.get("grid_y", 0))
 	var cache_key := "%d,%d" % [grid_x, grid_y]
@@ -555,7 +641,7 @@ func _add_land_cell(land: Dictionary) -> bool:
 	if mesh == null:
 		mesh = _build_land_mesh(heights)
 		if mesh == null:
-			return false
+			return {}
 		_land_mesh_cache[cache_key] = mesh
 	var instance := MeshInstance3D.new()
 	instance.name = "Terrain_%d_%d" % [grid_x, grid_y]
@@ -569,6 +655,13 @@ func _add_land_cell(land: Dictionary) -> bool:
 	cell_visual_root.add_child(instance)
 
 	var collision := _land_collision_cache.get(cache_key) as ConcavePolygonShape3D
+	var terrain_center := instance.position + Vector3(
+		EXTERIOR_BATCH_SIZE_METERS * 0.5,
+		0.0,
+		-EXTERIOR_BATCH_SIZE_METERS * 0.5
+	)
+	if terrain_center.distance_to(player.global_position) > EXTERIOR_TERRAIN_COLLISION_DISTANCE:
+		return {"rendered": true, "collider": false}
 	if collision == null:
 		collision = _build_concave_shape(mesh.get_faces())
 		if collision != null:
@@ -584,7 +677,7 @@ func _add_land_cell(land: Dictionary) -> bool:
 		collision_instance.shape = collision
 		body.add_child(collision_instance)
 		cell_visual_root.add_child(body)
-	return collision != null
+	return {"rendered": true, "collider": collision != null}
 
 func _build_land_mesh(heights: PackedFloat32Array) -> ArrayMesh:
 	var surface := SurfaceTool.new()
@@ -699,7 +792,6 @@ func _meshes_for_model(model_path: String) -> Array:
 	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
 	var raw_meshes: Array = result.get("meshes", [])
 	var godot_meshes: Array[Dictionary] = []
-	var collision_faces := PackedVector3Array()
 	for index in range(raw_meshes.size()):
 		var mesh_data: Dictionary = raw_meshes[index]
 		var builder := Callable(self, "_build_godot_mesh").bind(mesh_data)
@@ -716,17 +808,22 @@ func _meshes_for_model(model_path: String) -> Array:
 				"alpha_threshold": int(mesh_data.get("alpha_threshold", 128)),
 				"bone_names": mesh_data.get("bone_names", []),
 			})
-			var shape_name := str(mesh_data.get("name", "")).to_lower()
-			if not shape_name.contains("sky") and not shape_name.contains("lightbeam") and not shape_name.contains("dust"):
-				collision_faces.append_array(resource.get_faces())
-	_collision_cache[key] = null
-	if not collision_faces.is_empty():
-		var collision_builder := Callable(self, "_build_concave_shape").bind(collision_faces)
-		_collision_cache[key] = DerivedResourceCache.load_or_build(
-			source_bytes, "nif-static-concave-shape", collision_builder
-		) as ConcavePolygonShape3D
 	_model_cache[key] = godot_meshes
 	return godot_meshes
+
+func _ensure_collision_shape(model_path: String) -> void:
+	var key := model_path.to_lower().replace("\\", "/")
+	if _collision_cache.has(key):
+		return
+	var collision_faces := PackedVector3Array()
+	for mesh_entry: Dictionary in _model_cache.get(key, []):
+		var shape_name := str(mesh_entry.get("mesh_name", "")).to_lower()
+		if shape_name.contains("sky") or shape_name.contains("lightbeam") or shape_name.contains("dust"):
+			continue
+		var mesh := mesh_entry.get("mesh") as ArrayMesh
+		if mesh != null:
+			collision_faces.append_array(mesh.get_faces())
+	_collision_cache[key] = _build_concave_shape(collision_faces)
 
 func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
@@ -1104,11 +1201,9 @@ func _nearest_linked_door() -> Dictionary:
 	var nearest_door: Dictionary = {}
 	var nearest_distance_squared := LINKED_DOOR_INTERACTION_DISTANCE * LINKED_DOOR_INTERACTION_DISTANCE
 	var player_position := player.global_position
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if int(reference.get("teleport_cell_id", 0)) == 0:
-			continue
-		var door_position := _reference_transform(reference).origin
+	for candidate: Dictionary in _linked_door_candidates:
+		var reference: Dictionary = candidate.reference
+		var door_position: Vector3 = candidate.position
 		var horizontal_offset := Vector2(
 			player_position.x - door_position.x,
 			player_position.z - door_position.z
