@@ -1015,9 +1015,17 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		var eye_texture_path := _npc_eye_texture_path(npc, race_editor_id)
 		var head_model_path := _npc_head_model_path(npc)
 		var head_part := _npc_head_part_entry(npc)
+		var equipment_ids := _npc_equipment_ids(npc)
+		var covered_body_slots := 0
+		for equipment_form_id: int in equipment_ids:
+			var equipment_type := str(data_reader.find_record_type(equipment_form_id))
+			if equipment_type in ["ARMO", "CLOT"]:
+				covered_body_slots |= int(data_reader.get_item_biped_slots(equipment_form_id))
 		_register_player_face_profile(npc, head_model_path)
 		var face_meshes: Array[MeshInstance3D] = []
 		for body_part: Dictionary in _npc_body_part_entries(npc, is_female):
+			if (int(body_part.get("biped_slot", 0)) & covered_body_slots) != 0:
+				continue
 			await _add_actor_model(
 				avatar,
 				skeleton,
@@ -1077,7 +1085,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		)
 		var weapon_attached := false
 		var attached_item_names: Array[String] = []
-		for item_form_id: int in _npc_equipment_ids(npc):
+		for item_form_id: int in equipment_ids:
 			var item_type := str(data_reader.find_record_type(item_form_id))
 			if item_type != "ARMO" and item_type != "CLOT" and item_type != "WEAP":
 				continue
@@ -1193,6 +1201,7 @@ func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionar
 	var entries: Array[Dictionary] = []
 	var race_body_parts: Array = npc.get("race_body_parts", [])
 	var fallback_parts: Array = FEMALE_AVATAR_PARTS if is_female else PLAYER_AVATAR_PARTS
+	var body_slots := [0x0004, 0x0008, 0x0010, 0x0020]
 	for index in range(mini(4, fallback_parts.size())):
 		var race_part: Dictionary = race_body_parts[index] if index < race_body_parts.size() else {}
 		var model_path := str(race_part.get("model_path", ""))
@@ -1201,6 +1210,7 @@ func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionar
 		entries.push_back({
 			"model_path": model_path,
 			"texture_path": str(race_part.get("texture_path", "")),
+			"biped_slot": body_slots[index],
 		})
 	if race_body_parts.size() > 4:
 		var tail_part: Dictionary = race_body_parts[4]
@@ -1209,6 +1219,7 @@ func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionar
 			entries.push_back({
 				"model_path": tail_model_path,
 				"texture_path": str(tail_part.get("texture_path", "")),
+				"biped_slot": 0x8000,
 			})
 	return entries
 
