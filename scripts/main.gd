@@ -151,6 +151,8 @@ func _process(_delta: float) -> void:
 		if not _player_face_state.is_empty():
 			_update_face_blink(_player_face_state, _delta)
 			_update_face_expression(_player_face_state, _delta)
+		if player.face_preview_enabled:
+			player.update_face_preview_anchor(_player_face_camera_anchor())
 
 func _input(event: InputEvent) -> void:
 	if is_instance_valid(player):
@@ -681,6 +683,10 @@ func _apply_player_face_profile() -> void:
 	if _player_face_profiles.is_empty() or _player_face_meshes.is_empty():
 		return
 	var profile: Dictionary = _player_face_profiles[_player_face_profile_index]
+	var applied_part_count := 0
+	var applied_eye_count := 0
+	# Eye NIFs have their own EGM/TRI vertex bases; rebuild each face part with
+	# the selected NPC coefficients instead of reusing the head's generated mesh.
 	for index in range(mini(_player_face_meshes.size(), _player_face_source_meshes.size())):
 		var instance := _player_face_meshes[index]
 		if not is_instance_valid(instance):
@@ -697,6 +703,23 @@ func _apply_player_face_profile() -> void:
 		)
 		if morphed_mesh != null:
 			instance.mesh = morphed_mesh
+			applied_part_count += 1
+			if instance.name.to_lower().contains("eye"):
+				applied_eye_count += 1
+		else:
+			push_warning("Could not apply face profile %s to %s" % [str(profile.get("name", "?")), instance.name])
+	print("OpenOB applied face profile %s to %d face parts, including %d eye meshes" % [
+		str(profile.get("name", "?")), applied_part_count, applied_eye_count
+	])
+	if not _player_face_state.is_empty():
+		_apply_face_expression(_player_face_state)
+		var expression_name := str(_player_face_state.get("face_expression", ""))
+		if not expression_name.is_empty():
+			_set_actor_face_shape(
+				_player_face_state,
+				expression_name,
+				float(_player_face_state.get("face_expression_weight", 0.0))
+			)
 
 func _refresh_player_face_profile_hint() -> void:
 	if _player_face_profiles.is_empty():

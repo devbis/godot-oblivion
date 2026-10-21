@@ -18,8 +18,7 @@ extends CharacterBody3D
 @export var camera_collision_radius := 0.18
 
 @onready var camera_pivot: Node3D = $CameraPivot
-@onready var spring_arm: SpringArm3D = $CameraPivot/SpringArm3D
-@onready var camera: Camera3D = $CameraPivot/SpringArm3D/Camera3D
+@onready var camera: Camera3D = $CameraPivot/Camera3D
 
 var _camera_pitch := -0.28
 var _camera_yaw := 0.0
@@ -31,20 +30,18 @@ var face_preview_enabled := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
 var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
-const FACE_PREVIEW_MIN_DISTANCE := 0.025
+const FACE_PREVIEW_MIN_DISTANCE := 0.002
+const CAMERA_COLLISION_MASK := 2
+const CAMERA_COLLISION_MARGIN := 0.08
 var _capture_mouse_on_focus := false
 
 func _ready() -> void:
 	_camera_yaw = rotation.y
 	_target_camera_distance = camera_distance
 	_current_camera_distance = camera_distance
-	spring_arm.collision_mask = 2
-	spring_arm.margin = 0.08
 	_camera_collision_shape = SphereShape3D.new()
 	_camera_collision_shape.radius = camera_collision_radius
-	spring_arm.shape = _camera_collision_shape
-	spring_arm.spring_length = camera_distance
-	camera.position.x = camera_shoulder_offset
+	camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
 	_apply_camera_orbit()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
@@ -79,6 +76,10 @@ func toggle_face_preview(face_anchor: Vector3) -> bool:
 	_apply_camera_orbit()
 	return face_preview_enabled
 
+func update_face_preview_anchor(face_anchor: Vector3) -> void:
+	if face_preview_enabled:
+		camera_pivot.position = face_anchor
+
 func _process(delta: float) -> void:
 	rotation.y = _camera_yaw
 	_apply_camera_orbit()
@@ -96,7 +97,7 @@ func handle_camera_input(event: InputEvent) -> void:
 	elif event is InputEventPanGesture:
 		if not is_zero_approx(event.delta.y):
 			if face_preview_enabled:
-				_set_camera_distance(_target_camera_distance * exp(event.delta.y * 0.08))
+				_set_camera_distance(_target_camera_distance * exp(event.delta.y * 0.14))
 			else:
 				_set_camera_distance(_target_camera_distance + event.delta.y * camera_zoom_speed * 0.04)
 			get_viewport().set_input_as_handled()
@@ -107,13 +108,13 @@ func handle_camera_input(event: InputEvent) -> void:
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			if face_preview_enabled:
-				_set_camera_distance(_target_camera_distance * 0.8)
+				_set_camera_distance(_target_camera_distance * 0.68)
 			else:
 				_set_camera_distance(_target_camera_distance - camera_zoom_speed * 0.25)
 			get_viewport().set_input_as_handled()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			if face_preview_enabled:
-				_set_camera_distance(_target_camera_distance / 0.8)
+				_set_camera_distance(_target_camera_distance / 0.68)
 			else:
 				_set_camera_distance(_target_camera_distance + camera_zoom_speed * 0.25)
 			get_viewport().set_input_as_handled()
@@ -140,6 +141,8 @@ func _set_camera_distance(distance: float) -> void:
 	var min_distance := FACE_PREVIEW_MIN_DISTANCE if face_preview_enabled else camera_zoom_min
 	_target_camera_distance = clampf(distance, min_distance, camera_zoom_max)
 	_third_person = _target_camera_distance > camera_zoom_min + 0.05
+	if is_inside_tree() and _camera_collision_shape != null and _target_camera_distance < _current_camera_distance:
+		_update_camera_clearance(0.0)
 
 func _physics_process(delta: float) -> void:
 	_update_camera_clearance(delta)
@@ -165,9 +168,10 @@ func _physics_process(delta: float) -> void:
 func _update_camera_clearance(delta: float) -> void:
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = _camera_collision_shape
-	query.transform = Transform3D(Basis.IDENTITY, camera_pivot.global_position)
-	query.motion = -camera_pivot.global_basis.z * _target_camera_distance
-	query.collision_mask = spring_arm.collision_mask
+	var camera_start := camera_pivot.global_position + camera_pivot.global_basis.x * camera_shoulder_offset
+	query.transform = Transform3D(Basis.IDENTITY, camera_start)
+	query.motion = camera_pivot.global_basis.z * _target_camera_distance
+	query.collision_mask = CAMERA_COLLISION_MASK
 	query.exclude = [get_rid()]
 	query.collide_with_areas = false
 	query.collide_with_bodies = true
@@ -178,7 +182,7 @@ func _update_camera_clearance(delta: float) -> void:
 	var available_distance := _target_camera_distance
 	if fractions.size() == 2 and fractions[0] < 1.0:
 		available_distance *= fractions[0]
-		available_distance = maxf(min_distance, available_distance - spring_arm.margin)
+		available_distance = maxf(min_distance, available_distance - CAMERA_COLLISION_MARGIN)
 
 	# Move inward before entering a wall; ease back out after the view is clear.
 	if available_distance < _current_camera_distance:
@@ -189,4 +193,4 @@ func _update_camera_clearance(delta: float) -> void:
 			available_distance,
 			1.0 - exp(-camera_smoothing * delta)
 		)
-	spring_arm.spring_length = _current_camera_distance
+	camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
