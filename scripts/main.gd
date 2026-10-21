@@ -26,6 +26,7 @@ const PLAYER_JUMP_KFS := {
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
+const PLAYER_HEAD_CULL_MARGIN := 128.0
 const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
 const PLAYER_FACE_DETAIL_PARTS := [
 	"Characters/Imperial/eyeLeftHuman.nif",
@@ -567,9 +568,10 @@ func _load_player_avatar() -> void:
 				int(mesh_entry.get("alpha_threshold", 128))
 			)
 			if model_path.to_lower() == PLAYER_FACE_HEAD_MODEL.to_lower():
-				# The skinned head can extend beyond its static NIF bounds during
-				# close camera views. Keep it inside the frustum across head poses.
-				instance.custom_aabb = source_mesh.get_aabb().grow(24.0)
+				# Skinning moves the head around its rig rest pose. A generous local
+				# bound prevents the renderer from dropping it during close, low-angle
+				# face inspection, when only a small part of the head bounds is on screen.
+				instance.custom_aabb = source_mesh.get_aabb().grow(PLAYER_HEAD_CULL_MARGIN)
 			attachment.add_child(instance)
 			var bone_names: Array = mesh_entry.get("bone_names", [])
 			if _player_skeleton != null and not bone_names.is_empty():
@@ -703,6 +705,10 @@ func _apply_player_face_profile() -> void:
 		)
 		if morphed_mesh != null:
 			instance.mesh = morphed_mesh
+			if instance.name.to_lower().begins_with("headhuman_"):
+				# Reapply after replacing the mesh so the skinned head keeps its
+				# pose-safe bounds with every selected FaceGen profile.
+				instance.custom_aabb = _player_face_source_meshes[index].get_aabb().grow(PLAYER_HEAD_CULL_MARGIN)
 			applied_part_count += 1
 			if instance.name.to_lower().contains("eye"):
 				applied_eye_count += 1
