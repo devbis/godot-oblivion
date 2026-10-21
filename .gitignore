@@ -1,0 +1,13 @@
+.godot/
+build/
+bin/
+extern/
+docs/
+tools/godot-*/
+tools/Godot*.app/
+*.user
+*.tmp
+.DS_Store
+*.dylib
+*.so
+*.dll
