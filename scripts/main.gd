@@ -162,7 +162,7 @@ func _make_exterior_environment() -> Environment:
 	# compatibility renderer, while the directional sun still defines shadows.
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	environment.ambient_light_color = Color(0.58, 0.64, 0.74)
-	environment.ambient_light_energy = 0.72
+	environment.ambient_light_energy = 0.4
 	return environment
 
 func _set_cell_environment(cell: Dictionary) -> void:
