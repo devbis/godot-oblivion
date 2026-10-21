@@ -751,6 +751,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 	_clear_cell_actors()
 	var actor_count := 0
 	var routed_actor_count := 0
+	var grounded_actor_count := 0
 	for reference_value: Variant in cell.get("references", []):
 		var reference: Dictionary = reference_value
 		if str(reference.get("record_type", "")) != "ACHR":
@@ -779,6 +780,8 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = 0.9
 		actor_root.add_child(actor_collision)
+		if _place_actor_on_generated_floor(actor_root):
+			grounded_actor_count += 1
 		var avatar := Node3D.new()
 		avatar.name = "OriginalActor"
 		avatar.scale = Vector3.ONE * game_units_to_meters
@@ -868,7 +871,7 @@ func _load_cell_actors(cell: Dictionary) -> void:
 		_npc_actors.push_back(actor_state)
 		_apply_face_expression(actor_state)
 		actor_count += 1
-	print("OpenOB assembled %d placed NPCs, %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, routed_actor_count])
+	print("OpenOB assembled %d placed NPCs (%d grounded), %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count, routed_actor_count])
 	if actor_count > 0:
 		status_label.text += "\nLoaded %d placed NPCs with original rigs, outfit meshes, FaceGen head shapes, and walk/fast-walk animations. F cycles the nearest NPC's expression." % actor_count
 
@@ -1055,6 +1058,25 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 	var godot_rotation := (source_to_godot * source_rotation * source_to_godot.inverse()).orthonormalized()
 	var godot_position := Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 	return Transform3D(godot_rotation, godot_position)
+
+func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
+	var start_position := actor_root.global_position
+	var query := PhysicsRayQueryParameters3D.create(
+		start_position + Vector3.UP * 2.1,
+		start_position - Vector3.UP * 3.0,
+		2,
+		[actor_root.get_rid(), player.get_rid()]
+	)
+	query.collide_with_areas = false
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty() or Vector3(result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
+		return false
+	var floor_position: Vector3 = result.get("position", start_position)
+	actor_root.global_position = Vector3(start_position.x, floor_position.y + 0.02, start_position.z)
+	actor_root.motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
+	actor_root.floor_snap_length = 0.35
+	actor_root.set("grounding_enabled", true)
+	return true
 
 func _npc_waypoints(cell: Dictionary, actor_name: String, npc: Dictionary) -> Array[Dictionary]:
 	var waypoints: Array[Dictionary] = []
