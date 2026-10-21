@@ -64,6 +64,7 @@ var _player_face_source_meshes: Array[ArrayMesh] = []
 var _player_face_profiles: Array[Dictionary] = []
 var _player_face_profile_ids: Dictionary = {}
 var _player_face_profile_index := 0
+var _player_face_state: Dictionary = {}
 var _player_animations: Dictionary = {}
 var _player_inventory: Dictionary = {}
 var _player_equipment: Dictionary = {}
@@ -111,6 +112,9 @@ func _process(_delta: float) -> void:
 	if _player_skeleton != null and not _world_loading:
 		_update_player_animation(_delta)
 		_update_npc_actors(_delta)
+		if not _player_face_state.is_empty():
+			_update_face_blink(_player_face_state, _delta)
+			_update_face_expression(_player_face_state, _delta)
 
 func _input(event: InputEvent) -> void:
 	if is_instance_valid(player):
@@ -123,6 +127,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cycle_nearest_npc_face_expression()
 	elif event.keycode == KEY_C:
 		_cycle_player_face_profile()
+	elif event.keycode == KEY_G:
+		_cycle_player_face_expression()
 
 func _load_game_data() -> void:
 	if not ClassDB.class_exists("OblivionData"):
@@ -291,7 +297,7 @@ func _load_cell_geometry(cell: Dictionary) -> void:
 	if instance_count > 0 and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = false
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
-	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel zoom · V camera mode · C player face · F NPC expression · Esc release mouse\nOriginal textures, rig, and idle/walk KF load from the game files; Havok collision and game scale remain unverified." % [
+	status_label.text = "Cell: %s — %s (%d references, %d meshes, %d generated colliders).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel zoom · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, and idle/walk KF load from the game files; Havok collision and game scale remain unverified." % [
 		cell.get("editor_id", "(unnamed)"), cell.get("display_name", ""), cell.references.size(), instance_count, collision_count
 	]
 	_update_interaction_hint({})
@@ -416,6 +422,20 @@ func _load_player_avatar() -> void:
 				instance.skin = _skin_for_mesh(bone_names, _player_skeleton)
 			part_count += 1
 	_apply_player_face_profile()
+	_player_face_state = {
+		"name": "Player",
+		"face_meshes": _player_face_meshes,
+		"face_expression": "",
+		"face_expression_weight": 0.0,
+		"face_expression_previous": "",
+		"face_expression_previous_weight": 0.0,
+		"face_expression_transition": 0.25,
+		"blink_cooldown": randf_range(2.5, 5.5),
+		"blink_remaining": 0.0,
+	}
+	_face_expression_indices["Player"] = 0
+	_apply_face_expression(_player_face_state)
+	_refresh_player_face_profile_hint()
 	var clothing_count := await _load_player_starting_clothing(avatar)
 	if part_count > 0:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
@@ -486,6 +506,16 @@ func _cycle_player_face_profile() -> void:
 	var profile: Dictionary = _player_face_profiles[_player_face_profile_index]
 	print("OpenOB changed player face profile to %s" % str(profile.get("name", "Default")))
 
+func _cycle_player_face_expression() -> void:
+	if _world_loading or _player_face_state.is_empty():
+		return
+	var expression_index := (int(_face_expression_indices.get("Player", 0)) + 1) % FACE_EXPRESSION_CYCLE.size()
+	_face_expression_indices["Player"] = expression_index
+	var expression_name := str(FACE_EXPRESSION_CYCLE[expression_index])
+	_set_face_expression(_player_face_state, expression_name, 0.75)
+	_refresh_player_face_profile_hint()
+	print("OpenOB set player face expression to %s" % (expression_name if not expression_name.is_empty() else "neutral"))
+
 func _apply_player_face_profile() -> void:
 	if _player_face_profiles.is_empty() or _player_face_meshes.is_empty():
 		return
@@ -511,10 +541,12 @@ func _refresh_player_face_profile_hint() -> void:
 	if _player_face_profiles.is_empty():
 		return
 	var profile: Dictionary = _player_face_profiles[_player_face_profile_index]
-	face_profile_label.text = "C · Player face: %s (%d/%d)" % [
+	var expression := str(_player_face_state.get("face_expression", "")) if not _player_face_state.is_empty() else ""
+	face_profile_label.text = "C · Face: %s (%d/%d)\nG · Expression: %s" % [
 		str(profile.get("name", "Default")),
 		_player_face_profile_index + 1,
 		_player_face_profiles.size(),
+		expression if not expression.is_empty() else "Neutral",
 	]
 
 func _load_player_starting_clothing(avatar: Node3D) -> int:
@@ -968,13 +1000,16 @@ func set_npc_expression(actor_name: String, expression_name: String, weight := 1
 	for actor: Dictionary in _npc_actors:
 		if str(actor.get("name", "")) != actor_name:
 			continue
-		actor["face_expression_previous"] = str(actor.get("face_expression", ""))
-		actor["face_expression_previous_weight"] = float(actor.get("face_expression_weight", 0.0))
-		actor["face_expression"] = expression_name
-		actor["face_expression_weight"] = clampf(weight, 0.0, 1.0)
-		actor["face_expression_transition"] = 0.0
-		_apply_face_expression(actor)
+		_set_face_expression(actor, expression_name, weight)
 		return
+
+func _set_face_expression(actor: Dictionary, expression_name: String, weight: float) -> void:
+	actor["face_expression_previous"] = str(actor.get("face_expression", ""))
+	actor["face_expression_previous_weight"] = float(actor.get("face_expression_weight", 0.0))
+	actor["face_expression"] = expression_name
+	actor["face_expression_weight"] = clampf(weight, 0.0, 1.0)
+	actor["face_expression_transition"] = 0.0
+	_apply_face_expression(actor)
 
 func _cycle_nearest_npc_face_expression() -> void:
 	if _world_loading:
