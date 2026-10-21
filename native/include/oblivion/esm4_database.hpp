@@ -29,6 +29,16 @@ struct PlacedReference {
     std::string base_editor_id;
     std::string editor_id;
     std::string model_path;
+    bool is_tree = false;
+    float tree_billboard_width = 0.0f;
+    float tree_billboard_height = 0.0f;
+    std::string tree_billboard_texture_path;
+};
+
+struct TreeBaseRecord {
+    std::string model_path;
+    float billboard_width = 0.0f;
+    float billboard_height = 0.0f;
 };
 
 struct NpcInventoryEntry {
@@ -137,6 +147,7 @@ private:
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;
+    std::map<std::uint32_t, TreeBaseRecord> tree_by_id_;
     std::map<std::uint32_t, std::string> item_model_by_id_;
     std::map<std::uint32_t, std::string> female_item_model_by_id_;
     std::map<std::uint32_t, std::string> world_item_model_by_id_;

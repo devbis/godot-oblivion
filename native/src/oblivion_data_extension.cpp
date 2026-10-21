@@ -219,7 +219,9 @@ public:
     }
 
     Dictionary find_exterior_region(int64_t grid_x, int64_t grid_y,
-                                    int64_t worldspace_form_id, int64_t radius) const {
+                                    int64_t worldspace_form_id, int64_t radius,
+                                    int64_t static_reference_radius = -1,
+                                    int64_t tree_reference_radius = -1) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
         const auto& cells = data_->cells();
@@ -234,7 +236,11 @@ public:
         }
         if (!center) return {};
 
-        const auto range = std::max<int64_t>(0, std::min<int64_t>(radius, 3));
+        const auto range = std::max<int64_t>(0, std::min<int64_t>(radius, 12));
+        const auto static_range = std::max<int64_t>(0, std::min<int64_t>(
+            static_reference_radius < 0 ? range : static_reference_radius, 12));
+        const auto tree_range = std::max<int64_t>(0, std::min<int64_t>(
+            tree_reference_radius < 0 ? range : tree_reference_radius, 12));
         Dictionary result = cell_to_dictionary(*center);
         Array references;
         Array land_cells;
@@ -269,8 +275,9 @@ public:
             for (const auto& reference : cell.references) {
                 const auto reference_grid_x = static_cast<int64_t>(std::floor(reference.position[0] / 4096.0f));
                 const auto reference_grid_y = static_cast<int64_t>(std::floor(reference.position[1] / 4096.0f));
-                if (std::abs(reference_grid_x - grid_x) > range
-                    || std::abs(reference_grid_y - grid_y) > range
+                const auto reference_range = reference.is_tree ? tree_range : static_range;
+                if (std::abs(reference_grid_x - grid_x) > reference_range
+                    || std::abs(reference_grid_y - grid_y) > reference_range
                     || !seen_references.insert(reference.form_id).second)
                     continue;
                 references.push_back(reference_to_dictionary(reference));
@@ -623,8 +630,9 @@ protected:
         ClassDB::bind_method(D_METHOD("get_error"), &OblivionData::get_error);
         ClassDB::bind_method(D_METHOD("get_summary"), &OblivionData::get_summary);
         ClassDB::bind_method(D_METHOD("list_cells"), &OblivionData::list_cells);
-        ClassDB::bind_method(D_METHOD("find_exterior_region", "grid_x", "grid_y", "worldspace_form_id", "radius"),
-                             &OblivionData::find_exterior_region);
+        ClassDB::bind_method(D_METHOD("find_exterior_region", "grid_x", "grid_y", "worldspace_form_id", "radius",
+                                      "static_reference_radius", "tree_reference_radius"),
+                             &OblivionData::find_exterior_region, DEFVAL(-1), DEFVAL(-1));
         ClassDB::bind_method(D_METHOD("find_cell", "editor_id"), &OblivionData::find_cell);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
@@ -662,6 +670,10 @@ private:
         entry["teleport_rotation"] = PackedFloat32Array{reference.teleport_rotation[0], reference.teleport_rotation[1], reference.teleport_rotation[2]};
         entry["editor_id"] = as_string(reference.editor_id);
         entry["model_path"] = as_string(reference.model_path);
+        entry["is_tree"] = reference.is_tree;
+        entry["tree_billboard_width"] = reference.tree_billboard_width;
+        entry["tree_billboard_height"] = reference.tree_billboard_height;
+        entry["tree_billboard_texture_path"] = as_string(reference.tree_billboard_texture_path);
         return entry;
     }
 

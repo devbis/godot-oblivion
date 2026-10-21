@@ -130,6 +130,7 @@ void Esm4Database::open(const std::filesystem::path& path) {
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
+    tree_by_id_.clear();
     item_model_by_id_.clear();
     female_item_model_by_id_.clear();
     world_item_model_by_id_.clear();
@@ -166,6 +167,19 @@ void Esm4Database::open(const std::filesystem::path& path) {
             else if (auto item_model = item_model_by_id_.find(reference.base_form_id);
                      item_model != item_model_by_id_.end())
                 reference.model_path = item_model->second;
+            if (auto tree = tree_by_id_.find(reference.base_form_id); tree != tree_by_id_.end()) {
+                reference.is_tree = true;
+                reference.tree_billboard_width = tree->second.billboard_width;
+                reference.tree_billboard_height = tree->second.billboard_height;
+                const auto& model_path = tree->second.model_path;
+                const auto separator = model_path.find_last_of("/\\");
+                std::string stem = model_path.substr(separator == std::string::npos ? 0 : separator + 1);
+                const auto extension = stem.find_last_of('.');
+                if (extension != std::string::npos) stem.resize(extension);
+                if (!stem.empty())
+                    reference.tree_billboard_texture_path = "textures/trees/billboards/"
+                        + lower_ascii(stem) + ".dds";
+            }
             if (auto editor = base_editor_id_by_id_.find(reference.base_form_id); editor != base_editor_id_by_id_.end())
                 reference.base_editor_id = editor->second;
             reference.editor_id = reference.reference_name.empty()
@@ -347,6 +361,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_race = type == "RACE";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
+    bool is_tree = type == "TREE";
     bool is_land = type == "LAND";
     bool is_land_texture = type == "LTEX";
     bool is_worldspace = type == "WRLD";
@@ -367,6 +382,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     outfit.form_id = form_id;
     AiPackageRecord ai_package;
     ai_package.form_id = form_id;
+    TreeBaseRecord tree;
     std::vector<float> land_heights;
     std::map<std::uint32_t, std::size_t> land_texture_usage;
     int race_part_section = -1;
@@ -399,7 +415,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_outfit || is_ai_package)
+            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_outfit || is_ai_package || is_tree)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_outfit) outfit.editor_id = text;
@@ -447,6 +463,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT")) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
+        } else if (tag == "MODL" && is_tree) {
+            tree.model_path = read_zstring(value, subrecord_size);
+        } else if ((tag == "BNAM" || tag == "MODT" || tag == "MODC" || tag == "MODS" || tag == "MODF")
+                   && is_tree && subrecord_size == 8) {
+            tree.billboard_width = f32(value);
+            tree.billboard_height = f32(value + 4);
         } else if (tag == "MODL" && is_item_model) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) item_model_by_id_[form_id] = path;
@@ -593,6 +615,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         outfit_by_id_[form_id] = std::move(outfit);
     if (is_ai_package)
         ai_package_by_id_[form_id] = std::move(ai_package);
+    if (is_tree) {
+        if (!tree.model_path.empty()) base_model_by_id_[form_id] = tree.model_path;
+        tree_by_id_[form_id] = std::move(tree);
+    }
     if (is_worldspace)
         worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
     record_type_by_id_[form_id] = std::string(type);
