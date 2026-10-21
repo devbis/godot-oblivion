@@ -71,6 +71,7 @@ const TEXTURE_FALLBACKS := {
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
 @onready var face_view_button: Button = $StatusLayer/FaceView
+@onready var fly_mode_button: Button = $StatusLayer/FlyMode
 @onready var player: CharacterBody3D = $Player
 
 var data_reader: Object
@@ -124,6 +125,7 @@ func _ready() -> void:
 	_cell_material.roughness = 0.9
 	_cell_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	status_label.text = "OpenOB data reader starting…"
+	fly_mode_button.pressed.connect(_toggle_fly_mode)
 	_load_game_data()
 
 func _process(_delta: float) -> void:
@@ -172,6 +174,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_toggle_inventory()
 	elif event.keycode == KEY_T:
 		_toggle_face_view()
+	elif event.keycode == KEY_Y:
+		_toggle_fly_mode()
 
 func _load_game_data() -> void:
 	if not ClassDB.class_exists("OblivionData"):
@@ -901,6 +905,12 @@ func _toggle_face_view() -> void:
 		return
 	var enabled := bool(player.toggle_face_preview(_player_face_camera_anchor()))
 	face_view_button.text = "T · Behind player" if enabled else "T · Face view"
+
+func _toggle_fly_mode() -> void:
+	if _world_loading or _inventory_open:
+		return
+	player.set_fly_mode(not player.is_flying)
+	fly_mode_button.text = "Y · Fly: On" if player.is_flying else "Y · Fly: Off"
 
 func _player_face_camera_anchor() -> Vector3:
 	if _player_skeleton == null:

@@ -16,6 +16,8 @@ extends CharacterBody3D
 @export var camera_zoom_speed := 2.0
 @export var camera_smoothing := 14.0
 @export var camera_collision_radius := 0.18
+@export var fly_speed_mps := 5.0
+@export var fly_fast_speed_mps := 15.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
 @onready var camera: Camera3D = $CameraPivot/Camera3D
@@ -34,6 +36,9 @@ const FACE_PREVIEW_MIN_DISTANCE := 0.002
 const CAMERA_COLLISION_MASK := 2
 const CAMERA_COLLISION_MARGIN := 0.08
 var _capture_mouse_on_focus := false
+var is_flying := false
+var _saved_collision_layer := 1
+var _saved_collision_mask := 3
 
 func _ready() -> void:
 	_camera_yaw = rotation.y
@@ -57,6 +62,20 @@ func capture_mouse() -> void:
 func release_mouse() -> void:
 	_capture_mouse_on_focus = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+func set_fly_mode(enabled: bool) -> void:
+	if is_flying == enabled:
+		return
+	if enabled:
+		_saved_collision_layer = collision_layer
+		_saved_collision_mask = collision_mask
+		collision_layer = 0
+		collision_mask = 0
+	else:
+		collision_layer = _saved_collision_layer
+		collision_mask = _saved_collision_mask
+	velocity = Vector3.ZERO
+	is_flying = enabled
 
 func toggle_face_preview(face_anchor: Vector3) -> bool:
 	face_preview_enabled = not face_preview_enabled
@@ -87,10 +106,18 @@ func _process(delta: float) -> void:
 func handle_camera_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_camera_yaw = wrapf(_camera_yaw - event.relative.x * mouse_sensitivity, -PI, PI)
+		var pitch_min := camera_pitch_min_degrees
+		var pitch_max := camera_pitch_max_degrees
+		if face_preview_enabled:
+			pitch_min = -20.0
+			pitch_max = 20.0
+		elif is_flying:
+			pitch_min = -89.0
+			pitch_max = 89.0
 		_camera_pitch = clampf(
 			_camera_pitch - event.relative.y * mouse_sensitivity,
-			deg_to_rad(-20.0 if face_preview_enabled else camera_pitch_min_degrees),
-			deg_to_rad(20.0 if face_preview_enabled else camera_pitch_max_degrees)
+			deg_to_rad(pitch_min),
+			deg_to_rad(pitch_max)
 		)
 		_apply_camera_orbit()
 		get_viewport().set_input_as_handled()
@@ -145,6 +172,19 @@ func _set_camera_distance(distance: float) -> void:
 		_update_camera_clearance(0.0)
 
 func _physics_process(delta: float) -> void:
+	if is_flying:
+		var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		var vertical := (1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0) - (1.0 if Input.is_key_pressed(KEY_CTRL) else 0.0)
+		var view_yaw := _camera_yaw + (PI if face_preview_enabled else 0.0)
+		var view_basis := Basis(Vector3.UP, view_yaw) * Basis(Vector3.RIGHT, _camera_pitch)
+		var direction := view_basis * Vector3(input.x, 0.0, input.y) + Vector3.UP * vertical
+		if direction.length_squared() > 1.0:
+			direction = direction.normalized()
+		var speed := fly_fast_speed_mps if Input.is_action_pressed("run") else fly_speed_mps
+		velocity = direction * speed
+		global_position += velocity * delta
+		return
+
 	_update_camera_clearance(delta)
 
 	if not is_on_floor():
@@ -166,6 +206,10 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 
 func _update_camera_clearance(delta: float) -> void:
+	if is_flying:
+		_current_camera_distance = _target_camera_distance
+		camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
+		return
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = _camera_collision_shape
 	var camera_start := camera_pivot.global_position + camera_pivot.global_basis.x * camera_shoulder_offset
