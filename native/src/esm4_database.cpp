@@ -27,10 +27,12 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
-#include <zlib.h>
+#include "inflate_bounded.hpp"
 
 namespace oblivion {
 namespace {
@@ -38,6 +40,9 @@ namespace {
 constexpr std::uint32_t kCompressedRecord = 0x00040000;
 constexpr std::uint32_t kGroup = 0x50555247; // GRUP, little endian
 constexpr std::uint32_t kCellChildGroup = 6;
+// Oblivion nests GRUPs about six levels deep; this bound only stops corrupt
+// files from recursing until the stack overflows.
+constexpr std::size_t kMaxGroupDepth = 64;
 constexpr std::size_t kTes4RecordHeaderSize = 20;
 // Oblivion's TES4 records and GRUP headers are 20 bytes; later TES5 headers
 // add the two-byte form version and two-byte unknown fields.
@@ -96,13 +101,8 @@ std::vector<std::uint8_t> decompress_record(const std::uint8_t* data, std::size_
     if (size < 4)
         throw std::runtime_error("compressed ESM4 " + std::string(type) + " record "
             + std::to_string(form_id) + " has an invalid data size " + std::to_string(size));
-    const std::uint32_t output_size = u32(data);
-    std::vector<std::uint8_t> result(output_size);
-    uLongf actual = static_cast<uLongf>(result.size());
-    const int status = uncompress(result.data(), &actual, data + 4, static_cast<uLong>(size - 4));
-    if (status != Z_OK || actual != result.size())
-        throw std::runtime_error("cannot decompress ESM4 record");
-    return result;
+    return inflate_bounded(data + 4, size - 4, u32(data),
+                           "ESM4 " + std::string(type) + " record " + std::to_string(form_id));
 }
 
 bool is_cell_reference_group(std::uint32_t type) {
@@ -141,6 +141,7 @@ bool is_runtime_visual_record(std::string_view type) {
 void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_only) {
     cells_.clear();
     cell_by_id_.clear();
+    cell_by_editor_id_.clear();
     base_model_by_id_.clear();
     base_editor_id_by_id_.clear();
     form_id_by_editor_id_.clear();
@@ -157,11 +158,17 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     land_texture_path_by_id_.clear();
     worldspace_water_level_by_id_.clear();
     record_type_by_id_.clear();
+    record_type_names_.clear();
+    record_type_index_.clear();
+    references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
     float_game_settings_.clear();
     record_count_ = 0;
+    unplaced_reference_count_ = 0;
     const auto bytes = read_file(path);
     parse_file(bytes, runtime_visuals_only);
+    for (std::size_t index = 0; index < cells_.size(); ++index)
+        cell_by_editor_id_.try_emplace(lower_ascii(cells_[index].editor_id), index);
     for (auto& cell : cells_) {
         if (const auto water = worldspace_water_level_by_id_.find(cell.worldspace_form_id);
             water != worldspace_water_level_by_id_.end()) {
@@ -216,19 +223,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
 }
 
 const CellRecord* Esm4Database::find_cell(std::string_view editor_id) const {
-    auto equal_fold = [](std::string_view a, std::string_view b) {
-        if (a.size() != b.size()) return false;
-        for (std::size_t i = 0; i < a.size(); ++i) {
-            auto ca = static_cast<unsigned char>(a[i]);
-            auto cb = static_cast<unsigned char>(b[i]);
-            if (std::tolower(ca) != std::tolower(cb)) return false;
-        }
-        return true;
-    };
-    const auto it = std::find_if(cells_.begin(), cells_.end(), [&](const CellRecord& cell) {
-        return equal_fold(cell.editor_id, editor_id);
-    });
-    return it == cells_.end() ? nullptr : &*it;
+    const auto it = cell_by_editor_id_.find(lower_ascii(std::string(editor_id)));
+    return it == cell_by_editor_id_.end() ? nullptr : &cells_[it->second];
 }
 
 const CellRecord* Esm4Database::find_cell(std::uint32_t form_id) const {
@@ -303,7 +299,32 @@ const std::string* Esm4Database::find_editor_id(std::uint32_t form_id) const {
 
 const std::string* Esm4Database::find_record_type(std::uint32_t form_id) const {
     const auto it = record_type_by_id_.find(form_id);
-    return it == record_type_by_id_.end() ? nullptr : &it->second;
+    return it == record_type_by_id_.end() ? nullptr : &record_type_names_[it->second];
+}
+
+std::size_t Esm4Database::intern_record_type(std::string_view type) {
+    // Oblivion has about 60 record types, so the table stays tiny while a
+    // million-record file would otherwise store one string per record.
+    if (const auto it = record_type_index_.find(type); it != record_type_index_.end())
+        return it->second;
+    const auto index = record_type_names_.size();
+    record_type_names_.emplace_back(type);
+    record_type_index_.emplace(record_type_names_.back(), index);
+    return index;
+}
+
+void Esm4Database::attach_references() {
+    for (auto& [cell_id, references] : references_by_cell_id_) {
+        const auto cell_it = cell_by_id_.find(cell_id);
+        if (cell_it == cell_by_id_.end()) {
+            unplaced_reference_count_ += references.size();
+            continue;
+        }
+        auto& target = cells_[cell_it->second].references;
+        target.insert(target.end(), std::make_move_iterator(references.begin()),
+                      std::make_move_iterator(references.end()));
+    }
+    references_by_cell_id_.clear();
 }
 
 void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only) {
@@ -317,7 +338,7 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
 
     auto walk = [&](auto&& self, std::size_t begin, std::size_t end,
                     std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
-                    bool exterior_grid_context) -> void {
+                    bool exterior_grid_context, std::size_t depth) -> void {
         std::size_t cursor = begin;
         while (cursor < end) {
             check_range(end, cursor, 4, "record type");
@@ -329,13 +350,15 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
                 const auto group_type = u32(bytes.data() + cursor + 12);
                 if (group_size < kGroupHeaderSize || group_size > end - cursor)
                     throw std::runtime_error("ESM4 GRUP has an invalid size");
+                if (depth >= kMaxGroupDepth)
+                    throw std::runtime_error("ESM4 GRUP nesting exceeds the supported depth");
                 const auto child_cell_id = is_cell_reference_group(group_type) ? group_label : active_cell_id;
                 const auto child_worldspace_id = group_type == 1 ? group_label : worldspace_form_id;
                 const bool child_exterior_grid_context = group_type == 4 || group_type == 5
                     ? true : group_type == 1 || group_type == 2 || group_type == 3
                         ? false : exterior_grid_context;
                 self(self, cursor + kGroupHeaderSize, cursor + group_size, child_cell_id,
-                     child_worldspace_id, child_exterior_grid_context);
+                     child_worldspace_id, child_exterior_grid_context, depth + 1);
                 cursor += group_size;
                 continue;
             }
@@ -367,9 +390,8 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
         }
     };
 
-    if (records_begin > bytes.size())
-        throw std::runtime_error("ESM header record extends beyond the file");
-    walk(walk, records_begin, bytes.size(), 0, 0, false);
+    walk(walk, records_begin, bytes.size(), 0, 0, false, 0);
+    attach_references();
 }
 
 void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t,
@@ -412,6 +434,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     if (is_reference)
         reference.record_type.assign(type);
     std::string base_editor_id;
+    // GMST DATA can precede EDID, so the value is held until the name is known.
+    std::optional<float> game_setting_value;
 
     std::size_t cursor = 0;
     while (cursor < data_size) {
@@ -602,21 +626,25 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 reference.teleport_position[i] = f32(value + 4 + 4 * i);
                 reference.teleport_rotation[i] = f32(value + 16 + 4 * i);
             }
-        } else if (tag == "DATA" && is_game_setting && subrecord_size >= 4
-                   && !base_editor_id.empty() && base_editor_id.front() == 'f') {
-            float_game_settings_[base_editor_id] = f32(value);
+        } else if (tag == "DATA" && is_game_setting && subrecord_size >= 4) {
+            game_setting_value = f32(value);
         }
         cursor += subrecord_size;
     }
+
+    if (is_game_setting && game_setting_value && !base_editor_id.empty() && base_editor_id.front() == 'f')
+        float_game_settings_[base_editor_id] = *game_setting_value;
 
     if (is_cell) {
         cell.worldspace_form_id = worldspace_form_id;
         cell.exterior_grid_cell = exterior_grid_context;
         cell_by_id_[form_id] = cells_.size();
         cells_.push_back(std::move(cell));
-    } else if (is_reference && active_cell_id != 0) {
-        if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end())
-            cells_[cell_it->second].references.push_back(std::move(reference));
+    } else if (is_reference) {
+        // The owning CELL may appear after its references, so attachment is
+        // deferred until the whole file has been read.
+        if (active_cell_id == 0) ++unplaced_reference_count_;
+        else references_by_cell_id_[active_cell_id].push_back(std::move(reference));
     } else if (is_land && active_cell_id != 0) {
         if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end()) {
             CellRecord& parent_cell = cells_[cell_it->second];
@@ -642,7 +670,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_worldspace)
         worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
-    record_type_by_id_[form_id] = std::string(type);
+    record_type_by_id_[form_id] = intern_record_type(type);
     if (!base_editor_id.empty())
         base_editor_id_by_id_[form_id] = std::move(base_editor_id);
 }

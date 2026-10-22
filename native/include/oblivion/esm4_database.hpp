@@ -133,6 +133,9 @@ public:
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return cells_; }
     [[nodiscard]] std::size_t record_count() const noexcept { return record_count_; }
+    // References whose owning cell never appeared in the file. They are kept
+    // out of every cell rather than dropped silently, and counted here.
+    [[nodiscard]] std::size_t unplaced_reference_count() const noexcept { return unplaced_reference_count_; }
     [[nodiscard]] const std::map<std::string, float>& float_game_settings() const noexcept { return float_game_settings_; }
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
@@ -155,15 +158,22 @@ private:
     std::map<std::uint32_t, std::uint16_t> item_biped_slots_by_id_;
     std::map<std::uint32_t, std::string> land_texture_path_by_id_;
     std::map<std::uint32_t, float> worldspace_water_level_by_id_;
-    std::map<std::uint32_t, std::string> record_type_by_id_;
+    std::map<std::string, std::size_t> cell_by_editor_id_;
+    std::map<std::uint32_t, std::size_t> record_type_by_id_;
+    std::vector<std::string> record_type_names_;
+    std::map<std::string, std::size_t, std::less<>> record_type_index_;
+    std::map<std::uint32_t, std::vector<PlacedReference>> references_by_cell_id_;
     std::map<std::uint32_t, std::uint32_t> cell_by_reference_id_;
     std::map<std::string, float> float_game_settings_;
     std::size_t record_count_ = 0;
+    std::size_t unplaced_reference_count_ = 0;
 
     void parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only);
+    void attach_references();
     void parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t flags,
                       std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
                       bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size);
+    [[nodiscard]] std::size_t intern_record_type(std::string_view type);
 };
 
 } // namespace oblivion
