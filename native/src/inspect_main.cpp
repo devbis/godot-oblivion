@@ -81,13 +81,15 @@ int main(int argc, char** argv) {
     const bool show_source = argc == 5;
     const bool run_stage = argc == 6 && mode == "--run-stage";
     const bool tick_quest = argc == 7 && mode == "--tick-quest";
+    const bool show_topics = argc == 4 && mode == "--topics";
+    const bool grep_sources = argc == 4 && mode == "--grep-sources";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -242,6 +244,65 @@ int main(int argc, char** argv) {
                                   << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
                 }
+                return 0;
+            }
+            if (grep_sources) {
+                // Finds a text in every source of the master: scripts, quest stage results and reply results.
+                const std::string needle = lower_name(argv[3]);
+                const auto report = [&](const std::string& where, const std::string& text) {
+                    std::istringstream lines(text);
+                    std::string line;
+                    std::size_t number = 0;
+                    while (std::getline(lines, line)) {
+                        ++number;
+                        if (lower_name(line).find(needle) != std::string::npos) std::cout << where << " line " << number << ": " << line << '\n';
+                    }
+                };
+                for (const auto& [form_id, script] : data.scripts()) report("script " + script.editor_id, script.source);
+                for (const auto& [form_id, quest] : data.quests())
+                    for (const auto& stage : quest.stages)
+                        for (const auto& entry : stage.entries) report("quest " + quest.editor_id + " stage " + std::to_string(stage.index), entry.result_source);
+                for (const auto& [topic_id, topic] : data.topics())
+                    for (const auto& response : topic.responses) report("reply of " + topic.editor_id, response.result_source);
+                return 0;
+            }
+            if (show_topics) {
+                // Dialogue topics of a quest with their replies, conditions and result scripts.
+                // `*` shows the replies of every quest; otherwise only the named quest's replies.
+                const bool every_quest = std::string(argv[3]) == "*";
+                const auto* quest = every_quest ? nullptr : data.find_quest(argv[3]);
+                if (!every_quest && !quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
+                const std::uint32_t wanted_quest = quest ? quest->form_id : 0;
+                std::size_t topics_shown = 0;
+                // Generic topics (GREETING, HELLO) carry replies of many quests: only the named quest's replies are shown.
+                for (const auto& [topic_id, topic] : data.topics()) {
+                    std::size_t own = 0;
+                    for (const auto& response : topic.responses)
+                        if (every_quest || response.quest == wanted_quest) ++own;
+                    if (own == 0) continue;
+                    ++topics_shown;
+                    std::cout << "topic " << topic.editor_id << " (" << topic.name << ") form=" << std::hex << topic_id << std::dec
+                              << " replies=" << own << '\n';
+                    for (const auto& response : topic.responses) {
+                        if (!every_quest && response.quest != wanted_quest) continue;
+                        std::cout << "  reply: " << response.text << '\n';
+                        for (const auto& condition : response.conditions)
+                            std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << ' ' << condition.comparison
+                                      << " function=" << condition.function_index << " param=" << std::hex << condition.parameter1
+                                      << std::dec << " param2=" << condition.parameter2 << '\n';
+                        if (!response.topic_links.empty()) {
+                            std::cout << "    leads to:";
+                            for (const auto link : response.topic_links) std::cout << ' ' << std::hex << link << std::dec;
+                            std::cout << '\n';
+                        }
+                        if (!response.result_source.empty()) {
+                            std::istringstream lines(response.result_source);
+                            std::string line;
+                            while (std::getline(lines, line)) std::cout << "    | " << line << '\n';
+                        }
+                    }
+                }
+                std::cout << "topics=" << topics_shown << '\n';
                 return 0;
             }
             if (tick_quest) {

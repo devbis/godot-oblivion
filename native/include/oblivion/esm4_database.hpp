@@ -137,6 +137,8 @@ public:
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const;
+    [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const;
+    [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return topic_by_id_; }
     [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return quest_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const;
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return cells_; }
@@ -179,6 +181,9 @@ private:
     std::map<std::string, float> float_game_settings_;
     std::size_t record_count_ = 0;
     std::size_t unplaced_reference_count_ = 0;
+    std::map<std::uint32_t, DialogTopic> topic_by_id_;
+    std::map<std::uint32_t, std::vector<DialogResponse>> responses_by_topic_;
+    std::uint32_t active_topic_id_ = 0;  // topic of the INFO group being walked
 
     void parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only);
     void attach_references();

@@ -42,6 +42,27 @@ struct QuestRecord {
     std::vector<QuestStage> stages;
 };
 
+// One INFO record of a dialogue topic: a reply the NPC can give when its conditions hold.
+// The result script runs when the reply is given (for example it can set a quest stage).
+struct DialogResponse {
+    std::uint32_t form_id = 0;
+    std::string text;                              // NAM1
+    std::uint32_t quest = 0;                       // QSTI: the quest the reply belongs to
+    std::vector<QuestCondition> conditions;        // CTDA
+    std::vector<std::uint32_t> topic_links;        // TCLT: topics this reply leads to
+    std::string result_source;                     // SCTX
+    std::vector<std::uint32_t> result_references;  // SCRO
+};
+
+// A DIAL record: a topic the player can ask about, with its replies.
+struct DialogTopic {
+    std::uint32_t form_id = 0;
+    std::string editor_id;
+    std::string name;                 // FULL: the topic text in the list
+    std::vector<std::uint32_t> quests;  // QSTI
+    std::vector<DialogResponse> responses;
+};
+
 // One local variable declared by a script (SLSD followed by SCVR in the record).
 struct ScriptVariable {
     std::uint32_t index = 0;

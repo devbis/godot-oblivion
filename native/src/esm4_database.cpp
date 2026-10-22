@@ -164,6 +164,9 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     script_id_by_editor_id_.clear();
     quest_by_id_.clear();
     quest_id_by_editor_id_.clear();
+    topic_by_id_.clear();
+    responses_by_topic_.clear();
+    active_topic_id_ = 0;
     record_type_index_.clear();
     references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
@@ -189,6 +192,11 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
         script_id_by_editor_id_.try_emplace(lower_ascii(script.editor_id), form_id);
     for (const auto& [form_id, quest] : quest_by_id_)
         quest_id_by_editor_id_.try_emplace(lower_ascii(quest.editor_id), form_id);
+    for (auto& [topic_id, responses] : responses_by_topic_) {
+        if (const auto topic = topic_by_id_.find(topic_id); topic != topic_by_id_.end())
+            topic->second.responses = std::move(responses);
+    }
+    responses_by_topic_.clear();
     for (const auto& [form_id, editor_id] : base_editor_id_by_id_)
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
@@ -336,6 +344,11 @@ void Esm4Database::attach_references() {
     references_by_cell_id_.clear();
 }
 
+const DialogTopic* Esm4Database::find_topic(std::uint32_t form_id) const {
+    const auto it = topic_by_id_.find(form_id);
+    return it == topic_by_id_.end() ? nullptr : &it->second;
+}
+
 const QuestRecord* Esm4Database::find_quest(std::uint32_t form_id) const {
     const auto it = quest_by_id_.find(form_id);
     return it == quest_by_id_.end() ? nullptr : &it->second;
@@ -386,8 +399,12 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
                 const bool child_exterior_grid_context = group_type == 4 || group_type == 5
                     ? true : group_type == 1 || group_type == 2 || group_type == 3
                         ? false : exterior_grid_context;
+                // Type 7 groups hold the INFO responses of the DIAL topic whose form ID is the label.
+                const auto saved_topic = active_topic_id_;
+                if (group_type == 7) active_topic_id_ = group_label;
                 self(self, cursor + kGroupHeaderSize, cursor + group_size, child_cell_id,
                      child_worldspace_id, child_exterior_grid_context, depth + 1);
+                active_topic_id_ = saved_topic;
                 cursor += group_size;
                 continue;
             }
@@ -439,6 +456,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_worldspace = type == "WRLD";
     bool is_script = type == "SCPT";
     bool is_quest = type == "QUST";
+    const bool is_topic = type == "DIAL";
+    const bool is_response = type == "INFO";
+    DialogTopic topic;
+    topic.form_id = form_id;
+    DialogResponse response;
+    response.form_id = form_id;
     QuestRecord quest;
     quest.form_id = form_id;
     const bool is_item_model = type == "ARMO" || type == "CLOT" || type == "WEAP"
@@ -499,6 +522,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_script) script.editor_id = text;
+            if (is_topic) topic.editor_id = text;
             if (is_quest) quest.editor_id = text;
             if (is_outfit) outfit.editor_id = text;
             if (is_ai_package) ai_package.editor_id = text;
@@ -687,6 +711,26 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             } else if (tag == "SCRO" && subrecord_size >= 4 && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
                 quest.stages.back().entries.back().result_references.push_back(u32(value));
             }
+        } else if (is_topic) {
+            if (tag == "EDID") topic.editor_id = read_zstring(value, subrecord_size);
+            else if (tag == "FULL") topic.name = read_zstring(value, subrecord_size);
+            else if (tag == "QSTI" && subrecord_size >= 4) topic.quests.push_back(u32(value));
+        } else if (is_response) {
+            if (tag == "NAM1") response.text = read_zstring(value, subrecord_size);
+            else if (tag == "QSTI" && subrecord_size >= 4) response.quest = u32(value);
+            else if (tag == "CTDA" && subrecord_size >= 24) {
+                QuestCondition condition;
+                condition.operator_code = value[0];
+                condition.comparison = f32(value + 4);
+                condition.function_index = u16(value + 8);
+                condition.parameter1 = u32(value + 12);
+                condition.parameter2 = u32(value + 16);
+                response.conditions.push_back(condition);
+            } else if (tag == "TCLT" && subrecord_size >= 4) response.topic_links.push_back(u32(value));
+            else if (tag == "SCTX") {
+                response.result_source.assign(reinterpret_cast<const char*>(value), subrecord_size);
+                while (!response.result_source.empty() && response.result_source.back() == '\0') response.result_source.pop_back();
+            } else if (tag == "SCRO" && subrecord_size >= 4) response.result_references.push_back(u32(value));
         } else if (tag == "SCHR" && is_script && subrecord_size >= 20) {
             script.compiled_size = u32(value + 8);
             script.variable_count = u32(value + 12);
@@ -761,6 +805,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         script_by_id_[form_id] = std::move(script);
     if (is_quest)
         quest_by_id_[form_id] = std::move(quest);
+    if (is_topic) topic_by_id_[form_id] = std::move(topic);
+    if (is_response) responses_by_topic_[active_topic_id_].push_back(std::move(response));
     record_type_by_id_[form_id] = intern_record_type(type);
     if (!base_editor_id.empty())
         base_editor_id_by_id_[form_id] = std::move(base_editor_id);
