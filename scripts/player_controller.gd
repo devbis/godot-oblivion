@@ -52,6 +52,9 @@ func _ready() -> void:
 	floor_snap_length = maxf(0.5, max_step_height_m + 0.1)
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
 	floor_constant_speed = true
+	# Godot's default 15-degree wall threshold stops the body when it walks almost
+	# straight into a wall. Zero lets it slide along the wall at any approach angle.
+	wall_min_slide_angle = 0.0
 	_camera_collision_shape = SphereShape3D.new()
 	_camera_collision_shape.radius = camera_collision_radius
 	camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
@@ -198,13 +201,15 @@ func _physics_process(delta: float) -> void:
 	_update_camera_clearance(delta)
 
 	# While a step is in progress the capsule rolls over a tread's rounded nose,
-	# where it is not on the floor yet. Gravity is held off so it can finish the step.
-	if _stepper.is_stepping():
+	# where it is not on the floor yet. Gravity is held off so it can finish the step,
+	# but a jump still starts from there.
+	if Input.is_action_just_pressed("jump") and (is_on_floor() or _stepper.is_stepping()):
+		_stepper.cancel()
+		velocity.y = jump_speed_mps
+	elif _stepper.is_stepping():
 		velocity.y = 0.0
 	elif not is_on_floor():
 		velocity.y -= gravity_mps2 * delta
-	elif Input.is_action_just_pressed("jump"):
-		velocity.y = jump_speed_mps
 
 	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var camera_basis := Basis(Vector3.UP, rotation.y)

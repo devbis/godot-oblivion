@@ -24,6 +24,7 @@ var _stepper := CharacterStepper.new()
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
+	wall_min_slide_angle = 0.0
 
 func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause: float) -> void:
 	waypoints.clear()

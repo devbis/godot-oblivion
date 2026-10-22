@@ -16,6 +16,10 @@ func is_stepping() -> bool:
 func tick() -> void:
 	grace_frames = maxi(0, grace_frames - 1)
 
+## Ends the grace period at once, e.g. when the actor jumps off a step.
+func cancel() -> void:
+	grace_frames = 0
+
 func try_step_up(body: CharacterBody3D, horizontal_motion: Vector3, max_step_height: float, max_walkable_angle: float) -> bool:
 	if horizontal_motion.length_squared() <= 0.0001:
 		return false
