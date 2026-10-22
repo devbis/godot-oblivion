@@ -317,8 +317,10 @@ public:
         }
         try {
             const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
+            const auto* quest_script = data_->find_script(quest->script_form_id);
             for (const auto& run : oblivion::run_quest_stage(*quest, static_cast<unsigned>(stage),
-                                                             oblivion::make_command_lookup(commands))) {
+                                                             oblivion::make_command_lookup(commands), quest_script,
+                                                             quest_state_)) {
                 runs.push_back(stage_run_to_dictionary(run));
             }
             result["runs"] = runs;
@@ -865,6 +867,8 @@ private:
 
     mutable std::mutex state_mutex_;
     std::unique_ptr<oblivion::GameData> data_;
+    // Quest variables persist between stage runs of the loaded game.
+    mutable oblivion::QuestState quest_state_;
     mutable std::string error_;
     std::thread worker_;
     std::atomic<bool> loading_{false};

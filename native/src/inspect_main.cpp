@@ -196,6 +196,12 @@ int main(int argc, char** argv) {
                           << std::dec << " script=" << std::hex << quest->script_form_id << std::dec
                           << " flags=" << static_cast<unsigned>(quest->flags) << " priority=" << static_cast<unsigned>(quest->priority)
                           << " stages=" << quest->stages.size() << '\n';
+                if (const auto* type = data.find_record_type(quest->script_form_id)) std::cout << "script record type " << *type << '\n';
+                if (const auto* quest_script = data.find_script(quest->script_form_id)) {
+                    std::cout << "quest script " << quest_script->editor_id << " variables:";
+                    for (const auto& variable : quest_script->variables) std::cout << ' ' << variable.index << '=' << variable.name;
+                    std::cout << '\n';
+                }
                 for (const auto& stage : quest->stages) {
                     std::cout << "stage " << stage.index << '\n';
                     for (const auto& entry : stage.entries) {
@@ -204,7 +210,7 @@ int main(int argc, char** argv) {
                             std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << " " << condition.comparison
                                       << " function=" << condition.function_index << " opcode=" << std::hex
                                       << (0x1000u + condition.function_index) << std::dec << " param=" << std::hex
-                                      << condition.parameter1 << std::dec << '\n';
+                                      << condition.parameter1 << " param2=" << condition.parameter2 << std::dec << '\n';
                         if (!entry.log_text.empty()) std::cout << "    log: " << entry.log_text << '\n';
                         if (!entry.result_source.empty())
                             std::cout << "    result: " << entry.result_source.size() << " bytes of source, "
@@ -241,7 +247,9 @@ int main(int argc, char** argv) {
                         if (missing == "condition " + std::to_string(command.opcode - 0x1000u)) return command.name;
                     return missing;
                 };
-                const auto runs = oblivion::run_quest_stage(*quest, stage_index, lookup);
+                oblivion::QuestState state;
+                const auto* quest_script = data.find_script(quest->script_form_id);
+                const auto runs = oblivion::run_quest_stage(*quest, stage_index, lookup, quest_script, state);
                 if (runs.empty()) throw std::runtime_error("stage not found: " + std::string(argv[4]));
                 for (const auto& run : runs) {
                     if (!run.conditions_hold) {

@@ -796,7 +796,8 @@ void test_quest_stage_actions(const std::filesystem::path& directory) {
     gated.result_source = "Activate ignored\n";
     quest.stages[0].entries.push_back(gated);
 
-    const auto runs = oblivion::run_quest_stage(quest, 20, {});
+    oblivion::QuestState state;
+    const auto runs = oblivion::run_quest_stage(quest, 20, {}, nullptr, state);
     CHECK(runs.size() == 2);
     CHECK(runs[0].conditions_hold && runs[0].completes);
     CHECK(runs[0].actions.size() == 2);  // the set statement is not a command call
@@ -804,7 +805,31 @@ void test_quest_stage_actions(const std::filesystem::path& directory) {
     CHECK(runs[0].actions[0].arguments.size() == 1 && runs[0].actions[0].arguments[0].text == "FixtureMarker");
     CHECK(runs[0].actions[1].command == "Activate" && runs[0].actions[1].arguments.size() == 2);
     CHECK(!runs[1].conditions_hold && runs[1].actions.empty());
-    CHECK(run_quest_stage(quest, 99, {}).empty());
+    CHECK(oblivion::run_quest_stage(quest, 99, {}, nullptr, state).empty());
+
+    // GetQuestVariable reads the quest variable named by the quest script's SLSD index.
+    oblivion::ScriptRecord quest_script;
+    quest_script.editor_id = "FixtureQuestScript";
+    quest_script.variables.push_back({3, 0, "flag"});
+    oblivion::QuestStageEntry guarded;
+    oblivion::QuestCondition flag_set;
+    flag_set.function_index = 79;  // GetQuestVariable
+    flag_set.parameter1 = 0x100;
+    flag_set.parameter2 = 3;
+    flag_set.comparison = 1.0f;
+    guarded.conditions.push_back(flag_set);
+    guarded.result_source = "Activate guardedActor\n";
+    oblivion::QuestRecord flagged = quest;
+    flagged.stages[0].entries = {guarded};
+    oblivion::QuestState unset;
+    CHECK(!oblivion::run_quest_stage(flagged, 20, {}, &quest_script, unset)[0].conditions_hold);
+    oblivion::QuestState set;
+    set.variables["fixturequest.flag"] = 1.0;
+    CHECK(oblivion::run_quest_stage(flagged, 20, {}, &quest_script, set)[0].conditions_hold);
+    // An index the script does not declare reads as 0, so the condition is false.
+    flag_set.parameter2 = 9;
+    flagged.stages[0].entries[0].conditions = {flag_set};
+    CHECK(!oblivion::run_quest_stage(flagged, 20, {}, &quest_script, set)[0].conditions_hold);
 }
 
 void test_nif_mesh_decoder() {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,12 @@ struct ScriptAction {
     std::string command;
     std::string target;  // the reference of a member call, empty for a plain call
     std::vector<ScriptValue> arguments;
+};
+
+// Quest variables that persist between stage runs, keyed by lowercase "quest.variable".
+// Stage scripts write them with `set quest.variable to …`; GetQuestVariable reads them.
+struct QuestState {
+    std::map<std::string, double> variables;
 };
 
 struct StageEntryRun {
@@ -32,7 +39,9 @@ struct StageEntryRun {
 // Result scripts run in order, and each command call is recorded as an action
 // and answered with 0, so a script's arithmetic on command results is not
 // meaningful yet. Commands are named and resolved through `lookup`.
+// `quest_script` is the quest's SCRI script (its variables are the quest variables) and may be null.
 std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned stage_index,
-                                           const ScriptCommandLookup& lookup);
+                                           const ScriptCommandLookup& lookup, const ScriptRecord* quest_script,
+                                           QuestState& state);
 
 } // namespace oblivion
