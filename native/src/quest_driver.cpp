@@ -84,6 +84,22 @@ QuestTick QuestDriver::start(unsigned stage, const DistanceFunction& distance) {
     return tick;
 }
 
+QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
+                                       const DistanceFunction& distance) {
+    QuestTick tick;
+    const auto actor_ast = parse_script(actor_script.source, lookup_);
+    for (const auto& diagnostic : actor_ast.diagnostics)
+        tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
+    ScriptInterpreter interpreter(actor_ast);
+    QuestTickHost host(*this, tick, 0.0, distance, 0);
+    host.interpreter = &interpreter;
+    const auto result = interpreter.run_event(event, detail, host);
+    host.flush_variables();
+    for (const auto& name : result.unimplemented) tick.unanswered.push_back(name);
+    tick.stage = stage_;
+    return tick;
+}
+
 QuestTick QuestDriver::tick(double seconds_passed, const DistanceFunction& distance) {
     QuestTick tick;
     ScriptInterpreter interpreter(ast_);

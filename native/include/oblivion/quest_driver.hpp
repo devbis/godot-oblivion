@@ -38,6 +38,11 @@ public:
     // Runs GameMode once, after `seconds_passed` has elapsed since the last tick.
     QuestTick tick(double seconds_passed, const DistanceFunction& distance = {});
 
+    // Runs an event block of an actor's script (for example OnPackageDone with the package's name).
+    // The actor's script may set this quest's stage, and the results of the new stage run.
+    QuestTick run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
+                              const DistanceFunction& distance = {});
+
     unsigned stage() const { return stage_; }
     const QuestState& state() const { return state_; }
     QuestState& state() { return state_; }

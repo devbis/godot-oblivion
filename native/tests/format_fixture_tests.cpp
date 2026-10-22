@@ -823,6 +823,38 @@ void test_package_selection() {
     CHECK(oblivion::select_package({&walk_early}, host) == nullptr);
 }
 
+void test_actor_package_event() {
+    // The package's end runs OnPackageDone on the actor's script, which sets the quest to stage 16.
+    oblivion::ScriptRecord actor_script;
+    actor_script.editor_id = "ActorScript";
+    actor_script.source = "scn Actor\nbegin OnPackageDone WalkB\n  setstage Driver 16\nend\n";
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x700;
+    quest.editor_id = "Driver";
+    oblivion::QuestStage stage16;
+    stage16.index = 16;
+    oblivion::QuestStageEntry entry;
+    entry.result_source = "Activate reachedStage16 1\n";
+    stage16.entries.push_back(entry);
+    quest.stages = {stage16};
+    oblivion::ScriptRecord quest_script;
+    quest_script.editor_id = "DriverScript";
+    quest_script.source = "scn Driver\nbegin GameMode\nend\n";
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "setstage" || name == "Activate") return oblivion::ScriptCommandSignature{0, 2};
+        return std::nullopt;
+    };
+    oblivion::QuestDriver driver(quest, quest_script, commands);
+    driver.start(15);
+    const auto event = driver.run_actor_event(actor_script, "OnPackageDone", "WalkB");
+    CHECK(event.stage == 16);
+    CHECK(event.stage_changes == std::vector<std::string>({"16"}));
+    CHECK(event.actions.size() == 1 && event.actions[0].command == "Activate");
+    // A block for another package does nothing.
+    const auto other = driver.run_actor_event(actor_script, "OnPackageDone", "WalkZ");
+    CHECK(other.stage_changes.empty() && other.actions.empty());
+}
+
 void test_quest_stage_actions(const std::filesystem::path& directory) {
     // The fixture quest: stage 10 has a GetStage(0x100) == 20 entry that does not hold at 10, and
     // no-condition entries are checked in the ESM test. Here stage 20's completing entry runs.
@@ -988,6 +1020,7 @@ int main() {
         test_script_fragment();
         test_quest_conditions();
         test_package_selection();
+        test_actor_package_event();
         test_quest_stage_actions(directory);
         test_quest_driver();
         test_nif_mesh_decoder();

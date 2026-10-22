@@ -85,13 +85,14 @@ int main(int argc, char** argv) {
     const bool show_topics = argc == 4 && mode == "--topics";
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
     const bool show_packages = (argc == 4 || argc == 5) && mode == "--packages";
+    const bool package_done = argc == 8 && mode == "--package-done";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages || package_done;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -250,6 +251,30 @@ int main(int argc, char** argv) {
                                   << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
                 }
+                return 0;
+            }
+            if (package_done) {
+                // Runs OnPackageDone of an NPC's script for one package, with the quest at a stage: prints the
+                // stage changes and the quest's actions, so a package's end can be checked against the data.
+                const auto* quest = data.find_quest(argv[3]);
+                if (!quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
+                const auto npc_id = data.find_form_id_by_editor_id(argv[5]);
+                const auto* npc = data.find_npc_base(npc_id);
+                const auto* actor_script = npc ? data.find_script(npc->script_form_id) : nullptr;
+                if (!actor_script) throw std::runtime_error("NPC has no script: " + std::string(argv[5]));
+                const auto* quest_script = data.find_script(quest->script_form_id);
+                if (!quest_script) throw std::runtime_error("quest has no script");
+                const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[7], ".godot/openob/cache"));
+                oblivion::QuestDriver driver(*quest, *quest_script, lookup);
+                driver.start(static_cast<unsigned>(std::stoul(argv[4])));
+                const auto tick = driver.run_actor_event(*actor_script, "OnPackageDone", argv[6]);
+                std::cout << "stage now " << tick.stage << "; stage changes:";
+                for (const auto& change : tick.stage_changes) std::cout << ' ' << change;
+                std::cout << "\nactions:";
+                for (const auto& action : tick.actions) std::cout << ' ' << action.command;
+                std::cout << "\nunanswered:";
+                for (const auto& name : tick.unanswered) std::cout << ' ' << name;
+                std::cout << '\n';
                 return 0;
             }
             if (show_packages) {
