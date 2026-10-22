@@ -105,6 +105,7 @@ const TEXTURE_FALLBACKS := {
 
 var data_reader: Object
 var current_cell: Dictionary = {}
+var quest_bridge := QuestStageBridge.new()
 var cell_visual_root: Node3D
 var _model_cache: Dictionary = {}
 var _physics_mesh_cache: Dictionary = {}
@@ -462,6 +463,31 @@ func _log_runtime_spawn_positions() -> void:
 		nearest_actor,
 		nearest_distance
 	])
+
+## Runs one stage of a quest against the loaded cell and returns the report lines.
+## The executable comes from OBLIVION_EXE, or from the usual install layout next to Data.
+func run_quest_stage(quest_editor_id: String, stage: int) -> PackedStringArray:
+	if data_reader == null or not data_reader.is_ready():
+		return PackedStringArray(["game data is not ready"])
+	var executable_path := _game_executable_path()
+	if not FileAccess.file_exists(executable_path):
+		return PackedStringArray(["Oblivion.exe not found at %s (set OBLIVION_EXE)" % executable_path])
+	var cache_dir := ProjectSettings.globalize_path("res://.godot/openob/cache")
+	var result: Dictionary = data_reader.run_quest_stage(quest_editor_id, stage, executable_path, cache_dir)
+	var error := str(result.get("error", ""))
+	if not error.is_empty():
+		return PackedStringArray(["stage %s of %s not run: %s" % [stage, quest_editor_id, error]])
+	var report := quest_bridge.apply(result.get("runs", []), current_cell, self, Callable(self, "_reference_transform"))
+	for line: String in report:
+		print("OpenOB stage %s/%d: %s" % [quest_editor_id, stage, line])
+	return report
+
+func _game_executable_path() -> String:
+	var environment_path := OS.get_environment("OBLIVION_EXE").strip_edges()
+	if not environment_path.is_empty():
+		return environment_path
+	# The data directory is <install>/game_info/data/Data; the executable sits next to it in <install>/game_info/data.
+	return _game_data_path().get_base_dir().path_join("Oblivion.exe")
 
 func _game_data_path() -> String:
 	var environment_path := OS.get_environment("OBLIVION_DATA_DIR").strip_edges()

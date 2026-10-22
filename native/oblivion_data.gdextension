@@ -4,9 +4,9 @@ compatibility_minimum = "4.7"
 reloadable = true
 
 [libraries]
-macos.debug = "res://bin/liboblivion_data.dylib"
-macos.release = "res://bin/liboblivion_data.dylib"
-linux.debug.x86_64 = "res://bin/liboblivion_data.so"
-linux.release.x86_64 = "res://bin/liboblivion_data.so"
-windows.debug.x86_64 = "res://bin/oblivion_data.dll"
-windows.release.x86_64 = "res://bin/oblivion_data.dll"
+macos.debug = "res://build/liboblivion_data.dylib"
+macos.release = "res://build/liboblivion_data.dylib"
+linux.debug.x86_64 = "res://build/liboblivion_data.so"
+linux.release.x86_64 = "res://build/liboblivion_data.so"
+windows.debug.x86_64 = "res://build/oblivion_data.dll"
+windows.release.x86_64 = "res://build/oblivion_data.dll"

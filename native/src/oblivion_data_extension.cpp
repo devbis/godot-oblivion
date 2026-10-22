@@ -1,5 +1,7 @@
+#include "oblivion/command_table.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
+#include "oblivion/quest_stage.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/core/class_db.hpp>
@@ -8,6 +10,7 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -288,6 +291,40 @@ public:
         result["water_cells"] = water_cells;
         result["display_name"] = String("Exterior (") + String::num_int64(grid_x)
             + ", " + String::num_int64(grid_y) + ")";
+        return result;
+    }
+
+    // Runs one stage of a quest and returns { "error": String, "runs": Array } where each run
+    // describes an entry: whether its conditions hold, its log text, and the actions it requests.
+    Dictionary run_quest_stage(const String& quest_editor_id, int64_t stage, const String& executable_path,
+                               const String& cache_dir) const {
+        Dictionary result;
+        Array runs;
+        result["runs"] = runs;
+        result["error"] = String();
+        const CharString quest_value = quest_editor_id.utf8();
+        const CharString executable_value = executable_path.utf8();
+        const CharString cache_value = cache_dir.utf8();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) {
+            result["error"] = String("game data is not loaded");
+            return result;
+        }
+        const auto* quest = data_->find_quest(quest_value.get_data());
+        if (!quest) {
+            result["error"] = String("quest not found");
+            return result;
+        }
+        try {
+            const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
+            for (const auto& run : oblivion::run_quest_stage(*quest, static_cast<unsigned>(stage),
+                                                             oblivion::make_command_lookup(commands))) {
+                runs.push_back(stage_run_to_dictionary(run));
+            }
+            result["runs"] = runs;
+        } catch (const std::exception& error) {
+            result["error"] = as_string(error.what());
+        }
         return result;
     }
 
@@ -722,6 +759,8 @@ protected:
                                       "static_reference_radius", "tree_reference_radius"),
                              &OblivionData::find_exterior_region, DEFVAL(-1), DEFVAL(-1));
         ClassDB::bind_method(D_METHOD("find_cell", "editor_id"), &OblivionData::find_cell);
+        ClassDB::bind_method(D_METHOD("run_quest_stage", "quest_editor_id", "stage", "executable_path", "cache_dir"),
+                             &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);
@@ -742,6 +781,32 @@ protected:
 
 private:
     static String as_string(const std::string& value) { return String::utf8(value.c_str()); }
+
+    static Dictionary stage_run_to_dictionary(const oblivion::StageEntryRun& run) {
+        Dictionary entry;
+        entry["conditions_hold"] = run.conditions_hold;
+        entry["completes"] = run.completes;
+        entry["log"] = as_string(run.log_text);
+        PackedStringArray parse_errors;
+        for (const auto& error : run.parse_errors) parse_errors.push_back(as_string(error));
+        entry["parse_errors"] = parse_errors;
+        PackedStringArray missing;
+        for (const auto& name : run.missing_conditions) missing.push_back(as_string(name));
+        entry["missing_conditions"] = missing;
+        Array actions;
+        for (const auto& action : run.actions) {
+            Dictionary item;
+            item["command"] = as_string(action.command);
+            item["target"] = as_string(action.target);
+            Array arguments;
+            for (const auto& argument : action.arguments)
+                arguments.push_back(argument.is_text ? Variant(as_string(argument.text)) : Variant(argument.number));
+            item["arguments"] = arguments;
+            actions.push_back(item);
+        }
+        entry["actions"] = actions;
+        return entry;
+    }
 
     static Dictionary reference_to_dictionary(const oblivion::PlacedReference& reference) {
         Dictionary entry;
