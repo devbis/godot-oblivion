@@ -19,6 +19,7 @@ add_library(oblivion_data_core STATIC
     src/game_data.cpp
     src/nif_mesh.cpp
     src/script_lexer.cpp
+    src/script_parser.cpp
 )
 target_include_directories(oblivion_data_core PUBLIC include)
 target_link_libraries(oblivion_data_core PUBLIC ZLIB::ZLIB nifly)

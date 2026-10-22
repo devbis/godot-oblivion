@@ -1,6 +1,7 @@
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
+#include "oblivion/script_parser.hpp"
 
 #include <iomanip>
 #include <iostream>
@@ -18,7 +19,7 @@
 namespace {
 
 void usage(const char* executable) {
-    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --script EDID | --check-scripts | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
+    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --script EDID | --check-scripts | --parse-scripts | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
 }
 
 }
@@ -31,7 +32,7 @@ int main(int argc, char** argv) {
     const bool inspect_kf = argc >= 4 && mode == "--kf-summary";
     const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets"
         || mode == "--cell-actors" || mode == "--find-editor-id" || mode == "--list-editor-ids"
-        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts");
+        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts" || mode == "--parse-scripts");
     const bool list_assets = argc == 4 && mode == "--list-assets";
     const bool inspect_actors = argc == 4 && mode == "--cell-actors";
     const bool lookup_editor_id = argc == 4 && mode == "--find-editor-id";
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
     const bool list_game_settings = argc == 4 && mode == "--gmst-prefix";
     const bool show_script = argc == 4 && mode == "--script";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
+    const bool parse_scripts = argc == 3 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
         || inspect_kf || single_argument_mode;
@@ -57,6 +59,21 @@ int main(int argc, char** argv) {
             output.write(reinterpret_cast<const char*>(asset.data()), static_cast<std::streamsize>(asset.size()));
             if (!output) throw std::runtime_error("cannot write extracted asset");
             std::cout << "Extracted " << asset.size() << " bytes to " << argv[4] << ".\n";
+            return 0;
+        }
+        if (parse_scripts) {
+            std::size_t scripts_with_errors = 0;
+            std::size_t shown = 0;
+            for (const auto& [form_id, script] : data.scripts()) {
+                const auto ast = oblivion::parse_script(script.source);
+                if (ast.diagnostics.empty()) continue;
+                ++scripts_with_errors;
+                for (const auto& diagnostic : ast.diagnostics) {
+                    if (shown++ >= 40) break;
+                    std::cout << script.editor_id << " line " << diagnostic.line << ": " << diagnostic.message << '\n';
+                }
+            }
+            std::cout << "scripts=" << data.scripts().size() << " scripts_with_diagnostics=" << scripts_with_errors << '\n';
             return 0;
         }
         if (check_scripts) {

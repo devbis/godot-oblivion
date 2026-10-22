@@ -3,6 +3,7 @@
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
+#include "oblivion/script_parser.hpp"
 
 #include <NifFile.hpp>
 
@@ -423,6 +424,73 @@ void test_script_lexer() {
     CHECK(saw_z);
 }
 
+void test_script_parser() {
+    const auto ast = oblivion::parse_script(
+        "scn Test\n"
+        "short x\n"
+        "begin GameMode\n"
+        "  set x to 1 + 2 * 3\n"
+        "  if x >= 1\n"
+        "    Activate mySelf 1\n"
+        "  elseif x == 0\n"
+        "    return\n"
+        "  else\n"
+        "    set x to 0\n"
+        "  endif\n"
+        "  myParent.activate mySelf\n"
+        "end\n");
+    CHECK(ast.diagnostics.empty());
+    CHECK(ast.name == "Test");
+    CHECK(ast.declarations.size() == 1 && ast.declarations[0].type == "short" && ast.declarations[0].name == "x");
+    CHECK(ast.blocks.size() == 1 && ast.blocks[0].name == "GameMode" && ast.blocks[0].body.size() == 3);
+    const auto& body = ast.blocks[0].body;
+
+    const auto& assignment = body[0];
+    CHECK(assignment.kind == oblivion::ScriptStmtKind::Set && assignment.name == "x");
+    const auto& sum = assignment.children[0];
+    CHECK(sum.kind == oblivion::ScriptExprKind::Binary && sum.text == "+");
+    CHECK(sum.children[1].kind == oblivion::ScriptExprKind::Binary && sum.children[1].text == "*");
+
+    const auto& branch_statement = body[1];
+    CHECK(branch_statement.kind == oblivion::ScriptStmtKind::If);
+    CHECK(branch_statement.branches.size() == 2);
+    const auto& call = branch_statement.branches[0].body[0].children[0];
+    CHECK(call.kind == oblivion::ScriptExprKind::Call && call.text == "Activate" && call.children.size() == 2);
+    CHECK(branch_statement.branches[1].body[0].kind == oblivion::ScriptStmtKind::Return);
+    CHECK(branch_statement.else_body.size() == 1);
+
+    const auto& member = body[2].children[0];
+    CHECK(member.kind == oblivion::ScriptExprKind::Member);
+    CHECK(member.children[0].text == "myParent" && member.children[1].text == "activate");
+    CHECK(member.children[1].children.size() == 1);
+
+    // A bad statement is reported with its line; the statements after it still parse.
+    const auto broken = oblivion::parse_script("begin onActivate\n  set x to @\n  set y to 2\nend\n");
+    CHECK(broken.diagnostics.size() == 1 && broken.diagnostics[0].line == 2);
+    CHECK(broken.blocks.size() == 1 && broken.blocks[0].body.size() == 1);
+    CHECK(broken.blocks[0].body[0].name == "y");
+
+    // Forms seen in the master: block arguments, `else if`, dotted names in arguments and assignments.
+    const auto forms = oblivion::parse_script(
+        "scriptName Forms\n"
+        "begin OnAlarm 1, Player\n"
+        "  set ms38.contact to ms38.contact + 1\n"
+        "  if GetStage Q == 1\n"
+        "    Player.ModCrimeGold Q.Gold\n"
+        "  else if GetStage Q == 2\n"
+        "  else\n"
+        "  endif\n"
+        "end\n");
+    CHECK(forms.diagnostics.empty());
+    CHECK(forms.blocks.size() == 1 && forms.blocks[0].target == "Player");
+    CHECK(forms.blocks[0].body[0].name == "ms38.contact");
+    CHECK(forms.blocks[0].body[1].branches.size() == 2 && forms.blocks[0].body[1].else_body.size() == 0);
+    CHECK(forms.blocks[0].body[1].branches[0].body[0].children[0].children[1].children[0].text == "Q.Gold");
+
+    const auto unclosed = oblivion::parse_script("begin onLoad\nset x to 1\n");
+    CHECK(unclosed.diagnostics.size() == 1 && unclosed.diagnostics[0].line == 1);
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -461,6 +529,7 @@ int main() {
         test_esm4(directory);
         test_loose_assets(directory);
         test_script_lexer();
+        test_script_parser();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;
