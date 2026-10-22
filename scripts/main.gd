@@ -2185,8 +2185,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_collision := CollisionShape3D.new()
 		actor_collision.name = "ApproximateActorCollision"
 		var actor_capsule := CapsuleShape3D.new()
-		actor_capsule.radius = 0.27
+		# Match the visible actor's shoulder width so its mesh does not clip walls
+		# while the smaller physics capsule is still clear.
+		actor_capsule.radius = 0.4
 		actor_capsule.height = 1.8
+		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = 0.9
 		actor_root.add_child(actor_collision)
@@ -2897,22 +2900,53 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 
 func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
 	var start_position := actor_root.global_position
-	var query := PhysicsRayQueryParameters3D.create(
-		start_position + Vector3.UP * 2.1,
-		start_position - Vector3.UP * 3.0,
-		2,
-		[actor_root.get_rid(), player.get_rid()]
-	)
+	var candidate_offsets: Array[Vector2] = [Vector2.ZERO]
+	for radius in [0.15, 0.3, 0.45, 0.6, 0.8, 1.0]:
+		for direction_index in range(16):
+			var angle := TAU * float(direction_index) / 16.0
+			candidate_offsets.push_back(Vector2(cos(angle), sin(angle)) * float(radius))
+
+	for offset: Vector2 in candidate_offsets:
+		var candidate_x := start_position.x + offset.x
+		var candidate_z := start_position.z + offset.y
+		var floor_query := PhysicsRayQueryParameters3D.create(
+			Vector3(candidate_x, start_position.y + 2.1, candidate_z),
+			Vector3(candidate_x, start_position.y - 3.0, candidate_z),
+			2,
+			[actor_root.get_rid(), player.get_rid()]
+		)
+		floor_query.collide_with_areas = false
+		var floor_result := get_world_3d().direct_space_state.intersect_ray(floor_query)
+		if floor_result.is_empty() or Vector3(floor_result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
+			continue
+		var floor_position: Vector3 = floor_result.get("position", start_position)
+		var candidate_position := Vector3(candidate_x, floor_position.y + 0.06, candidate_z)
+		if absf(candidate_position.y - start_position.y) > 0.55:
+			continue
+		if not _actor_capsule_clear_at(actor_root, candidate_position):
+			continue
+		actor_root.global_position = candidate_position
+		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
+		actor_root.floor_snap_length = 0.35
+		actor_root.set("grounding_enabled", true)
+		var adjustment := Vector2(offset.x, offset.y).length()
+		if adjustment > 0.01:
+			print("OpenOB shifted %s %.2fm from its spawn point to clear a wall" % [actor_root.name, adjustment])
+		return true
+	return false
+
+func _actor_capsule_clear_at(actor_root: CharacterBody3D, root_position: Vector3) -> bool:
+	var actor_collision := actor_root.get_node_or_null("ApproximateActorCollision") as CollisionShape3D
+	if actor_collision == null or actor_collision.shape == null:
+		return true
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = actor_collision.shape
+	query.transform = Transform3D(Basis.IDENTITY, root_position + actor_collision.position)
+	query.collision_mask = 2
 	query.collide_with_areas = false
-	var result := get_world_3d().direct_space_state.intersect_ray(query)
-	if result.is_empty() or Vector3(result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
-		return false
-	var floor_position: Vector3 = result.get("position", start_position)
-	actor_root.global_position = Vector3(start_position.x, floor_position.y + 0.02, start_position.z)
-	actor_root.motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
-	actor_root.floor_snap_length = 0.35
-	actor_root.set("grounding_enabled", true)
-	return true
+	query.exclude = [actor_root.get_rid()]
+	query.margin = 0.001
+	return get_world_3d().direct_space_state.intersect_shape(query, 8).is_empty()
 
 func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int, actor_radius: float) -> float:
 	var occupied_roots: Array[Node3D] = [player]
