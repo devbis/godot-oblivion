@@ -90,8 +90,10 @@ namespace {
 // Answers the conditions of a package from the driver's state: GetStage of this quest, and quest variables.
 class DriverConditionHost final : public ScriptHost {
 public:
-    DriverConditionHost(const QuestRecord& quest, const ScriptRecord& script, const QuestState& state, unsigned stage)
-        : quest_(quest.form_id), quest_name_(lower(quest.editor_id)), script_(script), state_(state), stage_(stage) {}
+    DriverConditionHost(const QuestRecord& quest, const ScriptRecord& script, const QuestState& state, unsigned stage,
+                        const DialogueContext* dialogue = nullptr)
+        : quest_(quest.form_id), quest_name_(lower(quest.editor_id)), script_(script), state_(state), stage_(stage),
+          dialogue_(dialogue) {}
 
     std::optional<ScriptValue> call_command(std::string_view, const ScriptValue*, const std::vector<ScriptValue>&) override {
         return std::nullopt;
@@ -101,6 +103,15 @@ public:
         constexpr std::uint16_t kGetStage = 58;
         constexpr std::uint16_t kGetQuestVariable = 79;
         if (function_index == kGetStage && parameter1 == quest_) return static_cast<double>(stage_);
+        if (dialogue_) {
+            constexpr std::uint16_t kGetIsID = 72;
+            constexpr std::uint16_t kGetIsRace = 69;
+            constexpr std::uint16_t kGetIsSex = 70;  // param 0 male, 1 female
+            if (function_index == kGetIsID)
+                return (parameter1 == dialogue_->speaker_base || parameter1 == dialogue_->listener_base) ? 1.0 : 0.0;
+            if (function_index == kGetIsRace) return parameter1 == dialogue_->listener_race ? 1.0 : 0.0;
+            if (function_index == kGetIsSex) return (parameter1 != 0) == dialogue_->listener_female ? 1.0 : 0.0;
+        }
         if (function_index == kGetQuestVariable && parameter1 == quest_) {
             for (const auto& variable : script_.variables) {
                 if (variable.index != parameter2) continue;
@@ -118,6 +129,7 @@ private:
     const ScriptRecord& script_;
     const QuestState& state_;
     unsigned stage_;
+    const DialogueContext* dialogue_;
 };
 
 } // namespace
@@ -125,6 +137,31 @@ private:
 const AiPackageRecord* QuestDriver::select_package(const std::vector<const AiPackageRecord*>& packages) const {
     DriverConditionHost host(quest_, script_, state_, stage_);
     return oblivion::select_package(packages, host);
+}
+
+TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance) {
+    TopicRun run;
+    DriverConditionHost conditions(quest_, script_, state_, stage_, &context);
+    for (const auto& reply : topic.responses) {
+        if (!evaluate_conditions(reply.conditions, conditions)) continue;
+        run.reply = &reply;
+        break;
+    }
+    if (!run.reply) {
+        run.tick.stage = stage_;
+        return run;
+    }
+    const auto fragment = parse_fragment(run.reply->result_source, lookup_);
+    for (const auto& diagnostic : fragment.diagnostics)
+        run.tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
+    const ScriptAst no_script;
+    ScriptInterpreter interpreter(no_script);
+    QuestTickHost host(*this, run.tick, 0.0, distance, 0);
+    host.interpreter = &interpreter;
+    interpreter.run_body(fragment.statements, host);
+    host.flush_variables();
+    run.tick.stage = stage_;
+    return run;
 }
 
 QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,

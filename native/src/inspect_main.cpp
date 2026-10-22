@@ -86,13 +86,14 @@ int main(int argc, char** argv) {
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
     const bool show_packages = (argc == 4 || argc == 5) && mode == "--packages";
     const bool package_done = argc == 8 && mode == "--package-done";
+    const bool run_topic = argc >= 10 && mode == "--run-topic";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages || package_done;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages || package_done || run_topic;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -251,6 +252,49 @@ int main(int argc, char** argv) {
                                   << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
                 }
+                return 0;
+            }
+            if (run_topic) {
+                // Speaks a topic as the NPC, to a listener of the given race (hex form) and sex, with the quest in
+                // a stage and the given quest variables (name=value). Prints the reply and what its result did.
+                const auto* quest = data.find_quest(argv[3]);
+                if (!quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
+                const auto* quest_script = data.find_script(quest->script_form_id);
+                if (!quest_script) throw std::runtime_error("quest has no script");
+                const oblivion::DialogTopic* topic = nullptr;
+                for (const auto& [topic_id, candidate] : data.topics())
+                    if (lower_name(candidate.editor_id) == lower_name(argv[4])) topic = &candidate;
+                if (!topic) throw std::runtime_error("topic not found: " + std::string(argv[4]));
+                const auto speaker = data.find_form_id_by_editor_id(argv[5]);
+                const auto* speaker_npc = data.find_npc_base(speaker);
+                if (!speaker_npc) throw std::runtime_error("speaker not found: " + std::string(argv[5]));
+                const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[9], ".godot/openob/cache"));
+                oblivion::QuestDriver driver(*quest, *quest_script, lookup);
+                driver.start(static_cast<unsigned>(std::stoul(argv[8])));
+                for (int index = 10; index < argc; ++index) {
+                    const std::string pair = argv[index];
+                    const auto equals = pair.find('=');
+                    if (equals == std::string::npos) throw std::runtime_error("expected name=value: " + pair);
+                    driver.state().variables[lower_name(quest->editor_id) + "." + lower_name(pair.substr(0, equals))] = std::stod(pair.substr(equals + 1));
+                }
+                oblivion::DialogueContext context;
+                context.speaker_base = speaker;
+                context.listener_base = 0;
+                context.listener_race = static_cast<std::uint32_t>(std::stoul(argv[6], nullptr, 16));
+                context.listener_female = std::string(argv[7]) == "female";
+                const auto run = driver.run_topic(*topic, context);
+                if (!run.reply) {
+                    std::cout << "no reply of " << topic->editor_id << " holds\n";
+                    return 0;
+                }
+                std::cout << "reply: " << run.reply->text << '\n';
+                std::cout << "stage now " << run.tick.stage << "; stage changes:";
+                for (const auto& change : run.tick.stage_changes) std::cout << ' ' << change;
+                std::cout << "\nactions:";
+                for (const auto& action : run.tick.actions) std::cout << ' ' << action.command;
+                std::cout << "\nunanswered:";
+                for (const auto& name : run.tick.unanswered) std::cout << ' ' << name;
+                std::cout << '\n';
                 return 0;
             }
             if (package_done) {

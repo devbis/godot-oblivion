@@ -14,6 +14,15 @@
 
 namespace oblivion {
 
+// Who a topic is spoken by and to. GetIsID is answered for the speaker or the listener; GetIsRace and
+// GetIsSex are answered for the listener (the prisoner a taunt is addressed to).
+struct DialogueContext {
+    std::uint32_t speaker_base = 0;
+    std::uint32_t listener_base = 0;
+    std::uint32_t listener_race = 0;
+    bool listener_female = false;
+};
+
 // Distance between two named references, or nullopt when the world cannot answer.
 using DistanceFunction = std::function<std::optional<double>(std::string_view from, std::string_view to)>;
 
@@ -23,6 +32,11 @@ struct QuestTick {
     std::vector<ScriptAction> actions;           // stage results and GameMode calls, in order
     std::vector<std::string> unanswered;         // functions the driver could not answer (value 0)
     std::vector<std::string> parse_errors;
+};
+
+struct TopicRun {
+    const DialogResponse* reply = nullptr;  // the reply whose conditions held first, or null
+    QuestTick tick;                          // what its result did
 };
 
 // Drives one quest: keeps its stage and variables, runs the quest script's GameMode
@@ -38,6 +52,9 @@ public:
 
     // Runs GameMode once, after `seconds_passed` has elapsed since the last tick.
     QuestTick tick(double seconds_passed, const DistanceFunction& distance = {});
+
+    // Speaks a topic: the first reply, in order, whose conditions hold for this context runs its result.
+    TopicRun run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance = {});
 
     // Runs an event block of an actor's script (for example OnPackageDone with the package's name).
     // The actor's script may set this quest's stage, and the results of the new stage run.
