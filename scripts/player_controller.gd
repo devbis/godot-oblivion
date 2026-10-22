@@ -6,6 +6,8 @@ extends CharacterBody3D
 @export var run_speed_mps := 3.4
 @export var jump_speed_mps := 4.7
 @export var gravity_mps2 := 9.8
+@export_range(0.0, 0.6, 0.01) var max_step_height_m := 0.30
+@export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
 @export var mouse_sensitivity := 0.004
 @export var camera_pitch_min_degrees := -60.0
 @export var camera_pitch_max_degrees := 35.0
@@ -46,7 +48,9 @@ func _ready() -> void:
 	_camera_yaw = rotation.y
 	_target_camera_distance = camera_distance
 	_current_camera_distance = camera_distance
-	floor_snap_length = 0.35
+	floor_snap_length = maxf(0.35, max_step_height_m + 0.05)
+	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
+	floor_constant_speed = true
 	_camera_collision_shape = SphereShape3D.new()
 	_camera_collision_shape.radius = camera_collision_radius
 	camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
@@ -209,8 +213,51 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, speed * 8.0 * delta)
 
 	var requested_velocity := velocity
+	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
+	if is_on_floor() and horizontal_motion.length_squared() > 0.0001 and _try_step_up(horizontal_motion):
+		return
 	move_and_slide()
 	_push_contacted_chains(requested_velocity)
+
+func _try_step_up(horizontal_motion: Vector3) -> bool:
+	var original_transform := global_transform
+	var obstruction := KinematicCollision3D.new()
+	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
+		return false
+	if obstruction.get_collider() is CharacterBody3D or obstruction.get_collider() is RigidBody3D:
+		return false
+	if obstruction.get_normal().dot(Vector3.UP) >= cos(floor_max_angle):
+		return false
+
+	var vertical_motion := Vector3.UP * max_step_height_m
+	if test_move(original_transform, vertical_motion, null, safe_margin):
+		return false
+	var raised_transform := original_transform.translated(vertical_motion)
+	if test_move(raised_transform, horizontal_motion, null, safe_margin):
+		return false
+
+	var across_transform := raised_transform.translated(horizontal_motion)
+	var downward_motion := Vector3.DOWN * (max_step_height_m + floor_snap_length)
+	var landing := KinematicCollision3D.new()
+	if not test_move(across_transform, downward_motion, landing, safe_margin):
+		return false
+	if landing.get_collider() is CharacterBody3D or landing.get_collider() is RigidBody3D:
+		return false
+	if landing.get_normal().dot(Vector3.UP) < cos(floor_max_angle):
+		return false
+
+	global_transform = across_transform
+	var actual_landing := move_and_collide(downward_motion, false, safe_margin, true)
+	if (
+		actual_landing == null
+		or actual_landing.get_collider() is CharacterBody3D
+		or actual_landing.get_collider() is RigidBody3D
+		or actual_landing.get_normal().dot(Vector3.UP) < cos(floor_max_angle)
+	):
+		global_transform = original_transform
+		return false
+	velocity.y = 0.0
+	return true
 
 func _push_contacted_chains(requested_velocity: Vector3) -> void:
 	var horizontal_velocity := Vector3(requested_velocity.x, 0.0, requested_velocity.z)
