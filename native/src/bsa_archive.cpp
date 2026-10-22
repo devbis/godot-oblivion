@@ -14,11 +14,21 @@
 #include <cctype>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
-#include <zlib.h>
+#include "inflate_bounded.hpp"
 
 namespace oblivion {
+
+struct BsaArchive::Stream {
+    explicit Stream(const std::filesystem::path& path) : input(path, std::ios::binary | std::ios::ate) {}
+
+    std::ifstream input;
+    std::mutex mutex;
+};
+
 namespace {
 
 constexpr std::uint32_t kBsaMagic = 0x00415342; // "BSA\0"
@@ -116,13 +126,13 @@ std::string normalize_asset_path(std::string_view path) {
 }
 
 void BsaArchive::open(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input) throw std::runtime_error("cannot open " + path.string());
-    const auto end = input.tellg();
+    auto stream = std::make_shared<Stream>(path);
+    if (!stream->input) throw std::runtime_error("cannot open " + path.string());
+    const auto end = stream->input.tellg();
     if (end < 0 || static_cast<std::uint64_t>(end) < kHeaderSize)
         throw std::runtime_error("BSA header is truncated: " + path.string());
     const auto archive_size = static_cast<std::uint64_t>(end);
-    StreamReader reader(input, archive_size);
+    StreamReader reader(stream->input, archive_size);
     reader.seek(0, "header");
     const auto magic = reader.u32("magic");
     const auto version = reader.u32("version");
@@ -138,6 +148,8 @@ void BsaArchive::open(const std::filesystem::path& path) {
         throw std::runtime_error("not a Bethesda BSA archive: " + path.string());
     if (version != kTes4Version)
         throw std::runtime_error("only Oblivion BSA version 103 is supported: " + path.string());
+    if (!(archive_flags & kFileNames))
+        throw std::runtime_error("BSA archives without a filename table are not supported: " + path.string());
     if (folder_count > 1'000'000 || declared_file_count > 10'000'000)
         throw std::runtime_error("BSA directory counts are unreasonable");
 
@@ -177,24 +189,22 @@ void BsaArchive::open(const std::filesystem::path& path) {
     reader.skip(folder_names_remaining, "remaining folder names");
 
     std::vector<std::vector<std::string>> filenames(folder_contents.size());
-    if (archive_flags & kFileNames) {
-        for (std::size_t i = 0; i < folder_contents.size(); ++i) {
-            filenames[i].reserve(folder_contents[i].second.size());
-            for (std::size_t j = 0; j < folder_contents[i].second.size(); ++j) {
-                const auto name_start = reader.position();
-                std::string name;
-                bool terminated = false;
-                while (reader.position() - name_start < file_names_remaining) {
-                    const char ch = static_cast<char>(reader.u8("filename table"));
-                    if (ch == '\0') { terminated = true; break; }
-                    name.push_back(ch);
-                }
-                if (!terminated) throw std::runtime_error("BSA filename is unterminated");
-                const auto consumed = static_cast<std::uint32_t>(name.size() + 1);
-                if (consumed > file_names_remaining) throw std::runtime_error("BSA filename table overrun");
-                file_names_remaining -= consumed;
-                filenames[i].push_back(std::move(name));
+    for (std::size_t i = 0; i < folder_contents.size(); ++i) {
+        filenames[i].reserve(folder_contents[i].second.size());
+        for (std::size_t j = 0; j < folder_contents[i].second.size(); ++j) {
+            const auto name_start = reader.position();
+            std::string name;
+            bool terminated = false;
+            while (reader.position() - name_start < file_names_remaining) {
+                const char ch = static_cast<char>(reader.u8("filename table"));
+                if (ch == '\0') { terminated = true; break; }
+                name.push_back(ch);
             }
+            if (!terminated) throw std::runtime_error("BSA filename is unterminated");
+            const auto consumed = static_cast<std::uint32_t>(name.size() + 1);
+            if (consumed > file_names_remaining) throw std::runtime_error("BSA filename table overrun");
+            file_names_remaining -= consumed;
+            filenames[i].push_back(std::move(name));
         }
     }
 
@@ -203,7 +213,6 @@ void BsaArchive::open(const std::filesystem::path& path) {
         const auto& folder = folder_contents[i].first;
         const auto& files = folder_contents[i].second;
         for (std::size_t j = 0; j < files.size(); ++j) {
-            if (!(archive_flags & kFileNames)) continue;
             std::string full_path = folder;
             if (!full_path.empty() && !filenames[i][j].empty()) full_path.push_back('\\');
             full_path += filenames[i][j];
@@ -221,6 +230,7 @@ void BsaArchive::open(const std::filesystem::path& path) {
     archive_size_ = archive_size;
     archive_flags_ = archive_flags;
     entries_ = std::move(entries);
+    stream_ = std::move(stream);
 }
 
 bool BsaArchive::contains(std::string_view asset_path) const {
@@ -246,9 +256,9 @@ std::vector<std::uint8_t> BsaArchive::read(std::string_view asset_path) const {
 }
 
 std::vector<std::uint8_t> BsaArchive::read_entry(const Entry& entry) const {
-    std::ifstream input(path_, std::ios::binary);
-    if (!input) throw std::runtime_error("cannot reopen " + path_.string());
-    StreamReader reader(input, archive_size_);
+    if (!stream_) throw std::runtime_error("BSA archive is not open: " + path_.string());
+    std::scoped_lock lock(stream_->mutex);
+    StreamReader reader(stream_->input, archive_size_);
     std::uint64_t cursor = entry.offset;
     std::size_t stored_size = entry.stored_size;
     if (archive_flags_ & kEmbeddedNames) {
@@ -281,14 +291,8 @@ std::vector<std::uint8_t> BsaArchive::read_entry(const Entry& entry) const {
     stored_size -= 4;
     std::vector<std::uint8_t> compressed_data(stored_size);
     if (!compressed_data.empty()) reader.read(compressed_data.data(), compressed_data.size(), "compressed asset");
-    std::vector<std::uint8_t> result(output_size);
-    if (output_size == 0) return result;
-    uLongf actual_size = static_cast<uLongf>(result.size());
-    const int status = uncompress(result.data(), &actual_size, compressed_data.data(),
-                                  static_cast<uLong>(compressed_data.size()));
-    if (status != Z_OK || actual_size != result.size())
-        throw std::runtime_error("zlib failed to unpack BSA entry in " + path_.string());
-    return result;
+    return inflate_bounded(compressed_data.data(), compressed_data.size(), output_size,
+                           "BSA entry in " + path_.string());
 }
 
 } // namespace oblivion

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -31,12 +32,16 @@ private:
         std::string path;
     };
 
+    struct Stream;
+
     [[nodiscard]] std::vector<std::uint8_t> read_entry(const Entry& entry) const;
 
     std::filesystem::path path_;
     std::uint64_t archive_size_ = 0;
     std::uint32_t archive_flags_ = 0;
     std::map<std::string, Entry, std::less<>> entries_;
+    // One open file shared by all reads; access is serialized by the stream's mutex.
+    std::shared_ptr<Stream> stream_;
 };
 
 [[nodiscard]] std::string normalize_asset_path(std::string_view path);
