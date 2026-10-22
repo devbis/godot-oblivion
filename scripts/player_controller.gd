@@ -43,6 +43,10 @@ var _capture_mouse_on_focus := false
 var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
+var _walkable_stair_body: PhysicsBody3D
+var _walkable_stair_shape: CollisionShape3D
+var _walkable_stair_normal := Vector3.ZERO
+var _walkable_stair_last_position := Vector3.ZERO
 
 func _ready() -> void:
 	_camera_yaw = rotation.y
@@ -224,12 +228,44 @@ func _try_step_up(horizontal_motion: Vector3) -> bool:
 	var obstruction := KinematicCollision3D.new()
 	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
 		return false
+	var obstruction_body := obstruction.get_collider() as PhysicsBody3D
 	var stair_ramp := obstruction.get_collider_shape() as CollisionShape3D
+	var ramp_normal := obstruction.get_normal()
 	if stair_ramp != null and bool(stair_ramp.get_meta("walkable_stair_ramp", false)):
-		var ramp_normal := obstruction.get_normal()
+		_walkable_stair_body = obstruction_body
+		_walkable_stair_shape = stair_ramp
+		_walkable_stair_normal = ramp_normal
+		_walkable_stair_last_position = global_position
+	elif (
+		obstruction_body != null
+		and obstruction_body == _walkable_stair_body
+		and _walkable_stair_last_position.distance_to(global_position) <= 0.6
+	):
+		if is_instance_valid(_walkable_stair_shape) and _walkable_stair_shape.get_parent() == obstruction_body:
+			stair_ramp = _walkable_stair_shape
+			ramp_normal = _walkable_stair_normal
+	if stair_ramp != null and bool(stair_ramp.get_meta("walkable_stair_ramp", false)):
 		var horizontal_into_ramp := horizontal_motion.dot(ramp_normal)
 		if ramp_normal.dot(Vector3.UP) >= cos(floor_max_angle) and horizontal_into_ramp < -0.0001:
 			var ramp_motion := horizontal_motion - ramp_normal * horizontal_into_ramp
+			var uphill_horizontal := Vector2(-ramp_normal.x, -ramp_normal.z)
+			var preferred_stair_direction: Vector3 = stair_ramp.get_meta("walkable_stair_direction", Vector3.ZERO)
+			if preferred_stair_direction.length_squared() > 0.0001:
+				var preferred_world_direction := stair_ramp.global_basis * preferred_stair_direction
+				uphill_horizontal = Vector2(preferred_world_direction.x, preferred_world_direction.z).normalized()
+			var input_uphill := Vector2(horizontal_motion.x, horizontal_motion.z).dot(uphill_horizontal)
+			if input_uphill > 0.0001 and uphill_horizontal.length_squared() > 0.0001:
+				uphill_horizontal = uphill_horizontal.normalized()
+				var horizontal_distance := horizontal_motion.length()
+				var vertical_rise := -(
+					ramp_normal.x * uphill_horizontal.x
+					+ ramp_normal.z * uphill_horizontal.y
+				) * horizontal_distance / ramp_normal.y
+				ramp_motion = Vector3(
+					uphill_horizontal.x * horizontal_distance,
+					vertical_rise,
+					uphill_horizontal.y * horizontal_distance
+				)
 			var ramp_obstruction := KinematicCollision3D.new()
 			var tangent_blocked := test_move(original_transform, ramp_motion, ramp_obstruction, 0.005)
 			var blocked_by_same_walkable_stair := false
@@ -242,6 +278,12 @@ func _try_step_up(horizontal_motion: Vector3) -> bool:
 			):
 				global_transform = original_transform.translated(ramp_motion)
 				velocity.y = 0.0
+				var saved_horizontal_velocity := Vector3(velocity.x, 0.0, velocity.z)
+				velocity = Vector3.ZERO
+				move_and_slide()
+				velocity.x = saved_horizontal_velocity.x
+				velocity.z = saved_horizontal_velocity.z
+				_walkable_stair_last_position = global_position
 				return true
 	if obstruction.get_collider() is CharacterBody3D or obstruction.get_collider() is RigidBody3D:
 		return false

@@ -1374,14 +1374,24 @@ func _ensure_collision_shape(model_path: String) -> void:
 		var mesh := mesh_entry.get("mesh") as ArrayMesh
 		if mesh != null:
 			var model_faces := mesh.get_faces()
-			if key.ends_with("dungeons/chargen/prisonstaircorner01.nif"):
+			# Mesh :3 carries the stair treads. Remove only its steep riser faces;
+			# retain the treads and all neighboring wall and ceiling geometry.
+			if (
+				key.ends_with("dungeons/chargen/prisonstaircorner01.nif")
+				and shape_name.ends_with(":3")
+			):
 				for face_index in range(0, model_faces.size(), 3):
+					var face_normal := (
+						(model_faces[face_index + 1] - model_faces[face_index])
+						.cross(model_faces[face_index + 2] - model_faces[face_index])
+						.normalized()
+					)
 					var face_center := (
 						model_faces[face_index]
 						+ model_faces[face_index + 1]
 						+ model_faces[face_index + 2]
 					) / 3.0
-					if _inside_prison_stair_corner_ramp(face_center):
+					if absf(face_normal.y) < 0.5 and _inside_prison_stair_corner_ramp(face_center):
 						continue
 					collision_faces.append_array(PackedVector3Array([
 						model_faces[face_index],
@@ -1410,18 +1420,26 @@ func _add_reference_collider(reference_id: int, reference_transform: Transform3D
 	if model_key.ends_with("dungeons/chargen/prisonstairshort01.nif"):
 		# Keep the full NIF collision (including side walls) and layer a smooth
 		# walking ramp over its sharp treads for the character controller.
-		_add_walkable_ramp(static_body, model_key, _build_prison_stair_ramp_shape)
+		_add_walkable_ramp(static_body, model_key, _build_prison_stair_ramp_shape, "straight")
 	elif model_key.ends_with("dungeons/chargen/prisonstaircorner01.nif"):
-		# The lower switchback uses the same sharp tread geometry, but turns
-		# across the corner. Preserve its walls and add a ramp over the inner run.
-		_add_walkable_ramp(static_body, model_key, _build_prison_stair_corner_ramp_shape)
+		# Smooth the winding lower flight and carry the last step onto its upper run.
+		_add_walkable_ramp(
+			static_body, model_key, _build_prison_stair_corner_ramp_shape,
+			"corner", Vector3(-1.0, 0.0, -1.0)
+		)
 	cell_visual_root.add_child(static_body)
 	if track_exterior:
 		_exterior_collision_bodies[reference_id] = static_body
 	return true
 
-func _add_walkable_ramp(static_body: StaticBody3D, model_key: String, builder: Callable) -> void:
-	var ramp_key := model_key + "|walkable-ramp"
+func _add_walkable_ramp(
+	static_body: StaticBody3D,
+	model_key: String,
+	builder: Callable,
+	ramp_suffix: String = "",
+	preferred_direction: Vector3 = Vector3.ZERO
+) -> void:
+	var ramp_key := model_key + "|walkable-ramp|" + ramp_suffix
 	var ramp_shape := _collision_cache.get(ramp_key) as Shape3D
 	if ramp_shape == null:
 		ramp_shape = builder.call() as Shape3D
@@ -1429,6 +1447,8 @@ func _add_walkable_ramp(static_body: StaticBody3D, model_key: String, builder: C
 	var ramp_collision := CollisionShape3D.new()
 	ramp_collision.name = "WalkableStairRampCollision"
 	ramp_collision.set_meta("walkable_stair_ramp", true)
+	if preferred_direction.length_squared() > 0.0001:
+		ramp_collision.set_meta("walkable_stair_direction", preferred_direction.normalized())
 	ramp_collision.shape = ramp_shape
 	static_body.add_child(ramp_collision)
 
@@ -1451,8 +1471,8 @@ func _build_prison_stair_ramp_shape() -> ConvexPolygonShape3D:
 func _build_prison_stair_corner_ramp_shape() -> ConvexPolygonShape3D:
 	var walkable_ramp := ConvexPolygonShape3D.new()
 	var top_points := PackedVector3Array([
-		Vector3(70.0, -78.0, 84.0),
-		Vector3(40.0, -78.0, 148.0),
+		Vector3(130.0, -78.0, 84.0),
+		Vector3(100.0, -78.0, 148.0),
 		Vector3(-95.0, 90.0, 4.0),
 		Vector3(-125.0, 90.0, 68.0),
 	])
@@ -1466,8 +1486,8 @@ func _inside_prison_stair_corner_ramp(point: Vector3) -> bool:
 	if point.y < -102.0 or point.y > 105.0:
 		return false
 	var ramp_footprint := PackedVector2Array([
-		Vector2(70.0, 84.0),
-		Vector2(40.0, 148.0),
+		Vector2(130.0, 84.0),
+		Vector2(100.0, 148.0),
 		Vector2(-125.0, 68.0),
 		Vector2(-95.0, 4.0),
 	])
@@ -2241,15 +2261,15 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_collision := CollisionShape3D.new()
 		actor_collision.name = "ApproximateActorCollision"
 		var actor_capsule := CapsuleShape3D.new()
-		# Match the visible actor's shoulder width so its mesh does not clip walls
-		# while the smaller physics capsule is still clear.
-		actor_capsule.radius = 0.4
+		# Keep NPC blockers narrow enough to pass in the prison corridors; spawn
+		# separation uses its own wider clearance to avoid overlapping starts.
+		actor_capsule.radius = 0.18
 		actor_capsule.height = 1.8
 		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = 0.9
 		actor_root.add_child(actor_collision)
-		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id, actor_capsule.radius)
+		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id, 0.4)
 		if spawn_adjustment > 0.001:
 			print("OpenOB separated overlapping spawn for %s by %.3fm" % [actor_name, spawn_adjustment])
 		if _place_actor_on_generated_floor(actor_root):
