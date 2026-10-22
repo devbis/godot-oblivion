@@ -1,5 +1,6 @@
 #include "oblivion/bsa_archive.hpp"
 #include "oblivion/command_table.hpp"
+#include "oblivion/quest_runtime.hpp"
 #include "oblivion/esm4_database.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
@@ -723,6 +724,54 @@ void test_script_fragment() {
     CHECK(host.last_target == "Player");
 }
 
+// Answers GetStage(quest) with a fixed stage and nothing else.
+class StageHost final : public oblivion::ScriptHost {
+public:
+    double stage = 0;
+    std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
+                                                      const std::vector<oblivion::ScriptValue>&) override {
+        return std::nullopt;
+    }
+    std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1, std::uint32_t) override {
+        if (function_index == 58 && parameter1 == 0x100) return stage;
+        return std::nullopt;
+    }
+};
+
+void test_quest_conditions() {
+    using oblivion::QuestCondition;
+    // Operator bytes: 0x00 ==, 0x20 !=, 0x40 >, 0x60 >=, 0x80 <, 0xA0 <=; bit 0x01 joins the next condition with OR.
+    CHECK(oblivion::condition_operator(0x61) == oblivion::ConditionOperator::GreaterEqual);
+    CHECK(oblivion::condition_operator(0xA1) == oblivion::ConditionOperator::LessEqual);
+    CHECK(oblivion::condition_joins_next(0x01) && !oblivion::condition_joins_next(0x60));
+
+    const auto stage_is = [](std::uint8_t op, float value) {
+        QuestCondition condition;
+        condition.operator_code = op;
+        condition.comparison = value;
+        condition.function_index = 58;  // GetStage
+        condition.parameter1 = 0x100;
+        return condition;
+    };
+    StageHost host;
+    host.stage = 20;
+    CHECK(oblivion::evaluate_conditions({stage_is(0x00, 20.0f)}, host));
+    CHECK(!oblivion::evaluate_conditions({stage_is(0x20, 20.0f)}, host));
+    CHECK(oblivion::evaluate_conditions({stage_is(0x60, 15.0f)}, host));
+    CHECK(!oblivion::evaluate_conditions({stage_is(0x40, 20.0f)}, host));
+    CHECK(oblivion::evaluate_conditions({stage_is(0xA0, 20.0f)}, host));
+    // Two OR-joined conditions: one of them holds, so the disjunction holds.
+    CHECK(oblivion::evaluate_conditions({stage_is(0x01, 5.0f), stage_is(0x00, 20.0f)}, host));
+    // Joined with AND (no OR bit): both must hold.
+    CHECK(!oblivion::evaluate_conditions({stage_is(0x00, 20.0f), stage_is(0x00, 5.0f)}, host));
+    // An unimplemented function is false and reported once.
+    QuestCondition unknown;
+    unknown.function_index = 365;
+    std::vector<std::string> missing;
+    CHECK(!oblivion::evaluate_conditions({unknown, unknown}, host, &missing));
+    CHECK(missing == std::vector<std::string>({"condition 365"}));
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -765,6 +814,7 @@ int main() {
         test_command_table(directory);
         test_script_interpreter();
         test_script_fragment();
+        test_quest_conditions();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

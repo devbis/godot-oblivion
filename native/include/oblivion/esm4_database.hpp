@@ -137,6 +137,7 @@ public:
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const;
+    [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return quest_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const;
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return cells_; }
     [[nodiscard]] std::size_t record_count() const noexcept { return record_count_; }

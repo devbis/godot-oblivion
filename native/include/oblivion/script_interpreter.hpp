@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <cstdint>
 #include <vector>
 
 #include "oblivion/script_ast.hpp"
@@ -42,6 +43,16 @@ public:
     // `target` is the reference a member call is made on (`ref.Command`), or null.
     virtual std::optional<ScriptValue> call_command(std::string_view name, const ScriptValue* target,
                                                     const std::vector<ScriptValue>& arguments) = 0;
+
+    // A CTDA condition function (for example GetStage with the quest as parameter1). Returns
+    // nullopt when the host does not implement it; the condition then counts as false.
+    virtual std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1,
+                                                 std::uint32_t parameter2) {
+        static_cast<void>(function_index);
+        static_cast<void>(parameter1);
+        static_cast<void>(parameter2);
+        return std::nullopt;
+    }
 };
 
 struct ScriptRunResult {
