@@ -45,6 +45,18 @@ ScriptRunResult ScriptInterpreter::run(std::string_view event, ScriptHost& host,
     return ScriptRunResult{};
 }
 
+ScriptRunResult ScriptInterpreter::run_event(std::string_view event, std::string_view detail, ScriptHost& host, const ScriptValue* target) {
+    const auto wanted = lower(event);
+    const auto wanted_detail = lower(detail);
+    for (const auto& block : script_.blocks) {
+        if (lower(block.name) != wanted || lower(block.target) != wanted_detail) continue;
+        auto result = run_body(block.body, host, target);
+        result.found_block = true;
+        return result;
+    }
+    return ScriptRunResult{};
+}
+
 ScriptRunResult ScriptInterpreter::run_body(const std::vector<ScriptStmt>& body, ScriptHost& host, const ScriptValue* target) {
     ScriptRunResult result;
     steps_ = 0;

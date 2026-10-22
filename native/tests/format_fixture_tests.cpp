@@ -705,6 +705,26 @@ void test_script_interpreter() {
     CHECK(limited.run("GameMode", limited_host).step_limit_hit);
 }
 
+void test_event_blocks_by_target() {
+    // Three OnPackageDone blocks, one per package: the event with a package name runs only that block.
+    const auto ast = oblivion::parse_script(
+        "scn Packages\n"
+        "short which\n"
+        "begin OnPackageDone WalkA\n"
+        "  set which to 1\n"
+        "end\n"
+        "begin OnPackageDone WalkB\n"
+        "  set which to 2\n"
+        "end\n");
+    oblivion::ScriptInterpreter interpreter(ast);
+    RecordingHost host;
+    CHECK(interpreter.run_event("onpackagedone", "walkb", host).found_block);
+    CHECK(interpreter.variables().at("which").number == 2.0);
+    CHECK(!interpreter.run_event("OnPackageDone", "WalkC", host).found_block);
+    CHECK(interpreter.run_event("OnPackageDone", "WalkA", host).found_block);
+    CHECK(interpreter.variables().at("which").number == 1.0);
+}
+
 void test_script_fragment() {
     // A stage result has no header: its statements run as they are.
     const auto fragment = oblivion::parse_fragment(
@@ -935,6 +955,7 @@ int main() {
         test_script_parser();
         test_command_table(directory);
         test_script_interpreter();
+        test_event_blocks_by_target();
         test_script_fragment();
         test_quest_conditions();
         test_quest_stage_actions(directory);

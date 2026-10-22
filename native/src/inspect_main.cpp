@@ -83,13 +83,14 @@ int main(int argc, char** argv) {
     const bool tick_quest = argc == 7 && mode == "--tick-quest";
     const bool show_topics = argc == 4 && mode == "--topics";
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
+    const bool show_packages = argc == 4 && mode == "--packages";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -241,8 +242,40 @@ int main(int argc, char** argv) {
                         if (reference.reference_name != argv[4]) continue;
                         std::cout << cell.editor_id << " " << std::hex << std::setw(8) << std::setfill('0') << reference.form_id
                                   << std::dec << " type=" << reference.record_type << " name=" << reference.reference_name
+                                  << " script=" << (reference.script_form_id ? [&] {
+                                         const auto* script = data.find_script(reference.script_form_id);
+                                         return (script ? script->editor_id : std::string("?")) + "@" + std::to_string(0);
+                                     }() : std::string("none"))
                                   << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
+                }
+                return 0;
+            }
+            if (show_packages) {
+                // AI packages of an NPC base record, in the order of its PKID list.
+                const auto npc_id = data.find_form_id_by_editor_id(argv[3]);
+                const auto* npc = data.find_npc_base(npc_id);
+                if (!npc) throw std::runtime_error("NPC not found: " + std::string(argv[3]));
+                const auto* npc_script = data.find_script(npc->script_form_id);
+                std::cout << argv[3] << " form=" << std::hex << npc_id << std::dec << " script=" << (npc_script ? npc_script->editor_id : std::string("none"))
+                          << " packages=" << npc->ai_package_form_ids.size() << '\n';
+                for (const auto package_id : npc->ai_package_form_ids) {
+                    const auto* package = data.find_ai_package(package_id);
+                    if (!package) {
+                        std::cout << "  " << std::hex << package_id << std::dec << " missing\n";
+                        continue;
+                    }
+                    // PLDT names a placed reference (a marker), so look it up among the cells.
+                    std::string location_name = "?";
+                    for (const auto& cell : data.cells()) {
+                        for (const auto& reference : cell.references)
+                            if (reference.form_id == package->location_form_id) location_name = reference.reference_name + "@" + cell.editor_id;
+                        if (location_name != "?") break;
+                    }
+                    std::cout << "  " << package->editor_id << " form=" << std::hex << package_id << std::dec
+                              << " type=" << static_cast<unsigned>(package->package_type) << " flags=0x" << std::hex << package->flags << std::dec
+                              << " location_type=" << package->location_type << " location=" << location_name
+                              << " radius=" << package->location_radius << '\n';
                 }
                 return 0;
             }

@@ -591,6 +591,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             item_biped_slots_by_id_[form_id] = u16(value);
         } else if (tag == "INAM" && is_outfit && subrecord_size >= 4) {
             outfit.item_form_ids.push_back(u32(value));
+        } else if (tag == "SCRI" && is_npc_base && subrecord_size >= 4) {
+            npc.script_form_id = u32(value);
+        } else if (tag == "SCRI" && is_reference && subrecord_size >= 4) {
+            reference.script_form_id = u32(value);
         } else if (tag == "NAME" && is_reference && subrecord_size >= 4) {
             reference.base_form_id = u32(value);
         } else if (tag == "ACBS" && is_npc_base && subrecord_size >= 4) {

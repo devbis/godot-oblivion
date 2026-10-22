@@ -72,6 +72,10 @@ public:
     // Runs the first block whose name matches `event`, case-insensitively.
     ScriptRunResult run(std::string_view event, ScriptHost& host, const ScriptValue* target = nullptr);
 
+    // Runs the block named `event` whose target is `detail` (for example OnPackageDone with the package's name).
+    // Blocks without a target match only an empty detail.
+    ScriptRunResult run_event(std::string_view event, std::string_view detail, ScriptHost& host, const ScriptValue* target = nullptr);
+
     // Runs a statement list on its own, such as a quest stage's result script. Variables are
     // the script's; names that are not variables resolve to text for the host.
     ScriptRunResult run_body(const std::vector<ScriptStmt>& body, ScriptHost& host, const ScriptValue* target = nullptr);

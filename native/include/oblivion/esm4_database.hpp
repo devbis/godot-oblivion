@@ -20,6 +20,7 @@ namespace oblivion {
 struct PlacedReference {
     std::uint32_t form_id = 0;
     std::uint32_t base_form_id = 0;
+    std::uint32_t script_form_id = 0;  // SCRI: the script attached to this reference
     std::array<float, 3> position{};
     std::array<float, 3> rotation{};
     std::uint32_t teleport_ref_id = 0;
@@ -50,6 +51,7 @@ struct NpcInventoryEntry {
 
 struct NpcBaseRecord {
     std::uint32_t form_id = 0;
+    std::uint32_t script_form_id = 0;  // SCRI: the script attached to every actor of this base
     std::string editor_id;
     std::string name;
     std::uint32_t flags = 0;
