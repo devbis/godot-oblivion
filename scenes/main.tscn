@@ -69,14 +69,14 @@ mesh = SubResource("FloorMesh")
 [node name="StatusPanel" type="PanelContainer" parent="StatusLayer"]
 offset_left = 16.0
 offset_top = 16.0
-offset_right = 664.0
-offset_bottom = 190.0
+offset_right = 600.0
+offset_bottom = 130.0
 
 [node name="Margin" type="MarginContainer" parent="StatusLayer/StatusPanel"]
-theme_override_constants/margin_left = 12
-theme_override_constants/margin_top = 10
-theme_override_constants/margin_right = 12
-theme_override_constants/margin_bottom = 10
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 8
 
 [node name="Status" type="Label" parent="StatusLayer/StatusPanel/Margin"]
 text = "OpenOB — connecting to Oblivion data…"

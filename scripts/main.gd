@@ -762,9 +762,10 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s (%d references, %d meshes, %d collision bodies, %d tree billboards).\nWASD move · Shift run · Space jump · E pick up item / follow door\nMouse turns player · wheel/trackpad zoom · I inventory · V camera mode · C face profile · G player expression · F NPC expression · Esc release mouse\nOriginal textures, rig, animations, and supported Havok bodies/constraints load from game files; collision is simulated with Jolt." % [
-		cell_label, cell.references.size(), instance_count, collision_count, tree_reference_count
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · Space jump · mouse look/zoom\nE interact · Y fly · I inventory · V camera · C face · G/F expression · Esc unlock" % [
+		cell_label, cell.references.size(), instance_count, collision_count
 	]
+
 	_update_interaction_hint({}, {})
 	_refresh_inventory_hud()
 	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d meshes, %d generated colliders, %d terrain tiles; culled %d distant references, skipped %d gates" % [
@@ -1507,7 +1508,7 @@ func _load_player_avatar() -> void:
 	if data_reader == null:
 		return
 	_player_hair_meshes.clear()
-	status_label.text += "\nLoading original Imperial character meshes…"
+	status_label.text = "Loading player appearance…"
 	var avatar := Node3D.new()
 	avatar.name = "OriginalImperialAvatar"
 	avatar.scale = Vector3.ONE * game_units_to_meters
@@ -1620,11 +1621,6 @@ func _load_player_avatar() -> void:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
 		if body_proxy != null:
 			body_proxy.visible = false
-		status_label.text += "\nOriginal Imperial male rig loaded (%d body/head shapes, %d bones); idle KF ready, other movement animations loading in background.\nLoaded %d base-game clothing pieces." % [
-			part_count,
-			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
-			clothing_count,
-		]
 		print("OpenOB loaded original Imperial actor: %d body/head shapes, %d rig bones, %d base-game clothing pieces, idle=%s, KF sequences=%s" % [
 			part_count,
 			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
@@ -1709,7 +1705,7 @@ func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
 	var near_distance := STARTUP_NEAR_REFERENCE_DISTANCE if not is_exterior else STARTUP_NEAR_TERRAIN_DISTANCE
 	var far_distance := INF if not is_exterior else EXTERIOR_CAMERA_FAR
-	status_label.text = "Loading the rest of %s while you can explore…" % str(cell.get("display_name", cell.get("editor_id", "cell")))
+	status_label.text = "Loading nearby %s…" % str(cell.get("display_name", cell.get("editor_id", "cell")))
 	var geometry_complete: bool = await _load_cell_geometry(cell, near_distance, far_distance, false)
 	if not geometry_complete or generation != _deferred_world_generation:
 		return
@@ -2359,9 +2355,6 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count, routed_actor_count])
-	if actor_count > 0:
-		status_label.text += "\nLoaded %d placed NPCs with original rigs, outfit meshes, FaceGen head shapes, and walk/fast-walk animations. F cycles the nearest NPC's expression." % actor_count
-		await get_tree().process_frame
 
 func _update_npc_streaming() -> void:
 	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
