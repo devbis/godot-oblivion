@@ -1364,6 +1364,13 @@ func _instantiate_imported_nif_physics(
 
 func _ensure_collision_shape(model_path: String) -> void:
 	var key := model_path.to_lower().replace("\\", "/")
+	if key.ends_with("dungeons/chargen/prisonstairshort01.nif"):
+		if _collision_cache.get(key) is ConvexPolygonShape3D:
+			return
+		# The visible NIF has sharp stair edges; this 23-degree walk surface fits
+		# the tread bounds and lets the character controller climb the flight.
+		_collision_cache[key] = _build_prison_stair_ramp_shape()
+		return
 	if _collision_cache.has(key):
 		return
 	var collision_faces := PackedVector3Array()
@@ -1377,9 +1384,8 @@ func _ensure_collision_shape(model_path: String) -> void:
 	_collision_cache[key] = _build_concave_shape(collision_faces)
 
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
-	_ensure_collision_shape(model_path)
 	var model_key := model_path.to_lower().replace("\\", "/")
-	var collision_shape := _collision_cache.get(model_key) as ConcavePolygonShape3D
+	var collision_shape := _collision_shape_for_model(model_key)
 	if collision_shape == null:
 		return false
 	var static_body := StaticBody3D.new()
@@ -1394,6 +1400,22 @@ func _add_reference_collider(reference_id: int, reference_transform: Transform3D
 	if track_exterior:
 		_exterior_collision_bodies[reference_id] = static_body
 	return true
+
+func _collision_shape_for_model(model_key: String) -> Shape3D:
+	_ensure_collision_shape(model_key)
+	return _collision_cache.get(model_key) as Shape3D
+
+func _build_prison_stair_ramp_shape() -> ConvexPolygonShape3D:
+	var walkable_ramp := ConvexPolygonShape3D.new()
+	walkable_ramp.set_points(PackedVector3Array([
+		Vector3(-96.1, -236.6, 143.4),
+		Vector3(52.3, -236.6, 143.4),
+		Vector3(-96.1, -236.6, -125.5),
+		Vector3(52.3, -236.6, -125.5),
+		Vector3(-96.1, -123.5, -125.5),
+		Vector3(52.3, -123.5, -125.5),
+	]))
+	return walkable_ramp
 
 func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
