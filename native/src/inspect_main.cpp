@@ -3,6 +3,7 @@
 #include "oblivion/script_lexer.hpp"
 #include "oblivion/command_table.hpp"
 #include "oblivion/quest_runtime.hpp"
+#include "oblivion/quest_driver.hpp"
 #include "oblivion/quest_stage.hpp"
 #include "oblivion/script_interpreter.hpp"
 #include "oblivion/script_parser.hpp"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -75,15 +77,17 @@ int main(int argc, char** argv) {
     const bool show_commands = argc == 4 && mode == "--commands";
     const bool check_arity = argc == 4 && mode == "--check-arity";
     const bool run_script = (argc == 5 || argc == 6) && mode == "--run-script";
-    const bool show_quest = argc == 4 && mode == "--quest";
+    const bool show_quest = (argc == 4 || argc == 5) && mode == "--quest";
+    const bool show_source = argc == 5;
     const bool run_stage = argc == 6 && mode == "--run-stage";
+    const bool tick_quest = argc == 7 && mode == "--tick-quest";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -212,9 +216,15 @@ int main(int argc, char** argv) {
                                       << (0x1000u + condition.function_index) << std::dec << " param=" << std::hex
                                       << condition.parameter1 << " param2=" << condition.parameter2 << std::dec << '\n';
                         if (!entry.log_text.empty()) std::cout << "    log: " << entry.log_text << '\n';
-                        if (!entry.result_source.empty())
+                        if (!entry.result_source.empty()) {
                             std::cout << "    result: " << entry.result_source.size() << " bytes of source, "
                                       << entry.result_references.size() << " references\n";
+                            if (show_source) {
+                                std::istringstream lines(entry.result_source);
+                                std::string line;
+                                while (std::getline(lines, line)) std::cout << "      | " << line << '\n';
+                            }
+                        }
                     }
                 }
                 return 0;
@@ -232,6 +242,42 @@ int main(int argc, char** argv) {
                                   << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
                 }
+                return 0;
+            }
+            if (tick_quest) {
+                // Runs the quest driver for N ticks of D seconds with no world answers: distances are unknown
+                // and every world command is only recorded. Shows the stages the quest reaches and what stops it.
+                const auto* quest = data.find_quest(argv[3]);
+                if (!quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
+                const auto* quest_script = data.find_script(quest->script_form_id);
+                if (!quest_script) throw std::runtime_error("quest has no script");
+                const auto ticks = std::stoi(argv[4]);
+                const auto seconds = std::stod(argv[5]);
+                const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[6], ".godot/openob/cache"));
+                oblivion::QuestDriver driver(*quest, *quest_script, lookup);
+                std::map<std::string, std::size_t> commands;
+                std::vector<std::string> unanswered;
+                const auto record = [&](const oblivion::QuestTick& tick, const std::string& when) {
+                    for (const auto& action : tick.actions) ++commands[action.command];
+                    for (const auto& name : tick.unanswered)
+                        if (std::find(unanswered.begin(), unanswered.end(), name) == unanswered.end()) unanswered.push_back(name);
+                    for (const auto& error : tick.parse_errors) std::cout << when << " parse " << error << '\n';
+                    if (!tick.stage_changes.empty()) {
+                        std::cout << when << " stages:";
+                        for (const auto& change : tick.stage_changes) std::cout << ' ' << change;
+                        std::cout << '\n';
+                    }
+                };
+                record(driver.start(0), "start");
+                for (int tick_index = 1; tick_index <= ticks; ++tick_index) {
+                    const auto tick = driver.tick(seconds);
+                    record(tick, "tick " + std::to_string(tick_index));
+                }
+                std::cout << "final stage " << driver.stage() << "; commands:";
+                for (const auto& [command, count] : commands) std::cout << ' ' << command << 'x' << count;
+                std::cout << "\nunanswered:";
+                for (const auto& name : unanswered) std::cout << ' ' << name;
+                std::cout << '\n';
                 return 0;
             }
             if (run_stage) {

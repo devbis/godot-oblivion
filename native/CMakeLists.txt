@@ -24,6 +24,7 @@ add_library(oblivion_data_core STATIC
     src/script_interpreter.cpp
     src/quest_runtime.cpp
     src/quest_stage.cpp
+    src/quest_driver.cpp
 )
 target_include_directories(oblivion_data_core PUBLIC include)
 target_link_libraries(oblivion_data_core PUBLIC ZLIB::ZLIB nifly)

@@ -1,6 +1,7 @@
 #include "oblivion/bsa_archive.hpp"
 #include "oblivion/command_table.hpp"
 #include "oblivion/quest_runtime.hpp"
+#include "oblivion/quest_driver.hpp"
 #include "oblivion/quest_stage.hpp"
 #include "oblivion/esm4_database.hpp"
 #include "oblivion/game_data.hpp"
@@ -832,6 +833,67 @@ void test_quest_stage_actions(const std::filesystem::path& directory) {
     CHECK(!oblivion::run_quest_stage(flagged, 20, {}, &quest_script, set)[0].conditions_hold);
 }
 
+void test_quest_driver() {
+    // GameMode counts ticks and sums GetSecondsPassed; at the second tick it sets stage 5.
+    oblivion::ScriptRecord script;
+    script.editor_id = "DriverScript";
+    script.source =
+        "scn Driver\n"
+        "short ticks\n"
+        "float elapsed\n"
+        "begin GameMode\n"
+        "  if getstage Driver == 0\n"
+        "    set ticks to ticks + 1\n"
+        "  endif\n"
+        "  set elapsed to elapsed + getsecondspassed\n"
+        "  if ticks == 2\n"
+        "    setstage Driver 5\n"
+        "  endif\n"
+        "end\n";
+    script.variables = {{1, 1, "ticks"}, {2, 2, "elapsed"}};
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x700;
+    quest.editor_id = "Driver";
+    oblivion::QuestStage stage0;
+    stage0.index = 0;
+    oblivion::QuestStageEntry start_entry;
+    start_entry.result_source = "Activate startActor 1\n";
+    stage0.entries.push_back(start_entry);
+    oblivion::QuestStage stage5;
+    stage5.index = 5;
+    oblivion::QuestStageEntry finish_entry;
+    finish_entry.result_source = "Activate finishActor 1\n";
+    stage5.entries.push_back(finish_entry);
+    quest.stages = {stage0, stage5};
+
+    // The table would say which names are commands; this lookup knows the ones the script uses.
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "getstage" || name == "setstage" || name == "getsecondspassed" || name == "Activate")
+            return oblivion::ScriptCommandSignature{0, name == "getsecondspassed" ? 0u : 2u};
+        return std::nullopt;
+    };
+    oblivion::QuestDriver driver(quest, script, commands);
+    const auto started = driver.start(0);
+    CHECK(started.stage == 0 && started.actions.size() == 1 && started.actions[0].command == "Activate");
+    CHECK(started.stage_changes == std::vector<std::string>({"0"}));
+    const auto first = driver.tick(0.25);
+    CHECK(first.stage == 0 && first.stage_changes.size() == 0);
+    CHECK(driver.state().variables.at("driver.ticks") == 1.0);
+    CHECK(driver.state().variables.at("driver.elapsed") == 0.25);
+    const auto second = driver.tick(0.5);
+    CHECK(second.stage == 5 && second.stage_changes == std::vector<std::string>({"5"}));
+    CHECK(driver.state().variables.at("driver.ticks") == 2.0);
+    CHECK(driver.state().variables.at("driver.elapsed") == 0.75);
+    // The stage 5 result ran during the tick that set it.
+    bool finished = false;
+    for (const auto& action : second.actions)
+        if (!action.arguments.empty() && action.arguments[0].text == "finishActor") finished = true;
+    CHECK(finished);
+    // Stage 5 has no getstage(0) branch, so further ticks do not count.
+    driver.tick(0.25);
+    CHECK(driver.state().variables.at("driver.ticks") == 2.0);
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -876,6 +938,7 @@ int main() {
         test_script_fragment();
         test_quest_conditions();
         test_quest_stage_actions(directory);
+        test_quest_driver();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;
