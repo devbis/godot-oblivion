@@ -1231,9 +1231,9 @@ func _instantiate_imported_nif_physics(
 			rigid_body.linear_damp = float(body_data.get("linear_damping", 0.0))
 			rigid_body.angular_damp = float(body_data.get("angular_damping", 0.0))
 			# Keep chain links on a dedicated layer so they collide with the world
-			# without colliding with every other link in the same chain.
+			# and player without colliding with every other link in the same chain.
 			rigid_body.collision_layer = 16
-			rigid_body.collision_mask = 2
+			rigid_body.collision_mask = 3
 			var physics_material := PhysicsMaterial.new()
 			physics_material.friction = float(body_data.get("friction", 0.3))
 			physics_material.bounce = float(body_data.get("restitution", 0.0))

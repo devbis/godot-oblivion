@@ -38,7 +38,7 @@ const CAMERA_COLLISION_MARGIN := 0.08
 var _capture_mouse_on_focus := false
 var is_flying := false
 var _saved_collision_layer := 1
-var _saved_collision_mask := 3
+var _saved_collision_mask := 19
 
 func _ready() -> void:
 	_camera_yaw = rotation.y

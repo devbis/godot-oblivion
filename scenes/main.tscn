@@ -37,7 +37,7 @@ light_energy = 1.1
 shadow_enabled = true
 
 [node name="Player" type="CharacterBody3D" parent="."]
-collision_mask = 3
+collision_mask = 19
 script = ExtResource("2_player")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
