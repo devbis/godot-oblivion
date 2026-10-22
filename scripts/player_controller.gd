@@ -43,10 +43,6 @@ var _capture_mouse_on_focus := false
 var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
-var _recent_stair_ramp_body: PhysicsBody3D
-var _recent_stair_ramp_shape: CollisionShape3D
-var _recent_stair_ramp_normal := Vector3.ZERO
-var _recent_stair_ramp_position := Vector3.ZERO
 
 func _ready() -> void:
 	_camera_yaw = rotation.y
@@ -218,100 +214,57 @@ func _physics_process(delta: float) -> void:
 
 	var requested_velocity := velocity
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
-	if horizontal_motion.length_squared() > 0.0001 and _try_walkable_stair_ramp(horizontal_motion):
-		return
 	if (
 		horizontal_motion.length_squared() > 0.0001
-		and (is_on_floor() or _near_recent_stair_ramp())
+		and is_on_floor()
 		and _try_step_up(horizontal_motion)
 	):
 		return
 	move_and_slide()
 	_push_contacted_chains(requested_velocity)
-	if not _near_recent_stair_ramp():
-		_recent_stair_ramp_body = null
-		_recent_stair_ramp_shape = null
-		_recent_stair_ramp_normal = Vector3.ZERO
-
-func _try_walkable_stair_ramp(horizontal_motion: Vector3) -> bool:
-	var original_transform := global_transform
-	var obstruction := KinematicCollision3D.new()
-	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
-		return false
-	var stair_body := obstruction.get_collider() as PhysicsBody3D
-	var stair_shape := obstruction.get_collider_shape() as CollisionShape3D
-	var ramp_normal := obstruction.get_normal()
-	if stair_shape != null and bool(stair_shape.get_meta("walkable_stair_ramp", false)):
-		_recent_stair_ramp_body = stair_body
-		_recent_stair_ramp_shape = stair_shape
-		_recent_stair_ramp_normal = ramp_normal
-		_recent_stair_ramp_position = global_position
-	elif (
-		stair_body != null
-		and stair_body == _recent_stair_ramp_body
-		and _near_recent_stair_ramp()
-		and is_instance_valid(_recent_stair_ramp_shape)
-		and _recent_stair_ramp_shape.get_parent() == stair_body
-	):
-		stair_shape = _recent_stair_ramp_shape
-		ramp_normal = _recent_stair_ramp_normal
-	else:
-		return false
-	if ramp_normal.y < 0.0:
-		ramp_normal = -ramp_normal
-	if ramp_normal.y < cos(floor_max_angle):
-		return false
-	var vertical_rise := -(
-		ramp_normal.x * horizontal_motion.x
-		+ ramp_normal.z * horizontal_motion.z
-	) / ramp_normal.y
-	if vertical_rise <= 0.0001:
-		return false
-	var ramp_motion := Vector3(horizontal_motion.x, vertical_rise, horizontal_motion.z)
-	var ramp_obstruction := KinematicCollision3D.new()
-	if test_move(original_transform, ramp_motion, ramp_obstruction, safe_margin):
-		if ramp_obstruction.get_collider() != stair_body:
-			return false
-		var other_shape := ramp_obstruction.get_collider_shape() as CollisionShape3D
-		if other_shape != stair_shape and ramp_obstruction.get_normal().dot(Vector3.UP) < cos(floor_max_angle):
-			return false
-	global_transform = original_transform.translated(ramp_motion)
-	var horizontal_velocity := Vector3(velocity.x, 0.0, velocity.z)
-	velocity = Vector3.ZERO
-	move_and_slide()
-	velocity.x = horizontal_velocity.x
-	velocity.z = horizontal_velocity.z
-	_recent_stair_ramp_position = global_position
-	return true
-
-func _near_recent_stair_ramp() -> bool:
-	return (
-		is_instance_valid(_recent_stair_ramp_body)
-		and is_instance_valid(_recent_stair_ramp_shape)
-		and _recent_stair_ramp_shape.get_parent() == _recent_stair_ramp_body
-		and _recent_stair_ramp_position.distance_to(global_position) <= 0.75
-	)
 
 func _try_step_up(horizontal_motion: Vector3) -> bool:
 	var original_transform := global_transform
 	var obstruction := KinematicCollision3D.new()
 	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
 		return false
-	var obstruction_body := obstruction.get_collider() as PhysicsBody3D
 	if obstruction.get_collider() is CharacterBody3D or obstruction.get_collider() is RigidBody3D:
 		return false
 	if obstruction.get_normal().dot(Vector3.UP) >= cos(floor_max_angle):
 		return false
-
-	var vertical_motion := Vector3.UP * max_step_height_m
-	if test_move(original_transform, vertical_motion, null, safe_margin):
-		return false
-	var raised_transform := original_transform.translated(vertical_motion)
-	if test_move(raised_transform, horizontal_motion, null, safe_margin):
+	# OpenMW ignores obstacles whose contact point is higher than the actor's
+	# configured step. The CharacterBody origin is at the feet, so this is the
+	# contact height relative to global_position.y.
+	if obstruction.get_position().y - global_position.y > max_step_height_m + safe_margin:
 		return false
 
-	var across_transform := raised_transform.translated(horizontal_motion)
-	var downward_motion := Vector3.DOWN * (max_step_height_m + floor_snap_length)
+	# OpenMW's Stepper probes the available clearance above the actor, moves
+	# horizontally at that height, then traces down to a walkable surface. This
+	# keeps the rule independent of the stair mesh and also allows partial
+	# horizontal progress when another tread is reached in the same frame.
+	var step_height := max_step_height_m
+	var upward_motion := Vector3.UP * step_height
+	var ceiling := KinematicCollision3D.new()
+	if test_move(original_transform, upward_motion, ceiling, safe_margin):
+		step_height = maxf(0.0, ceiling.get_travel().y - safe_margin)
+	if step_height <= safe_margin * 2.0:
+		return false
+
+	var raised_transform := original_transform.translated(Vector3.UP * step_height)
+	var across_collision := KinematicCollision3D.new()
+	var horizontal_distance := horizontal_motion.length()
+	var horizontal_direction := horizontal_motion / horizontal_distance
+	var horizontal_progress := horizontal_motion
+	if test_move(raised_transform, horizontal_motion, across_collision, safe_margin):
+		horizontal_distance = clampf(across_collision.get_travel().dot(horizontal_direction), 0.0, horizontal_distance)
+		horizontal_distance = maxf(0.0, horizontal_distance - safe_margin)
+		horizontal_progress = horizontal_direction * horizontal_distance
+	if horizontal_distance <= safe_margin * 2.0:
+		return false
+
+	var across_transform := raised_transform.translated(horizontal_progress)
+	var downward_distance := step_height + floor_snap_length + horizontal_distance
+	var downward_motion := Vector3.DOWN * downward_distance
 	var landing := KinematicCollision3D.new()
 	if not test_move(across_transform, downward_motion, landing, safe_margin):
 		return false
@@ -330,7 +283,13 @@ func _try_step_up(horizontal_motion: Vector3) -> bool:
 	):
 		global_transform = original_transform
 		return false
-	velocity.y = 0.0
+
+	# Refresh CharacterBody3D's floor state without advancing the actor again.
+	var horizontal_velocity := Vector3(velocity.x, 0.0, velocity.z)
+	velocity = Vector3.ZERO
+	move_and_slide()
+	velocity.x = horizontal_velocity.x
+	velocity.z = horizontal_velocity.z
 	return true
 
 func _push_contacted_chains(requested_velocity: Vector3) -> void:

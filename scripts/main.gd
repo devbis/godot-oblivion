@@ -1362,9 +1362,9 @@ func _instantiate_imported_nif_physics(
 	])
 	return {"body_count": body_count, "mesh_count": mesh_count}
 
-func _ensure_collision_shape(model_path: String, reference_basis: Basis = Basis.IDENTITY) -> void:
+func _ensure_collision_shape(model_path: String) -> void:
 	var key := model_path.to_lower().replace("\\", "/")
-	var collision_key := _collision_cache_key(key, reference_basis)
+	var collision_key := key
 	if _collision_cache.has(collision_key):
 		return
 	var collision_faces := PackedVector3Array()
@@ -1374,33 +1374,13 @@ func _ensure_collision_shape(model_path: String, reference_basis: Basis = Basis.
 			continue
 		var mesh := mesh_entry.get("mesh") as ArrayMesh
 		if mesh != null:
-			var model_faces := mesh.get_faces()
-			# Keep the stair shell, walls, undersides, and side rails intact. The :3
-			# mesh contains the stair treads; replace its faces in the fitted walking
-			# lane with one continuous ramp to prevent the capsule catching each edge.
-			if _is_prison_stair_model(key) and shape_name.ends_with(":3"):
-				for face_index in range(0, model_faces.size(), 3):
-					var face_center := (
-						model_faces[face_index]
-						+ model_faces[face_index + 1]
-						+ model_faces[face_index + 2]
-					) / 3.0
-					if _inside_prison_stair_walk_surface(key, face_center):
-						continue
-					collision_faces.append_array(PackedVector3Array([
-						model_faces[face_index],
-						model_faces[face_index + 1],
-						model_faces[face_index + 2],
-					]))
-			else:
-				collision_faces.append_array(model_faces)
+			collision_faces.append_array(mesh.get_faces())
 	_collision_cache[collision_key] = _build_concave_shape(collision_faces)
 
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
 	var model_key := model_path.to_lower().replace("\\", "/")
-	var collision_shape := _collision_shape_for_model(model_key, reference_transform.basis)
-	var is_prison_stair := _is_prison_stair_model(model_key)
-	if collision_shape == null and not is_prison_stair:
+	var collision_shape := _collision_shape_for_model(model_key)
+	if collision_shape == null:
 		return false
 	var static_body := StaticBody3D.new()
 	static_body.name = "GeneratedStaticMeshCollision"
@@ -1413,117 +1393,14 @@ func _add_reference_collider(reference_id: int, reference_transform: Transform3D
 		var collision_instance := CollisionShape3D.new()
 		collision_instance.shape = collision_shape
 		static_body.add_child(collision_instance)
-	if model_key.ends_with("dungeons/chargen/prisonstairshort01.nif"):
-		_add_walkable_ramp(static_body, model_key, _build_prison_stair_short_ramp_shape, "short")
-	elif model_key.ends_with("dungeons/chargen/prisonstaircorner01.nif"):
-		_add_walkable_ramp(
-			static_body, model_key, _build_prison_stair_corner_lower_ramp_shape,
-			"corner-lower", Vector3(-1.0, 0.0, -1.0)
-		)
-		_add_walkable_ramp(
-			static_body, model_key, _build_prison_stair_corner_ramp_shape,
-			"corner-upper", Vector3(-1.0, 0.0, -1.0)
-		)
 	cell_visual_root.add_child(static_body)
 	if track_exterior:
 		_exterior_collision_bodies[reference_id] = static_body
-	return collision_shape != null or is_prison_stair
+	return true
 
-func _collision_shape_for_model(model_key: String, reference_basis: Basis = Basis.IDENTITY) -> Shape3D:
-	_ensure_collision_shape(model_key, reference_basis)
-	return _collision_cache.get(_collision_cache_key(model_key, reference_basis)) as Shape3D
-
-func _collision_cache_key(model_key: String, reference_basis: Basis) -> String:
-	if not _is_prison_stair_model(model_key):
-		return model_key
-	# Stair faces are filtered against world up, so cache separately when a
-	# reference rotates the same NIF to a different orientation.
-	var rotation := reference_basis.orthonormalized().get_euler()
-	return "%s|stair-up|%.4f|%.4f|%.4f" % [model_key, rotation.x, rotation.y, rotation.z]
-
-func _add_walkable_ramp(
-	static_body: StaticBody3D,
-	model_key: String,
-	builder: Callable,
-	ramp_suffix: String,
-	preferred_direction: Vector3 = Vector3.ZERO
-) -> void:
-	var ramp_key := model_key + "|walkable-ramp|" + ramp_suffix
-	var ramp_shape := _collision_cache.get(ramp_key) as Shape3D
-	if ramp_shape == null:
-		ramp_shape = builder.call() as Shape3D
-		_collision_cache[ramp_key] = ramp_shape
-	var ramp_collision := CollisionShape3D.new()
-	ramp_collision.name = "WalkableStairRampCollision"
-	ramp_collision.set_meta("walkable_stair_ramp", true)
-	ramp_collision.set_meta("walkable_stair_direction", preferred_direction.normalized())
-	ramp_collision.shape = ramp_shape
-	static_body.add_child(ramp_collision)
-
-func _build_prison_stair_short_ramp_shape() -> ConcavePolygonShape3D:
-	var low_left := Vector3(-96.1, -236.6, 143.4)
-	var low_right := Vector3(52.3, -236.6, 143.4)
-	var high_left := Vector3(-96.1, -123.5, -125.5)
-	var high_right := Vector3(52.3, -123.5, -125.5)
-	return _build_concave_shape(PackedVector3Array([
-		low_left, low_right, high_right,
-		low_left, high_right, high_left,
-	]))
-
-func _build_prison_stair_corner_lower_ramp_shape() -> ConcavePolygonShape3D:
-	var low_left := Vector3(156.0, -128.0, 50.0)
-	var low_right := Vector3(126.0, -128.0, 114.0)
-	var high_left := Vector3(130.0, -78.0, 84.0)
-	var high_right := Vector3(100.0, -78.0, 148.0)
-	return _build_concave_shape(PackedVector3Array([
-		low_left, high_right, low_right,
-		low_left, high_left, high_right,
-	]))
-
-func _build_prison_stair_corner_ramp_shape() -> ConcavePolygonShape3D:
-	var low_left := Vector3(130.0, -78.0, 84.0)
-	var low_right := Vector3(100.0, -78.0, 148.0)
-	var high_left := Vector3(-95.0, 90.0, 4.0)
-	var high_right := Vector3(-125.0, 90.0, 68.0)
-	return _build_concave_shape(PackedVector3Array([
-		low_left, high_right, low_right,
-		low_left, high_left, high_right,
-	]))
-
-func _inside_prison_stair_walk_surface(model_key: String, point: Vector3) -> bool:
-	if model_key.ends_with("dungeons/chargen/prisonstairshort01.nif"):
-		return (
-			point.x >= -100.0 and point.x <= 56.0
-			and point.y >= -241.0 and point.y <= -119.0
-			and point.z >= -129.0 and point.z <= 147.0
-		)
-	if point.y >= -132.0 and point.y <= -75.0 and _inside_prison_stair_corner_lower_footprint(point):
-		return true
-	return point.y >= -82.0 and point.y <= 95.0 and _inside_prison_stair_corner_upper_footprint(point)
-
-func _inside_prison_stair_corner_lower_footprint(point: Vector3) -> bool:
-	var footprint := PackedVector2Array([
-		Vector2(156.0, 50.0),
-		Vector2(126.0, 114.0),
-		Vector2(100.0, 148.0),
-		Vector2(130.0, 84.0),
-	])
-	return Geometry2D.is_point_in_polygon(Vector2(point.x, point.z), footprint)
-
-func _inside_prison_stair_corner_upper_footprint(point: Vector3) -> bool:
-	var footprint := PackedVector2Array([
-		Vector2(130.0, 84.0),
-		Vector2(100.0, 148.0),
-		Vector2(-125.0, 68.0),
-		Vector2(-95.0, 4.0),
-	])
-	return Geometry2D.is_point_in_polygon(Vector2(point.x, point.z), footprint)
-
-func _is_prison_stair_model(model_key: String) -> bool:
-	return (
-		model_key.ends_with("dungeons/chargen/prisonstairshort01.nif")
-		or model_key.ends_with("dungeons/chargen/prisonstaircorner01.nif")
-	)
+func _collision_shape_for_model(model_key: String) -> Shape3D:
+	_ensure_collision_shape(model_key)
+	return _collision_cache.get(model_key) as Shape3D
 
 func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
