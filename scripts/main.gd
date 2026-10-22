@@ -1375,30 +1375,17 @@ func _ensure_collision_shape(model_path: String, reference_basis: Basis = Basis.
 		var mesh := mesh_entry.get("mesh") as ArrayMesh
 		if mesh != null:
 			var model_faces := mesh.get_faces()
-			if key.ends_with("dungeons/chargen/prisonstairshort01.nif") and shape_name.ends_with(":3"):
-				# This mesh is the short stair run. Its render treads snag the capsule
-				# at every edge, so use the fitted walk surface added to the body below.
-				continue
-			if _is_prison_stair_model(key):
+			# Keep the stair shell, walls, undersides, and side rails intact. The :3
+			# mesh contains the stair treads; replace its faces in the fitted walking
+			# lane with one continuous ramp to prevent the capsule catching each edge.
+			if _is_prison_stair_model(key) and shape_name.ends_with(":3"):
 				for face_index in range(0, model_faces.size(), 3):
-					var face_normal := (
-						(model_faces[face_index + 1] - model_faces[face_index])
-						.cross(model_faces[face_index + 2] - model_faces[face_index])
-						.normalized()
-					)
-					var world_face_normal := (reference_basis * face_normal).normalized()
 					var face_center := (
 						model_faces[face_index]
 						+ model_faces[face_index + 1]
 						+ model_faces[face_index + 2]
 					) / 3.0
-					# Stair shells include undersides and risers between switchback flights.
-					# Keep only upward walkable facets outside the fitted ramp footprints.
-					if (
-						absf(world_face_normal.y) < 0.95
-						or world_face_normal.y < 0.0
-						or _inside_prison_stair_walk_surface(key, face_center)
-					):
+					if _inside_prison_stair_walk_surface(key, face_center):
 						continue
 					collision_faces.append_array(PackedVector3Array([
 						model_faces[face_index],
@@ -2306,15 +2293,15 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_collision := CollisionShape3D.new()
 		actor_collision.name = "ApproximateActorCollision"
 		var actor_capsule := CapsuleShape3D.new()
-		# Keep NPC blockers narrow enough to pass in the prison corridors; spawn
-		# separation uses its own wider clearance to avoid overlapping starts.
+		# Keep the blocker close to the actor's actual occupied space. Spawn
+		# separation uses this radius only when two actors actually overlap.
 		actor_capsule.radius = 0.18
 		actor_capsule.height = 1.8
 		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = 0.9
 		actor_root.add_child(actor_collision)
-		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id, 0.4)
+		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id)
 		if spawn_adjustment > 0.001:
 			print("OpenOB separated overlapping spawn for %s by %.3fm" % [actor_name, spawn_adjustment])
 		if _place_actor_on_generated_floor(actor_root):
@@ -3021,55 +3008,28 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 
 func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
 	var start_position := actor_root.global_position
-	var candidate_offsets: Array[Vector2] = [Vector2.ZERO]
-	for radius in [0.15, 0.3, 0.45, 0.6, 0.8, 1.0]:
-		for direction_index in range(16):
-			var angle := TAU * float(direction_index) / 16.0
-			candidate_offsets.push_back(Vector2(cos(angle), sin(angle)) * float(radius))
-
-	for offset: Vector2 in candidate_offsets:
-		var candidate_x := start_position.x + offset.x
-		var candidate_z := start_position.z + offset.y
-		var floor_query := PhysicsRayQueryParameters3D.create(
-			Vector3(candidate_x, start_position.y + 2.1, candidate_z),
-			Vector3(candidate_x, start_position.y - 3.0, candidate_z),
-			2,
-			[actor_root.get_rid(), player.get_rid()]
-		)
-		floor_query.collide_with_areas = false
-		var floor_result := get_world_3d().direct_space_state.intersect_ray(floor_query)
-		if floor_result.is_empty() or Vector3(floor_result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
-			continue
-		var floor_position: Vector3 = floor_result.get("position", start_position)
-		var candidate_position := Vector3(candidate_x, floor_position.y + 0.06, candidate_z)
-		if absf(candidate_position.y - start_position.y) > 0.55:
-			continue
-		if not _actor_capsule_clear_at(actor_root, candidate_position):
-			continue
-		actor_root.global_position = candidate_position
-		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
-		actor_root.floor_snap_length = 0.35
-		actor_root.set("grounding_enabled", true)
-		var adjustment := Vector2(offset.x, offset.y).length()
-		if adjustment > 0.01:
-			print("OpenOB shifted %s %.2fm from its spawn point to clear a wall" % [actor_root.name, adjustment])
-		return true
-	return false
-
-func _actor_capsule_clear_at(actor_root: CharacterBody3D, root_position: Vector3) -> bool:
-	var actor_collision := actor_root.get_node_or_null("ApproximateActorCollision") as CollisionShape3D
-	if actor_collision == null or actor_collision.shape == null:
-		return true
-	var query := PhysicsShapeQueryParameters3D.new()
-	query.shape = actor_collision.shape
-	query.transform = Transform3D(Basis.IDENTITY, root_position + actor_collision.position)
-	query.collision_mask = 2
+	var query := PhysicsRayQueryParameters3D.create(
+		start_position + Vector3.UP * 2.1,
+		start_position - Vector3.UP * 3.0,
+		2,
+		[actor_root.get_rid(), player.get_rid()]
+	)
 	query.collide_with_areas = false
-	query.exclude = [actor_root.get_rid()]
-	query.margin = 0.001
-	return get_world_3d().direct_space_state.intersect_shape(query, 8).is_empty()
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty() or Vector3(result.get("normal", Vector3.UP)).dot(Vector3.UP) < 0.55:
+		return false
+	var floor_position: Vector3 = result.get("position", start_position)
+	actor_root.global_position = Vector3(start_position.x, floor_position.y + 0.02, start_position.z)
+	actor_root.motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
+	actor_root.floor_snap_length = 0.35
+	actor_root.set("grounding_enabled", true)
+	return true
 
-func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int, actor_radius: float) -> float:
+func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int) -> float:
+	var actor_collision := actor_root.get_node_or_null("ApproximateActorCollision") as CollisionShape3D
+	var actor_capsule := actor_collision.shape as CapsuleShape3D if actor_collision != null else null
+	if actor_capsule == null:
+		return 0.0
 	var occupied_roots: Array[Node3D] = [player]
 	for pending_root: Node3D in _npc_pending_roots:
 		if pending_root != actor_root and is_instance_valid(pending_root):
@@ -3084,11 +3044,18 @@ func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int, actor
 	for _iteration in range(16):
 		var found_overlap := false
 		for other_root: Node3D in occupied_roots:
-			var other_position := other_root.global_position
-			if absf(candidate_position.y - other_position.y) >= 1.8:
+			var other_collision := other_root.get_node_or_null("ApproximateActorCollision") as CollisionShape3D
+			if other_collision == null:
+				other_collision = other_root.get_node_or_null("CollisionShape3D") as CollisionShape3D
+			var other_capsule := other_collision.shape as CapsuleShape3D if other_collision != null else null
+			if other_capsule == null:
 				continue
-			var other_radius := 0.32 if other_root == player else 0.30
-			var minimum_spacing := actor_radius + other_radius + 0.08
+			var other_position := other_root.global_position
+			var actor_center_y := candidate_position.y + actor_collision.position.y
+			var other_center_y := other_position.y + other_collision.position.y
+			if absf(actor_center_y - other_center_y) >= (actor_capsule.height + other_capsule.height) * 0.5:
+				continue
+			var minimum_spacing := actor_capsule.radius + other_capsule.radius + 0.02
 			var offset := candidate_position - other_position
 			offset.y = 0.0
 			var distance := offset.length()
