@@ -224,6 +224,25 @@ func _try_step_up(horizontal_motion: Vector3) -> bool:
 	var obstruction := KinematicCollision3D.new()
 	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
 		return false
+	var stair_ramp := obstruction.get_collider_shape() as CollisionShape3D
+	if stair_ramp != null and bool(stair_ramp.get_meta("walkable_stair_ramp", false)):
+		var ramp_normal := obstruction.get_normal()
+		var horizontal_into_ramp := horizontal_motion.dot(ramp_normal)
+		if ramp_normal.dot(Vector3.UP) >= cos(floor_max_angle) and horizontal_into_ramp < -0.0001:
+			var ramp_motion := horizontal_motion - ramp_normal * horizontal_into_ramp
+			var ramp_obstruction := KinematicCollision3D.new()
+			var tangent_blocked := test_move(original_transform, ramp_motion, ramp_obstruction, 0.005)
+			var blocked_by_same_walkable_stair := false
+			if tangent_blocked:
+				blocked_by_same_walkable_stair = ramp_obstruction.get_collider() == obstruction.get_collider()
+			if ramp_motion.y > 0.0 and (
+				not tangent_blocked
+				or ramp_obstruction.get_collider_shape() == stair_ramp
+				or blocked_by_same_walkable_stair
+			):
+				global_transform = original_transform.translated(ramp_motion)
+				velocity.y = 0.0
+				return true
 	if obstruction.get_collider() is CharacterBody3D or obstruction.get_collider() is RigidBody3D:
 		return false
 	if obstruction.get_normal().dot(Vector3.UP) >= cos(floor_max_angle):
