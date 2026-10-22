@@ -218,7 +218,16 @@ func _physics_process(delta: float) -> void:
 
 	var requested_velocity := velocity
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
-	if is_on_floor() and horizontal_motion.length_squared() > 0.0001 and _try_step_up(horizontal_motion):
+	var on_recent_walkable_stair := (
+		is_instance_valid(_walkable_stair_body)
+		and is_instance_valid(_walkable_stair_shape)
+		and _walkable_stair_last_position.distance_to(global_position) <= 0.6
+	)
+	if (
+		horizontal_motion.length_squared() > 0.0001
+		and (is_on_floor() or on_recent_walkable_stair)
+		and _try_step_up(horizontal_motion)
+	):
 		return
 	move_and_slide()
 	_push_contacted_chains(requested_velocity)

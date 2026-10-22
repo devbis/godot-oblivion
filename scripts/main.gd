@@ -1377,8 +1377,11 @@ func _ensure_collision_shape(model_path: String) -> void:
 			# Mesh :3 carries the stair treads. Remove only its steep riser faces;
 			# retain the treads and all neighboring wall and ceiling geometry.
 			if (
-				key.ends_with("dungeons/chargen/prisonstaircorner01.nif")
-				and shape_name.ends_with(":3")
+				shape_name.ends_with(":3")
+				and (
+					key.ends_with("dungeons/chargen/prisonstairshort01.nif")
+					or key.ends_with("dungeons/chargen/prisonstaircorner01.nif")
+				)
 			):
 				for face_index in range(0, model_faces.size(), 3):
 					var face_normal := (
@@ -1391,7 +1394,10 @@ func _ensure_collision_shape(model_path: String) -> void:
 						+ model_faces[face_index + 1]
 						+ model_faces[face_index + 2]
 					) / 3.0
-					if absf(face_normal.y) < 0.5 and _inside_prison_stair_corner_ramp(face_center):
+					if (
+						absf(face_normal.y) < 0.5
+						and _inside_prison_stair_walk_ramp(key, face_center)
+					):
 						continue
 					collision_faces.append_array(PackedVector3Array([
 						model_faces[face_index],
@@ -1456,31 +1462,25 @@ func _collision_shape_for_model(model_key: String) -> Shape3D:
 	_ensure_collision_shape(model_key)
 	return _collision_cache.get(model_key) as Shape3D
 
-func _build_prison_stair_ramp_shape() -> ConvexPolygonShape3D:
-	var walkable_ramp := ConvexPolygonShape3D.new()
-	walkable_ramp.set_points(PackedVector3Array([
-		Vector3(-96.1, -236.6, 143.4),
-		Vector3(52.3, -236.6, 143.4),
-		Vector3(-96.1, -236.6, -125.5),
-		Vector3(52.3, -236.6, -125.5),
-		Vector3(-96.1, -123.5, -125.5),
-		Vector3(52.3, -123.5, -125.5),
+func _build_prison_stair_ramp_shape() -> ConcavePolygonShape3D:
+	var low_left := Vector3(-96.1, -236.6, 143.4)
+	var low_right := Vector3(52.3, -236.6, 143.4)
+	var high_left := Vector3(-96.1, -123.5, -125.5)
+	var high_right := Vector3(52.3, -123.5, -125.5)
+	return _build_concave_shape(PackedVector3Array([
+		low_left, low_right, high_right,
+		low_left, high_right, high_left,
 	]))
-	return walkable_ramp
 
-func _build_prison_stair_corner_ramp_shape() -> ConvexPolygonShape3D:
-	var walkable_ramp := ConvexPolygonShape3D.new()
-	var top_points := PackedVector3Array([
-		Vector3(130.0, -78.0, 84.0),
-		Vector3(100.0, -78.0, 148.0),
-		Vector3(-95.0, 90.0, 4.0),
-		Vector3(-125.0, 90.0, 68.0),
-	])
-	var ramp_points := top_points.duplicate()
-	for index in range(top_points.size()):
-		ramp_points.push_back(top_points[index] + Vector3.DOWN * 24.0)
-	walkable_ramp.set_points(ramp_points)
-	return walkable_ramp
+func _build_prison_stair_corner_ramp_shape() -> ConcavePolygonShape3D:
+	var low_left := Vector3(130.0, -78.0, 84.0)
+	var low_right := Vector3(100.0, -78.0, 148.0)
+	var high_left := Vector3(-95.0, 90.0, 4.0)
+	var high_right := Vector3(-125.0, 90.0, 68.0)
+	return _build_concave_shape(PackedVector3Array([
+		low_left, high_right, low_right,
+		low_left, high_left, high_right,
+	]))
 
 func _inside_prison_stair_corner_ramp(point: Vector3) -> bool:
 	if point.y < -102.0 or point.y > 105.0:
@@ -1492,6 +1492,15 @@ func _inside_prison_stair_corner_ramp(point: Vector3) -> bool:
 		Vector2(-95.0, 4.0),
 	])
 	return Geometry2D.is_point_in_polygon(Vector2(point.x, point.z), ramp_footprint)
+
+func _inside_prison_stair_walk_ramp(model_key: String, point: Vector3) -> bool:
+	if model_key.ends_with("dungeons/chargen/prisonstairshort01.nif"):
+		return (
+			point.x >= -100.0 and point.x <= 56.0
+			and point.y >= -241.0 and point.y <= -119.0
+			and point.z >= -129.0 and point.z <= 147.0
+		)
+	return _inside_prison_stair_corner_ramp(point)
 
 func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
 	if faces.size() < 3 or faces.size() % 3 != 0:
