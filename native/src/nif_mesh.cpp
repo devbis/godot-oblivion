@@ -5,23 +5,24 @@
  */
 #include "oblivion/nif_mesh.hpp"
 
-#include <memory>
 #include <cmath>
-#include <set>
-#include <sstream>
+#include <istream>
 #include <stdexcept>
+#include <streambuf>
 #include <unordered_map>
 #include <unordered_set>
 
 #include <Geometry.hpp>
 #include <Animation.hpp>
 #include <bhk.hpp>
-#include <NifFile.hpp>
 #include <Nodes.hpp>
 #include <Skin.hpp>
 
 namespace oblivion {
 namespace {
+
+// Oblivion's chain NIF maps BHK body spacing to NiNode spacing at 1:7.
+constexpr float kHavokToGameUnits = 7.0f;
 
 std::array<float, 3> to_godot(const nifly::Vector3& value) {
     return {value.x, value.z, -value.y};
@@ -33,14 +34,53 @@ std::array<float, 4> to_godot(const nifly::Quaternion& value) {
     return {value.x, value.z, -value.y, value.w};
 }
 
-std::string palette_string(const nifly::NiHeader& header,
-                           const nifly::NiBlockRef<nifly::NiStringPalette>& palette_ref,
-                           uint32_t offset) {
-    const auto* palette = header.GetBlock<nifly::NiStringPalette>(palette_ref);
-    if (!palette || offset >= palette->palette.length()) return {};
-    const auto& data = palette->palette.get();
-    const auto end = data.find('\0', offset);
-    return data.substr(offset, end == std::string::npos ? std::string::npos : end - offset);
+// Read-only view over caller-owned bytes. It lets nifly parse the asset
+// without copying it into an intermediate string.
+class MemoryStreambuf final : public std::streambuf {
+public:
+    MemoryStreambuf(const std::uint8_t* data, std::size_t size) {
+        auto* begin = const_cast<char*>(reinterpret_cast<const char*>(data));
+        setg(begin, begin, begin + size);
+    }
+
+protected:
+    pos_type seekoff(off_type offset, std::ios_base::seekdir direction, std::ios_base::openmode) override {
+        const off_type size = egptr() - eback();
+        off_type base = 0;
+        switch (direction) {
+        case std::ios_base::beg: base = 0; break;
+        case std::ios_base::cur: base = gptr() - eback(); break;
+        case std::ios_base::end: base = size; break;
+        default: return pos_type(off_type(-1));
+        }
+        const off_type target = base + offset;
+        if (target < 0 || target > size) return pos_type(off_type(-1));
+        setg(eback(), eback() + target, egptr());
+        return pos_type(target);
+    }
+
+    pos_type seekpos(pos_type position, std::ios_base::openmode mode) override {
+        return seekoff(off_type(position), std::ios_base::beg, mode);
+    }
+};
+
+using GlobalTransforms = std::unordered_map<const nifly::NiAVObject*, nifly::MatTransform>;
+
+// Composes transforms down the parent chain. Results are keyed by block
+// pointer, not node name, so duplicate names in one NIF resolve correctly.
+nifly::MatTransform global_transform(nifly::NifFile& file, const nifly::NiAVObject* object,
+                                     GlobalTransforms& cache) {
+    nifly::MatTransform identity;
+    identity.Clear();
+    if (!object) return identity;
+    if (const auto cached = cache.find(object); cached != cache.end()) return cached->second;
+    // Placeholder first, so a malformed parent cycle terminates.
+    cache.emplace(object, identity);
+    const auto* parent = file.GetParentNode(const_cast<nifly::NiAVObject*>(object));
+    const auto parent_global = global_transform(file, parent, cache);
+    const auto result = parent_global.ComposeTransforms(object->GetTransformToParent());
+    cache[object] = result;
+    return result;
 }
 
 void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
@@ -158,15 +198,13 @@ void copy_transform(const nifly::MatTransform& source, std::array<float, 3>& tra
 }
 
 std::array<float, 3> havok_point_to_game_units(const nifly::Vector3& value) {
-    // Oblivion's chain NIF maps BHK body spacing to NiNode spacing at 1:7.
-    constexpr float kHavokToGameUnits = 7.0f;
     const auto converted = to_godot(value);
     return {converted[0] * kHavokToGameUnits,
             converted[1] * kHavokToGameUnits,
             converted[2] * kHavokToGameUnits};
 }
 
-void append_physics(nifly::NifFile& file, NifAssetData& result) {
+void append_physics(nifly::NifFile& file, NifAssetData& result, GlobalTransforms& global_transforms) {
     auto& header = file.GetHeader();
     const auto block_count = header.GetNumBlocks();
     std::unordered_map<uint32_t, std::string> body_node_names;
@@ -178,8 +216,7 @@ void append_physics(nifly::NifFile& file, NifAssetData& result) {
         auto* target = header.GetBlock<nifly::NiAVObject>(collision->targetRef);
         if (!body || !target || target->name.get().empty()) continue;
 
-        nifly::MatTransform node_transform;
-        if (!file.GetNodeTransformToGlobal(target->name.get(), node_transform)) continue;
+        const auto node_transform = global_transform(file, target, global_transforms);
 
         NifPhysicsBodyData output;
         output.block_index = collision->bodyRef.index;
@@ -203,8 +240,8 @@ void append_physics(nifly::NifFile& file, NifAssetData& result) {
             output.shape.type = "capsule";
             output.shape.point1 = havok_point_to_game_units(capsule->point1);
             output.shape.point2 = havok_point_to_game_units(capsule->point2);
-            output.shape.radius1 = capsule->radius1 * 7.0f;
-            output.shape.radius2 = capsule->radius2 * 7.0f;
+            output.shape.radius1 = capsule->radius1 * kHavokToGameUnits;
+            output.shape.radius2 = capsule->radius2 * kHavokToGameUnits;
         } else if (auto* vertices = header.GetBlock<nifly::bhkConvexVerticesShape>(body->shapeRef)) {
             output.shape.type = "convex_vertices";
             output.shape.vertices.reserve(vertices->verts.size());
@@ -212,7 +249,7 @@ void append_physics(nifly::NifFile& file, NifAssetData& result) {
                 output.shape.vertices.push_back(havok_point_to_game_units({vertex.x, vertex.y, vertex.z}));
         } else if (auto* sphere = header.GetBlock<nifly::bhkSphereShape>(body->shapeRef)) {
             output.shape.type = "sphere";
-            output.shape.radius1 = sphere->radius * 7.0f;
+            output.shape.radius1 = sphere->radius * kHavokToGameUnits;
         } else {
             continue;
         }
@@ -248,36 +285,26 @@ void append_physics(nifly::NifFile& file, NifAssetData& result) {
     }
 }
 
-} // namespace
-
-std::vector<NifMeshData> decode_nif_meshes(const std::vector<std::uint8_t>& bytes) {
-    return decode_nif_asset(bytes).meshes;
-}
-
-NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
-    if (bytes.empty()) throw std::runtime_error("NIF asset is empty");
-    const std::string buffer(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    std::istringstream input(buffer, std::ios::binary | std::ios::in);
+NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_only) {
     nifly::NifFile file;
-    const int load_status = file.Load(input);
-    if (load_status != 0 || !file.IsValid())
-        throw std::runtime_error("nifly could not load the NIF (status " + std::to_string(load_status) + ")");
+    load_nif_file(bytes, file);
 
     NifAssetData result;
-    for (auto* node : file.GetNodes()) {
-        NifNodeData output;
-        output.name = node->name.get();
-        if (const auto* parent = file.GetParentNode(node)) output.parent_name = parent->name.get();
-        output.translation = to_godot(node->transform.translation);
-        for (std::size_t row = 0; row < 3; ++row)
-            for (std::size_t column = 0; column < 3; ++column)
-                output.rotation_rows[row * 3 + column] = node->transform.rotation[row][column];
-        output.scale = node->transform.scale;
-        nifly::MatTransform global_transform;
-        if (file.GetNodeTransformToGlobal(node->name.get(), global_transform))
-            copy_transform(global_transform, output.global_translation,
+    GlobalTransforms global_transforms;
+    if (!geometry_only) {
+        for (auto* node : file.GetNodes()) {
+            NifNodeData output;
+            output.name = node->name.get();
+            if (const auto* parent = file.GetParentNode(node)) output.parent_name = parent->name.get();
+            output.translation = to_godot(node->transform.translation);
+            for (std::size_t row = 0; row < 3; ++row)
+                for (std::size_t column = 0; column < 3; ++column)
+                    output.rotation_rows[row * 3 + column] = node->transform.rotation[row][column];
+            output.scale = node->transform.scale;
+            copy_transform(global_transform(file, node, global_transforms), output.global_translation,
                            output.global_rotation_rows, output.global_scale);
-        result.nodes.push_back(std::move(output));
+            result.nodes.push_back(std::move(output));
+        }
     }
 
     for (uint32_t block_index = 0; block_index < file.GetHeader().GetNumBlocks(); ++block_index) {
@@ -294,9 +321,9 @@ NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
             NifAnimationTrackData track;
             track.node_name = link.nodeName.get();
             if (track.node_name.empty())
-                track.node_name = palette_string(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
+                track.node_name = nif_string_palette_entry(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
             if (track.node_name.empty())
-                track.node_name = palette_string(file.GetHeader(), sequence->stringPaletteRef, link.nodeNameOffset);
+                track.node_name = nif_string_palette_entry(file.GetHeader(), sequence->stringPaletteRef, link.nodeNameOffset);
             if (track.node_name.empty()) track.node_name = link.targetName.get();
             if (track.node_name.empty()) continue;
             const auto add_constant_times = [&](float first, float last, auto append) {
@@ -359,8 +386,37 @@ NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
     identity.Clear();
     std::unordered_set<const nifly::NiAVObject*> visited;
     visit_node(file, root, identity, {}, visited, result.meshes);
-    append_physics(file, result);
+    if (!geometry_only) append_physics(file, result, global_transforms);
     return result;
+}
+
+} // namespace
+
+void load_nif_file(const std::vector<std::uint8_t>& bytes, nifly::NifFile& file) {
+    if (bytes.empty()) throw std::runtime_error("NIF asset is empty");
+    MemoryStreambuf buffer(bytes.data(), bytes.size());
+    std::istream input(&buffer);
+    const int load_status = file.Load(input);
+    if (load_status != 0 || !file.IsValid())
+        throw std::runtime_error("nifly could not load the NIF (status " + std::to_string(load_status) + ")");
+}
+
+std::string nif_string_palette_entry(const nifly::NiHeader& header,
+                                     const nifly::NiBlockRef<nifly::NiStringPalette>& palette_ref,
+                                     std::uint32_t offset) {
+    const auto* palette = header.GetBlock<nifly::NiStringPalette>(palette_ref);
+    if (!palette || offset >= palette->palette.length()) return {};
+    const auto& data = palette->palette.get();
+    const auto end = data.find('\0', offset);
+    return data.substr(offset, end == std::string::npos ? std::string::npos : end - offset);
+}
+
+std::vector<NifMeshData> decode_nif_meshes(const std::vector<std::uint8_t>& bytes) {
+    return decode_nif(bytes, true).meshes;
+}
+
+NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes) {
+    return decode_nif(bytes, false);
 }
 
 } // namespace oblivion

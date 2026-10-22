@@ -7,7 +7,6 @@
 #include <array>
 #include <fstream>
 #include <limits>
-#include <sstream>
 #include <unordered_map>
 
 #include <Animation.hpp>
@@ -18,39 +17,35 @@
 namespace {
 
 void usage(const char* executable) {
-    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell editor ID | --cell-actors cell ID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
-}
-
-std::string palette_string(const nifly::NiHeader& header,
-                           const nifly::NiBlockRef<nifly::NiStringPalette>& palette_ref,
-                           uint32_t offset) {
-    const auto* palette = header.GetBlock<nifly::NiStringPalette>(palette_ref);
-    if (!palette || offset >= palette->palette.length()) return {};
-    const auto& data = palette->palette.get();
-    const auto end = data.find('\0', offset);
-    return data.substr(offset, end == std::string::npos ? std::string::npos : end - offset);
+    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
 }
 
 }
 
 int main(int argc, char** argv) {
-    const bool inspect_asset = argc == 4 && std::string_view(argv[2]) == "--asset";
-    const bool extract_asset = argc == 5 && std::string_view(argv[2]) == "--extract";
-    const bool inspect_nif = argc >= 4 && std::string_view(argv[2]) == "--nif-summary";
-    const bool inspect_rig = argc >= 4 && std::string_view(argv[2]) == "--rig-summary";
-    const bool inspect_kf = argc >= 4 && std::string_view(argv[2]) == "--kf-summary";
-    const bool list_assets = argc == 4 && std::string_view(argv[2]) == "--list-assets";
-    const bool inspect_actors = argc == 4 && std::string_view(argv[2]) == "--cell-actors";
-    const bool lookup_editor_id = argc == 4 && std::string_view(argv[2]) == "--find-editor-id";
-    const bool list_editor_ids = argc == 4 && std::string_view(argv[2]) == "--list-editor-ids";
-    const bool list_game_settings = argc == 4 && std::string_view(argv[2]) == "--gmst-prefix";
-    if (argc < 2 || argc > 20 || (argc > 2 && !inspect_asset && !inspect_nif && !inspect_rig && !inspect_kf && !extract_asset && !list_assets && !inspect_actors && !lookup_editor_id && !list_editor_ids && !list_game_settings && argc != 3)) {
+    const std::string_view mode = argc > 2 ? std::string_view(argv[2]) : std::string_view{};
+    const bool extract_asset = argc == 5 && mode == "--extract";
+    const bool inspect_nif = argc >= 4 && mode == "--nif-summary";
+    const bool inspect_rig = argc >= 4 && mode == "--rig-summary";
+    const bool inspect_kf = argc >= 4 && mode == "--kf-summary";
+    const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets"
+        || mode == "--cell-actors" || mode == "--find-editor-id" || mode == "--list-editor-ids"
+        || mode == "--gmst-prefix");
+    const bool list_assets = argc == 4 && mode == "--list-assets";
+    const bool inspect_actors = argc == 4 && mode == "--cell-actors";
+    const bool lookup_editor_id = argc == 4 && mode == "--find-editor-id";
+    const bool list_editor_ids = argc == 4 && mode == "--list-editor-ids";
+    const bool list_game_settings = argc == 4 && mode == "--gmst-prefix";
+    // A bare cell EDID is the only form that takes a single argument without a mode flag.
+    const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
+        || inspect_kf || single_argument_mode;
+    if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
     }
     try {
         oblivion::GameData data;
-        data.open(argv[1]);
+        data.open(argv[1], oblivion::GameData::LoadProfile::Full, &std::clog);
         std::cout << "Loaded " << data.record_count() << " ESM records, " << data.cells().size()
                   << " cells, and " << data.archive_count() << " BSA archives.\n";
         if (extract_asset) {
@@ -191,6 +186,8 @@ int main(int argc, char** argv) {
                     const std::string asset_path = argv[asset_index];
                     const auto source = data.read_asset(asset_path);
                     const auto meshes = oblivion::decode_nif_meshes(source);
+                    nifly::NifFile file;
+                    oblivion::load_nif_file(source, file);
                     std::size_t vertex_count = 0;
                     std::size_t triangle_count = 0;
                     std::array<float, 3> bounds_min{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
@@ -214,12 +211,6 @@ int main(int argc, char** argv) {
                                   << mesh.indices.size() / 3 << " triangles, diffuse="
                                   << (mesh.diffuse_texture_path.empty() ? "(none)" : mesh.diffuse_texture_path)
                                   << '\n';
-                    const std::string buffer(reinterpret_cast<const char*>(source.data()), source.size());
-                    std::istringstream input(buffer, std::ios::binary | std::ios::in);
-                    nifly::NifFile file;
-                    const int load_status = file.Load(input);
-                    if (load_status != 0 || !file.IsValid())
-                        throw std::runtime_error("nifly could not reload NIF " + asset_path);
                     for (auto* shape : file.GetShapes()) {
                         std::vector<std::string> bones;
                         file.GetShapeBoneList(shape, bones);
@@ -239,12 +230,8 @@ int main(int argc, char** argv) {
                 for (int asset_index = 3; asset_index < argc; ++asset_index) {
                     const std::string asset_path = argv[asset_index];
                     const auto bytes = data.read_asset(asset_path);
-                    const std::string buffer(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-                    std::istringstream input(buffer, std::ios::binary | std::ios::in);
                     nifly::NifFile file;
-                    const int load_status = file.Load(input);
-                    if (load_status != 0 || !file.IsValid())
-                        throw std::runtime_error("nifly could not load rig NIF " + asset_path);
+                    oblivion::load_nif_file(bytes, file);
                     std::cout << asset_path << ": " << file.GetNodes().size() << " NiNodes, "
                               << file.GetShapes().size() << " shapes\n";
                     for (auto* node : file.GetNodes()) {
@@ -284,12 +271,8 @@ int main(int argc, char** argv) {
                 for (int asset_index = 3; asset_index < argc; ++asset_index) {
                     const std::string asset_path = argv[asset_index];
                     const auto bytes = data.read_asset(asset_path);
-                    const std::string buffer(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-                    std::istringstream input(buffer, std::ios::binary | std::ios::in);
                     nifly::NifFile file;
-                    const int load_status = file.Load(input);
-                    if (load_status != 0 || !file.IsValid())
-                        throw std::runtime_error("nifly could not load KF " + asset_path + " (status " + std::to_string(load_status) + ")");
+                    oblivion::load_nif_file(bytes, file);
                     std::cout << asset_path << ": " << file.GetHeader().GetNumBlocks() << " NIF blocks\n";
                     for (uint32_t block_index = 0; block_index < file.GetHeader().GetNumBlocks(); ++block_index) {
                         auto* sequence = file.GetHeader().GetBlock<nifly::NiControllerSequence>(block_index);
@@ -302,7 +285,7 @@ int main(int argc, char** argv) {
                             auto* transform_data = file.GetHeader().GetBlock<nifly::NiTransformData>(interpolator->dataRef);
                             std::string node_name = link.nodeName.get();
                             if (node_name.empty())
-                                node_name = palette_string(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
+                                node_name = oblivion::nif_string_palette_entry(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
                             std::cout << "    " << (node_name.empty() ? link.targetName.get() : node_name);
                             if (transform_data)
                                 std::cout << " translation=" << transform_data->translations.GetNumKeys()

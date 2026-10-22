@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <NifFile.hpp>
+
 namespace oblivion {
 
 struct NifMeshData {
@@ -102,9 +104,18 @@ struct NifAssetData {
     std::vector<NifPhysicsConstraintData> physics_constraints;
 };
 
-// Decode static NiShape geometry and its node transforms from an Oblivion NIF.
-// Coordinates are converted from NIF's Z-up basis to Godot's Y-up basis but
-// remain in the game's unscaled scene units.
+// Parses NIF bytes with nifly without copying them. Throws if nifly rejects the data.
+void load_nif_file(const std::vector<std::uint8_t>& bytes, nifly::NifFile& file);
+
+// Resolves one entry of a NIF string palette, or an empty string when it is absent.
+[[nodiscard]] std::string nif_string_palette_entry(const nifly::NiHeader& header,
+                                                   const nifly::NiBlockRef<nifly::NiStringPalette>& palette_ref,
+                                                   std::uint32_t offset);
+
+// Decode static NiShape geometry from an Oblivion NIF. Node-table and physics
+// decoding are skipped; animation tracks are still parsed. Coordinates are
+// converted from NIF's Z-up basis to Godot's Y-up basis but remain in the
+// game's unscaled scene units.
 [[nodiscard]] std::vector<NifMeshData> decode_nif_meshes(const std::vector<std::uint8_t>& bytes);
 [[nodiscard]] NifAssetData decode_nif_asset(const std::vector<std::uint8_t>& bytes);
 
