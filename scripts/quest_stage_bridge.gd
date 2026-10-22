@@ -52,6 +52,9 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			return _move_to(target, arguments, references, world, transform_of, label)
 		"kill", "disable":
 			return _deactivate(target, command, world, label)
+		"speech":
+			# A SayTo line: the topic's reply, printed as the subtitle would show it.
+			return "says: %s" % (str(arguments[0]) if not arguments.is_empty() else "")
 	return "not implemented: %s" % label
 
 

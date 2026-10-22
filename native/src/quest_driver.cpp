@@ -399,6 +399,12 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     const auto run = quest->run_topic(*topic, context, distance);
     append_tick(tick, run.tick);
     if (!run.reply) return 0.0;
+    // The line is recorded as spoken, so the scene can show it.
+    ScriptAction speech;
+    speech.command = "speech";
+    speech.target = std::string(topic_editor_id);
+    speech.arguments.push_back(ScriptValue::from_text(run.reply->text));
+    tick.actions.push_back(std::move(speech));
     return speech_seconds(run.reply->text);
 }
 
