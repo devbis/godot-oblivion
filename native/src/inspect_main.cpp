@@ -3,6 +3,7 @@
 #include "oblivion/script_lexer.hpp"
 #include "oblivion/command_table.hpp"
 #include "oblivion/quest_runtime.hpp"
+#include "oblivion/quest_stage.hpp"
 #include "oblivion/script_interpreter.hpp"
 #include "oblivion/script_parser.hpp"
 
@@ -77,11 +78,12 @@ int main(int argc, char** argv) {
     const bool show_quest = argc == 4 && mode == "--quest";
     const bool run_stage = argc == 6 && mode == "--run-stage";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
+    const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -211,74 +213,61 @@ int main(int argc, char** argv) {
                 }
                 return 0;
             }
-            if (run_stage) {
-                // Runs the result scripts of one stage's entries with no commands implemented. Entry
-                // conditions are not evaluated here: every entry of the stage runs, in order.
-                class NothingImplementedHost final : public oblivion::ScriptHost {
-                public:
-                    std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
-                                                                      const std::vector<oblivion::ScriptValue>&) override {
-                        return std::nullopt;
+            if (find_placed) {
+                // Placed references in a cell whose name matches, including ones without a model (markers).
+                // A cell name, or `*` for every cell.
+                const std::string wanted_cell = argv[3];
+                for (const auto& cell : data.cells()) {
+                    if (wanted_cell != "*" && cell.editor_id != wanted_cell) continue;
+                    for (const auto& reference : cell.references) {
+                        if (reference.reference_name != argv[4]) continue;
+                        std::cout << cell.editor_id << " " << std::hex << std::setw(8) << std::setfill('0') << reference.form_id
+                                  << std::dec << " type=" << reference.record_type << " name=" << reference.reference_name
+                                  << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
                     }
-                };
+                }
+                return 0;
+            }
+            if (run_stage) {
+                // Runs one stage of a quest with the core stage runner and prints what each entry asked for.
                 const auto* quest = data.find_quest(argv[3]);
                 if (!quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
-                const auto wanted = static_cast<unsigned>(std::stoul(argv[4]));
-                const oblivion::QuestStage* stage = nullptr;
-                for (const auto& candidate : quest->stages)
-                    if (candidate.index == wanted) stage = &candidate;
-                if (!stage) throw std::runtime_error("stage not found: " + std::string(argv[4]));
+                const auto stage_index = static_cast<unsigned>(std::stoul(argv[4]));
                 const auto commands = oblivion::load_command_table(argv[5], ".godot/openob/cache");
                 const auto lookup = oblivion::make_command_lookup(commands);
-                // The quest is in the stage given on the command line: GetStage of this quest returns it.
-                class QuestStateHost final : public oblivion::ScriptHost {
-                public:
-                    std::uint32_t quest = 0;
-                    double stage = 0;
-                    std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
-                                                                      const std::vector<oblivion::ScriptValue>&) override {
-                        return std::nullopt;
-                    }
-                    std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1,
-                                                         std::uint32_t) override {
-                        if (function_index == 58 && parameter1 == quest) return stage;  // GetStage
-                        return std::nullopt;
-                    }
+                // Condition functions are opcodes minus 0x1000; name them from the table.
+                const auto name_of = [&](const std::string& missing) {
+                    for (const auto& command : commands)
+                        if (missing == "condition " + std::to_string(command.opcode - 0x1000u)) return command.name;
+                    return missing;
                 };
-                QuestStateHost host;
-                host.quest = quest->form_id;
-                host.stage = static_cast<double>(wanted);
-                // Fragments run with no script of their own; the interpreter only needs a script to outlive it.
-                const oblivion::ScriptAst no_script;
-                oblivion::ScriptInterpreter interpreter(no_script);
-                for (const auto& entry : stage->entries) {
-                    std::vector<std::string> missing;
-                    if (!oblivion::evaluate_conditions(entry.conditions, host, &missing)) {
+                const auto runs = oblivion::run_quest_stage(*quest, stage_index, lookup);
+                if (runs.empty()) throw std::runtime_error("stage not found: " + std::string(argv[4]));
+                for (const auto& run : runs) {
+                    if (!run.conditions_hold) {
                         std::cout << "entry skipped: conditions false";
-                        if (!missing.empty()) {
+                        if (!run.missing_conditions.empty()) {
                             std::cout << " (not implemented:";
-                            for (const auto& name : missing) {
-                                // Condition functions are opcodes minus 0x1000: name them from the table.
-                                std::string shown = name;
-                                for (const auto& command : commands)
-                                    if (name == "condition " + std::to_string(command.opcode - 0x1000u)) shown = command.name;
-                                std::cout << ' ' << shown;
-                            }
+                            for (const auto& missing : run.missing_conditions) std::cout << ' ' << name_of(missing);
                             std::cout << ')';
                         }
                         std::cout << '\n';
                         continue;
                     }
-                    std::cout << "entry" << (entry.completes ? " (completes)" : "") << '\n';
-                    if (!entry.log_text.empty()) std::cout << "  log: " << entry.log_text << '\n';
-                    const auto fragment = oblivion::parse_fragment(entry.result_source, lookup);
-                    for (const auto& diagnostic : fragment.diagnostics)
-                        std::cout << "  parse line " << diagnostic.line << ": " << diagnostic.message << '\n';
-                    const auto result = interpreter.run_body(fragment.statements, host);
-                    for (const auto& line : result.trace) std::cout << "  " << line << '\n';
-                    std::cout << "  unimplemented:";
-                    for (const auto& name : result.unimplemented) std::cout << ' ' << name;
-                    std::cout << '\n';
+                    std::cout << "entry" << (run.completes ? " (completes)" : "") << '\n';
+                    if (!run.log_text.empty()) std::cout << "  log: " << run.log_text << '\n';
+                    for (const auto& error : run.parse_errors) std::cout << "  parse " << error << '\n';
+                    for (const auto& action : run.actions) {
+                        std::cout << "  ";
+                        if (!action.target.empty()) std::cout << action.target << '.';
+                        std::cout << action.command << '(';
+                        for (std::size_t i = 0; i < action.arguments.size(); ++i) {
+                            if (i) std::cout << ", ";
+                            if (action.arguments[i].is_text) std::cout << '"' << action.arguments[i].text << '"';
+                            else std::cout << action.arguments[i].number;
+                        }
+                        std::cout << ")\n";
+                    }
                 }
                 return 0;
             }

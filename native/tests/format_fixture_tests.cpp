@@ -1,6 +1,7 @@
 #include "oblivion/bsa_archive.hpp"
 #include "oblivion/command_table.hpp"
 #include "oblivion/quest_runtime.hpp"
+#include "oblivion/quest_stage.hpp"
 #include "oblivion/esm4_database.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
@@ -772,6 +773,40 @@ void test_quest_conditions() {
     CHECK(missing == std::vector<std::string>({"condition 365"}));
 }
 
+void test_quest_stage_actions(const std::filesystem::path& directory) {
+    // The fixture quest: stage 10 has a GetStage(0x100) == 20 entry that does not hold at 10, and
+    // no-condition entries are checked in the ESM test. Here stage 20's completing entry runs.
+    (void)directory;
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x100;
+    quest.editor_id = "FixtureQuest";
+    oblivion::QuestStage stage;
+    stage.index = 20;
+    oblivion::QuestStageEntry entry;
+    entry.completes = true;
+    entry.result_source = "Player.moveto FixtureMarker\nset counter to 1\nActivate mySelf 1\n";
+    stage.entries.push_back(entry);
+    quest.stages.push_back(stage);
+    oblivion::QuestStageEntry gated;
+    oblivion::QuestCondition condition;
+    condition.function_index = 58;
+    condition.parameter1 = 0x100;
+    condition.comparison = 99.0f;  // not the stage we run
+    gated.conditions.push_back(condition);
+    gated.result_source = "Activate ignored\n";
+    quest.stages[0].entries.push_back(gated);
+
+    const auto runs = oblivion::run_quest_stage(quest, 20, {});
+    CHECK(runs.size() == 2);
+    CHECK(runs[0].conditions_hold && runs[0].completes);
+    CHECK(runs[0].actions.size() == 2);  // the set statement is not a command call
+    CHECK(runs[0].actions[0].command == "moveto" && runs[0].actions[0].target == "Player");
+    CHECK(runs[0].actions[0].arguments.size() == 1 && runs[0].actions[0].arguments[0].text == "FixtureMarker");
+    CHECK(runs[0].actions[1].command == "Activate" && runs[0].actions[1].arguments.size() == 2);
+    CHECK(!runs[1].conditions_hold && runs[1].actions.empty());
+    CHECK(run_quest_stage(quest, 99, {}).empty());
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -815,6 +850,7 @@ int main() {
         test_script_interpreter();
         test_script_fragment();
         test_quest_conditions();
+        test_quest_stage_actions(directory);
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;
