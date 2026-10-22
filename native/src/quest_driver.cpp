@@ -2,6 +2,7 @@
 
 #include <cctype>
 
+#include "oblivion/quest_runtime.hpp"
 #include "oblivion/script_interpreter.hpp"
 
 namespace oblivion {
@@ -82,6 +83,48 @@ QuestTick QuestDriver::start(unsigned stage, const DistanceFunction& distance) {
     append_stage_runs(stage, tick, distance, 0);
     tick.stage = stage_;
     return tick;
+}
+
+namespace {
+
+// Answers the conditions of a package from the driver's state: GetStage of this quest, and quest variables.
+class DriverConditionHost final : public ScriptHost {
+public:
+    DriverConditionHost(const QuestRecord& quest, const ScriptRecord& script, const QuestState& state, unsigned stage)
+        : quest_(quest.form_id), quest_name_(lower(quest.editor_id)), script_(script), state_(state), stage_(stage) {}
+
+    std::optional<ScriptValue> call_command(std::string_view, const ScriptValue*, const std::vector<ScriptValue>&) override {
+        return std::nullopt;
+    }
+
+    std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1, std::uint32_t parameter2) override {
+        constexpr std::uint16_t kGetStage = 58;
+        constexpr std::uint16_t kGetQuestVariable = 79;
+        if (function_index == kGetStage && parameter1 == quest_) return static_cast<double>(stage_);
+        if (function_index == kGetQuestVariable && parameter1 == quest_) {
+            for (const auto& variable : script_.variables) {
+                if (variable.index != parameter2) continue;
+                const auto found = state_.variables.find(quest_name_ + "." + lower(variable.name));
+                return found == state_.variables.end() ? 0.0 : found->second;
+            }
+            return 0.0;
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::uint32_t quest_;
+    std::string quest_name_;
+    const ScriptRecord& script_;
+    const QuestState& state_;
+    unsigned stage_;
+};
+
+} // namespace
+
+const AiPackageRecord* QuestDriver::select_package(const std::vector<const AiPackageRecord*>& packages) const {
+    DriverConditionHost host(quest_, script_, state_, stage_);
+    return oblivion::select_package(packages, host);
 }
 
 QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,

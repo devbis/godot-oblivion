@@ -923,6 +923,35 @@ public:
 
     int64_t get_stage() const { return static_cast<int64_t>(driver_->stage()); }
 
+    // The package the NPC starts now, judged with this quest's stage. Empty when none holds.
+    Dictionary select_package(const String& npc_editor_id) const {
+        Dictionary result;
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
+        if (!npc) return result;
+        std::vector<const oblivion::AiPackageRecord*> packages;
+        for (const auto package_id : npc->ai_package_form_ids)
+            if (const auto* package = game->find_ai_package(package_id)) packages.push_back(package);
+        const auto* chosen = driver_->select_package(packages);
+        if (!chosen) return result;
+        result["editor_id"] = utf8_text(chosen->editor_id);
+        result["package_type"] = static_cast<int64_t>(chosen->package_type);
+        result["location_type"] = static_cast<int64_t>(chosen->location_type);
+        result["location_form_id"] = static_cast<int64_t>(chosen->location_form_id);
+        result["radius"] = static_cast<int64_t>(chosen->location_radius);
+        result["flags"] = static_cast<int64_t>(chosen->flags);
+        return result;
+    }
+
+    // Runs an event of an NPC's script (for example OnPackageDone with the package name) on this quest.
+    Dictionary run_actor_event(const String& npc_editor_id, const String& event, const String& detail, const Callable& distance) {
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
+        const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
+        if (!script) return Dictionary();
+        return tick_to_dictionary(driver_->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
+    }
+
     void attach(const Ref<OblivionData>& owner, std::unique_ptr<oblivion::QuestDriver> driver) {
         owner_ = owner;
         driver_ = std::move(driver);
@@ -932,11 +961,19 @@ public:
         ClassDB::bind_method(D_METHOD("start", "stage", "distance"), &OblivionQuestDriver::start);
         ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestDriver::tick);
         ClassDB::bind_method(D_METHOD("get_stage"), &OblivionQuestDriver::get_stage);
+        ClassDB::bind_method(D_METHOD("select_package", "npc_editor_id"), &OblivionQuestDriver::select_package);
+        ClassDB::bind_method(D_METHOD("run_actor_event", "npc_editor_id", "event", "detail", "distance"),
+                             &OblivionQuestDriver::run_actor_event);
     }
 
 private:
     Ref<OblivionData> owner_;
     std::unique_ptr<oblivion::QuestDriver> driver_;
+
+    static std::string utf8_value(const String& value) {
+        const CharString text = value.utf8();
+        return std::string(text.get_data());
+    }
 
     static oblivion::DistanceFunction distance_function(const Callable& callable) {
         if (callable.is_null() || !callable.is_valid()) return {};

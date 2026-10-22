@@ -6,10 +6,14 @@ extends CharacterBody3D
 @export var walk_speed_mps := 1.3
 @export var gravity_mps2 := 9.8
 @export var arrival_distance := 0.08
-@export var waypoint_pause_seconds := 1.2
+## Pause at each waypoint. The ESM does not give one, so the default is none.
+@export var waypoint_pause_seconds := 0.0
 @export var max_route_step_height_m := 0.40
 @export var max_route_drop_m := 0.55
 @export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
+
+## Emitted once when the route reaches its last waypoint and does not loop.
+signal route_finished
 
 var waypoints: Array[Vector3] = []
 var waypoint_speeds: Array[float] = []
@@ -121,6 +125,8 @@ func _advance_waypoint() -> void:
 	waypoint_index += 1
 	if waypoint_index >= waypoints.size() and loops_route:
 		waypoint_index = 0
+	elif waypoint_index >= waypoints.size():
+		route_finished.emit()
 	_pause_remaining = waypoint_pause_seconds
 	velocity.x = 0.0
 	velocity.z = 0.0

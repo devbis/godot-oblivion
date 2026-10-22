@@ -476,6 +476,8 @@ func _physics_process(delta: float) -> void:
 	var result: Dictionary = quest_driver.tick(delta, Callable(self, "_quest_distance"))
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
+	if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
+		_refresh_npc_routes()
 
 ## Starts a quest driver at a stage (default 0). The driver then ticks every physics frame.
 func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
@@ -488,7 +490,9 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	quest_driver = data_reader.create_quest_driver(quest_editor_id, executable_path, cache_dir)
 	if quest_driver == null:
 		return PackedStringArray(["quest %s has no driver (missing quest or script)" % quest_editor_id])
-	return _apply_driver_result(quest_driver.start(stage, Callable(self, "_quest_distance")))
+	var report := _apply_driver_result(quest_driver.start(stage, Callable(self, "_quest_distance")))
+	_refresh_npc_routes()
+	return report
 
 func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	var report := PackedStringArray()
@@ -520,6 +524,58 @@ func _quest_position(name: String) -> Variant:
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
 		if str(reference.get("reference_name", "")) == name:
+			return _reference_transform(reference).origin
+	return null
+
+## Gives every placed NPC the route of the package it starts at the quest's current stage.
+func _refresh_npc_routes() -> void:
+	for actor: Dictionary in _npc_actors:
+		_refresh_actor_route(actor)
+
+func _refresh_actor_route(actor: Dictionary) -> void:
+	var root: Node = actor.get("root")
+	if not is_instance_valid(root):
+		return
+	var package: Dictionary = {}
+	var npc_id := str(actor.get("npc_editor_id", ""))
+	if quest_driver != null and not npc_id.is_empty():
+		package = quest_driver.select_package(npc_id)
+	actor["package"] = package
+	var waypoints: Array[Dictionary] = []
+	if not package.is_empty():
+		var position = _location_position(int(package.get("location_form_id", 0)))
+		if position == null:
+			print("OpenOB package %s for %s: its location is not in this cell" % [str(package.get("editor_id", "")), str(actor.get("name", ""))])
+		else:
+			var flags := int(package.get("flags", 0))
+			waypoints.push_back({"position": position, "speed_mps": 3.4 if (flags & 0x2000) != 0 else 1.3})
+	root.call("configure_route", waypoints, false, 0.0)
+	if not root.has_meta("route_finished_connected"):
+		root.set_meta("route_finished_connected", true)
+		root.route_finished.connect(_on_actor_route_finished.bind(str(actor.get("name", ""))))
+
+## The NPC reached the end of its package's route: run OnPackageDone on its script.
+func _on_actor_route_finished(actor_name: String) -> void:
+	for actor: Dictionary in _npc_actors:
+		if str(actor.get("name", "")) != actor_name or quest_driver == null:
+			continue
+		var package: Dictionary = actor.get("package", {})
+		if package.is_empty():
+			return
+		var result: Dictionary = quest_driver.run_actor_event(str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
+		for line: String in _apply_driver_result(result):
+			print("OpenOB quest: " + line)
+		if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
+			_refresh_npc_routes()
+		return
+
+## Position of a placed reference of the loaded cell, by form ID, or null when the cell does not have it.
+func _location_position(form_id: int) -> Variant:
+	if form_id == 0:
+		return null
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if int(reference.get("form_id", 0)) == form_id:
 			return _reference_transform(reference).origin
 	return null
 
@@ -2217,7 +2273,6 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_clear_cell_actors()
 	var stream_generation := _npc_stream_generation
 	var actor_count := 0
-	var routed_actor_count := 0
 	var grounded_actor_count := 0
 	for reference_value: Variant in cell.get("references", []):
 		var reference: Dictionary = reference_value
@@ -2417,19 +2472,13 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"FastForward": _animation_sequence(PLAYER_FAST_FORWARD_KF, "FastForward", skeleton),
 		}
 		var expression_cycle := _available_face_expression_cycle(face_meshes)
-		var waypoints := _npc_waypoints(cell, actor_name, npc)
-		if not waypoints.is_empty():
-			routed_actor_count += 1
-			var route_speeds: Array[String] = []
-			for waypoint: Dictionary in waypoints:
-				route_speeds.push_back("%.1f" % float(waypoint.get("speed_mps", 0.0)))
-			print("OpenOB route for %s uses %d ESM marker targets at %s m/s" % [actor_name, waypoints.size(), str(route_speeds)])
-		actor_root.call("configure_route", waypoints, actor_name == "ValenDrethRef", 1.2 if not waypoints.is_empty() else 0.0)
-		var initial_expression := "Happy" if actor_name == "ValenDrethRef" else "Fear" if actor_name == "UrielSeptimRef" else ""
-		if not expression_cycle.has(initial_expression):
-			initial_expression = ""
+		# The route comes from the NPC's package for the quest stage (see _refresh_npc_routes).
+		var no_route: Array[Dictionary] = []
+		actor_root.call("configure_route", no_route, false, 0.0)
+		var initial_expression := ""
 		var actor_state := {
 			"name": actor_name,
+			"npc_editor_id": str(npc.get("editor_id", "")),
 			"root": actor_root,
 			"skeleton": skeleton,
 			"face_meshes": face_meshes,
@@ -2452,7 +2501,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_npc_loaded_reference_ids[reference_id] = true
 		_apply_face_expression(actor_state)
 		actor_count += 1
-	print("OpenOB assembled %d placed NPCs (%d grounded), %d with ESM marker routes, original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count, routed_actor_count])
+	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
+	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
+	if quest_driver == null:
+		for line: String in start_quest("CharacterGen", 0):
+			print("OpenOB quest: " + line)
 
 func _update_npc_streaming() -> void:
 	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
@@ -3041,48 +3094,6 @@ func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int) -> fl
 		candidate_position.z - original_position.z
 	).length()
 	return adjustment
-
-func _npc_waypoints(cell: Dictionary, actor_name: String, npc: Dictionary) -> Array[Dictionary]:
-	var waypoints: Array[Dictionary] = []
-	var route_markers: Array[String] = []
-	match actor_name:
-		"ValenDrethRef":
-			route_markers = ["CGValenDrethTauntMarker", "CGValenDrethTauntMarker2"]
-		"UrielSeptimRef":
-			route_markers = ["CGMarkerAEmperor", "CGMarkerBEmperor", "CGMarkerCEmperor", "CGMarkerC1Emperor", "CGMarkerC2Emperor"]
-		"BaurusRef":
-			route_markers = ["CGMarkerABaurus", "CGMarker9Baurus", "CGMarkerCBaurus", "CGMarkerC2Baurus"]
-		"GlenroyRef":
-			route_markers = ["CGMarkerAGlenroy", "CGMarkerBGlenroy", "CGMarkerCGlenroy", "CGMarkerC2Glenroy"]
-		"RenoteRef":
-			route_markers = ["CGMarkerARenote", "CGMarkerBRenote", "CGMarkerB1Renote", "CGMarkerCRenote", "CGMarkerC2Renote"]
-	if route_markers.is_empty():
-		return waypoints
-	var movement_flags_by_target: Dictionary = {}
-	var package_ids: PackedInt64Array = npc.get("ai_package_form_ids", PackedInt64Array())
-	for package_id: int in package_ids:
-		var package: Dictionary = data_reader.get_ai_package_info(package_id)
-		if package.is_empty() or int(package.get("location_type", -1)) != 0:
-			continue
-		var package_type := int(package.get("package_type", -1))
-		if package_type != 1 and package_type != 6:
-			continue
-		var target_id := int(package.get("location_form_id", 0))
-		if target_id != 0 and not movement_flags_by_target.has(target_id):
-			movement_flags_by_target[target_id] = int(package.get("flags", 0))
-	for marker_name: String in route_markers:
-		for reference_value: Variant in cell.get("references", []):
-			var reference: Dictionary = reference_value
-			if str(reference.get("reference_name", "")) == marker_name:
-				var target_id := int(reference.get("form_id", 0))
-				var package_flags := int(movement_flags_by_target.get(target_id, 0))
-				var target_speed := 3.4 if (package_flags & 0x00002000) != 0 else 1.3
-				waypoints.push_back({
-					"position": _reference_transform(reference).origin,
-					"speed_mps": target_speed,
-				})
-				break
-	return waypoints
 
 func set_npc_expression(actor_name: String, expression_name: String, weight := 1.0) -> void:
 	for actor: Dictionary in _npc_actors:

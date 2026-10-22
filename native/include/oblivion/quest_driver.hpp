@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "oblivion/esm4_database.hpp"
 #include "oblivion/quest_stage.hpp"
 #include "oblivion/script_parser.hpp"
 #include "oblivion/script_records.hpp"
@@ -42,6 +43,10 @@ public:
     // The actor's script may set this quest's stage, and the results of the new stage run.
     QuestTick run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
                               const DistanceFunction& distance = {});
+
+    // The package an actor starts now: the first of its packages whose conditions hold, judged with this
+    // quest in its current stage and state. Null when none holds.
+    const AiPackageRecord* select_package(const std::vector<const AiPackageRecord*>& packages) const;
 
     unsigned stage() const { return stage_; }
     const QuestState& state() const { return state_; }

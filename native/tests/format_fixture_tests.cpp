@@ -850,6 +850,21 @@ void test_actor_package_event() {
     CHECK(event.stage == 16);
     CHECK(event.stage_changes == std::vector<std::string>({"16"}));
     CHECK(event.actions.size() == 1 && event.actions[0].command == "Activate");
+    // The driver chooses a package by its own stage: stage 16 selects the package that waits for it.
+    oblivion::AiPackageRecord at_fifteen;
+    at_fifteen.editor_id = "AtFifteen";
+    oblivion::QuestCondition fifteen;
+    fifteen.function_index = 58;
+    fifteen.parameter1 = 0x700;
+    fifteen.comparison = 15.0f;
+    at_fifteen.conditions = {fifteen};
+    oblivion::AiPackageRecord at_sixteen;
+    at_sixteen.editor_id = "AtSixteen";
+    oblivion::QuestCondition sixteen = fifteen;
+    sixteen.comparison = 16.0f;
+    at_sixteen.conditions = {sixteen};
+    const std::vector<const oblivion::AiPackageRecord*> packages{&at_fifteen, &at_sixteen};
+    CHECK(driver.select_package(packages) == &at_sixteen);
     // A block for another package does nothing.
     const auto other = driver.run_actor_event(actor_script, "OnPackageDone", "WalkZ");
     CHECK(other.stage_changes.empty() && other.actions.empty());
