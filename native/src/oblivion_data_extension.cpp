@@ -1,8 +1,10 @@
 #include "oblivion/command_table.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
+#include "oblivion/quest_driver.hpp"
 #include "oblivion/quest_stage.hpp"
 
+#include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -14,6 +16,7 @@
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/godot.hpp>
 
 #include <algorithm>
@@ -156,6 +159,23 @@ PackedByteArray apply_facegen_texture(const PackedByteArray& image_data, std::in
 
 } // namespace
 
+// Text and action conversions shared by the data object and the quest driver.
+String utf8_text(const std::string& value) { return String::utf8(value.c_str()); }
+
+Dictionary action_to_dictionary(const oblivion::ScriptAction& action) {
+    Dictionary item;
+    item["command"] = utf8_text(action.command);
+    item["target"] = utf8_text(action.target);
+    Array arguments;
+    for (const auto& argument : action.arguments)
+        arguments.push_back(argument.is_text ? Variant(utf8_text(argument.text)) : Variant(argument.number));
+    item["arguments"] = arguments;
+    return item;
+}
+
+// Forward declaration: the driver class is defined after the data class that creates it.
+class OblivionQuestDriver;
+
 class OblivionData final : public RefCounted {
     GDCLASS(OblivionData, RefCounted)
 
@@ -296,6 +316,16 @@ public:
 
     // Runs one stage of a quest and returns { "error": String, "runs": Array } where each run
     // describes an entry: whether its conditions hold, its log text, and the actions it requests.
+    // A quest driver for one quest of the loaded game. It keeps a reference to this data so the
+    // records it reads stay alive. Returns null when the quest or its script is missing.
+    Ref<OblivionQuestDriver> create_quest_driver(const String& quest_editor_id, const String& executable_path,
+                                                 const String& cache_dir) const;
+
+    const oblivion::GameData* game_data() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return data_.get();
+    }
+
     Dictionary run_quest_stage(const String& quest_editor_id, int64_t stage, const String& executable_path,
                                const String& cache_dir) const {
         Dictionary result;
@@ -761,6 +791,8 @@ protected:
                                       "static_reference_radius", "tree_reference_radius"),
                              &OblivionData::find_exterior_region, DEFVAL(-1), DEFVAL(-1));
         ClassDB::bind_method(D_METHOD("find_cell", "editor_id"), &OblivionData::find_cell);
+        ClassDB::bind_method(D_METHOD("create_quest_driver", "quest_editor_id", "executable_path", "cache_dir"),
+                             &OblivionData::create_quest_driver);
         ClassDB::bind_method(D_METHOD("run_quest_stage", "quest_editor_id", "stage", "executable_path", "cache_dir"),
                              &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
@@ -796,16 +828,7 @@ private:
         for (const auto& name : run.missing_conditions) missing.push_back(as_string(name));
         entry["missing_conditions"] = missing;
         Array actions;
-        for (const auto& action : run.actions) {
-            Dictionary item;
-            item["command"] = as_string(action.command);
-            item["target"] = as_string(action.target);
-            Array arguments;
-            for (const auto& argument : action.arguments)
-                arguments.push_back(argument.is_text ? Variant(as_string(argument.text)) : Variant(argument.number));
-            item["arguments"] = arguments;
-            actions.push_back(item);
-        }
+        for (const auto& action : run.actions) actions.push_back(action_to_dictionary(action));
         entry["actions"] = actions;
         return entry;
     }
@@ -880,9 +903,98 @@ private:
     bool asset_ready_ = false;
 };
 
+
+// Drives one quest of the loaded game: GameMode runs on each tick and stage results run when stages are set.
+// Results come back as Dictionaries; the caller applies the actions to the scene.
+class OblivionQuestDriver final : public RefCounted {
+    GDCLASS(OblivionQuestDriver, RefCounted)
+
+public:
+    // Starts the quest at a stage. `distance` is called as distance(from: String, to: String) and returns
+    // a distance in game units, or null when the scene cannot answer.
+    Dictionary start(int64_t stage, const Callable& distance) {
+        return tick_to_dictionary(driver_->start(static_cast<unsigned>(stage), distance_function(distance)));
+    }
+
+    // Runs GameMode once after `seconds` have passed since the last tick.
+    Dictionary tick(double seconds, const Callable& distance) {
+        return tick_to_dictionary(driver_->tick(seconds, distance_function(distance)));
+    }
+
+    int64_t get_stage() const { return static_cast<int64_t>(driver_->stage()); }
+
+    void attach(const Ref<OblivionData>& owner, std::unique_ptr<oblivion::QuestDriver> driver) {
+        owner_ = owner;
+        driver_ = std::move(driver);
+    }
+
+    static void _bind_methods() {
+        ClassDB::bind_method(D_METHOD("start", "stage", "distance"), &OblivionQuestDriver::start);
+        ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestDriver::tick);
+        ClassDB::bind_method(D_METHOD("get_stage"), &OblivionQuestDriver::get_stage);
+    }
+
+private:
+    Ref<OblivionData> owner_;
+    std::unique_ptr<oblivion::QuestDriver> driver_;
+
+    static oblivion::DistanceFunction distance_function(const Callable& callable) {
+        if (callable.is_null() || !callable.is_valid()) return {};
+        return [callable](std::string_view from, std::string_view to) -> std::optional<double> {
+            const Variant value = callable.call(utf8_text(std::string(from)), utf8_text(std::string(to)));
+            if (value.get_type() == Variant::FLOAT) return static_cast<double>(value);
+            if (value.get_type() == Variant::INT) return static_cast<double>(static_cast<int64_t>(value));
+            return std::nullopt;
+        };
+    }
+
+    static Dictionary tick_to_dictionary(const oblivion::QuestTick& tick) {
+        Dictionary result;
+        result["stage"] = static_cast<int64_t>(tick.stage);
+        PackedStringArray changes;
+        for (const auto& change : tick.stage_changes) changes.push_back(utf8_text(change));
+        result["stage_changes"] = changes;
+        Array actions;
+        for (const auto& action : tick.actions) actions.push_back(action_to_dictionary(action));
+        result["actions"] = actions;
+        PackedStringArray unanswered;
+        for (const auto& name : tick.unanswered) unanswered.push_back(utf8_text(name));
+        result["unanswered"] = unanswered;
+        PackedStringArray errors;
+        for (const auto& error : tick.parse_errors) errors.push_back(utf8_text(error));
+        result["parse_errors"] = errors;
+        return result;
+    }
+};
+
+Ref<OblivionQuestDriver> OblivionData::create_quest_driver(const String& quest_editor_id, const String& executable_path,
+                                                           const String& cache_dir) const {
+    const CharString quest_value = quest_editor_id.utf8();
+    const CharString executable_value = executable_path.utf8();
+    const CharString cache_value = cache_dir.utf8();
+    const oblivion::GameData* game = game_data();
+    if (!game) return Ref<OblivionQuestDriver>();
+    const auto* quest = game->find_quest(quest_value.get_data());
+    if (!quest) return Ref<OblivionQuestDriver>();
+    const auto* script = game->find_script(quest->script_form_id);
+    if (!script) return Ref<OblivionQuestDriver>();
+    try {
+        const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
+        Ref<OblivionQuestDriver> driver;
+        driver.instantiate();
+        driver->attach(Ref<OblivionData>(const_cast<OblivionData*>(this)),
+                       std::make_unique<oblivion::QuestDriver>(*quest, *script, oblivion::make_command_lookup(commands)));
+        return driver;
+    } catch (const std::exception& error) {
+        UtilityFunctions::push_error(String("quest driver: ") + utf8_text(error.what()));
+        return Ref<OblivionQuestDriver>();
+    }
+}
+
 void register_oblivion_data_types(ModuleInitializationLevel level) {
     if (level != MODULE_INITIALIZATION_LEVEL_SCENE) return;
     ClassDB::register_class<OblivionData>();
+    ClassDB::register_class<OblivionQuestDriver>();
 }
 
 void unregister_oblivion_data_types(ModuleInitializationLevel) {}

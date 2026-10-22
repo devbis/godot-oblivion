@@ -106,6 +106,8 @@ const TEXTURE_FALLBACKS := {
 var data_reader: Object
 var current_cell: Dictionary = {}
 var quest_bridge := QuestStageBridge.new()
+## The running quest driver (OblivionQuestDriver), or null when no quest is running.
+var quest_driver: Object = null
 var cell_visual_root: Node3D
 var _model_cache: Dictionary = {}
 var _physics_mesh_cache: Dictionary = {}
@@ -261,7 +263,11 @@ func _input(event: InputEvent) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
-	if event.keycode == KEY_F:
+	if event.keycode == KEY_F9:
+		var report := start_quest("CharacterGen")
+		for line: String in report:
+			print("OpenOB quest: " + line)
+	elif event.keycode == KEY_F:
 		_cycle_nearest_npc_face_expression()
 	elif event.keycode == KEY_C:
 		_cycle_player_face_profile()
@@ -463,6 +469,59 @@ func _log_runtime_spawn_positions() -> void:
 		nearest_actor,
 		nearest_distance
 	])
+
+func _physics_process(delta: float) -> void:
+	if quest_driver == null:
+		return
+	var result: Dictionary = quest_driver.tick(delta, Callable(self, "_quest_distance"))
+	for line: String in _apply_driver_result(result):
+		print("OpenOB quest: " + line)
+
+## Starts a quest driver at a stage (default 0). The driver then ticks every physics frame.
+func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
+	if data_reader == null or not data_reader.is_ready():
+		return PackedStringArray(["game data is not ready"])
+	var executable_path := _game_executable_path()
+	if not FileAccess.file_exists(executable_path):
+		return PackedStringArray(["Oblivion.exe not found at %s (set OBLIVION_EXE)" % executable_path])
+	var cache_dir := ProjectSettings.globalize_path("res://.godot/openob/cache")
+	quest_driver = data_reader.create_quest_driver(quest_editor_id, executable_path, cache_dir)
+	if quest_driver == null:
+		return PackedStringArray(["quest %s has no driver (missing quest or script)" % quest_editor_id])
+	return _apply_driver_result(quest_driver.start(stage, Callable(self, "_quest_distance")))
+
+func _apply_driver_result(result: Dictionary) -> PackedStringArray:
+	var report := PackedStringArray()
+	for change: String in result.get("stage_changes", PackedStringArray()):
+		report.push_back("stage %s" % change)
+	for error_text: String in result.get("parse_errors", PackedStringArray()):
+		report.push_back("parse error " + error_text)
+	report.append_array(quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")))
+	var unanswered: PackedStringArray = result.get("unanswered", PackedStringArray())
+	if not unanswered.is_empty():
+		report.push_back("unanswered: " + ", ".join(unanswered))
+	return report
+
+## Distance in game units between two named references of the loaded cell (or the player).
+## Returns null when a name is not in the scene, so the driver treats the condition as unanswered.
+func _quest_distance(from: String, to: String) -> Variant:
+	var from_position = _quest_position(from)
+	var to_position = _quest_position(to)
+	if from_position == null or to_position == null:
+		return null
+	return (from_position as Vector3).distance_to(to_position as Vector3) / game_units_to_meters
+
+func _quest_position(name: String) -> Variant:
+	if name.to_lower() == "player":
+		return player.global_position
+	var node := get_node_or_null(NodePath(name)) as Node3D
+	if node != null:
+		return node.global_position
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("reference_name", "")) == name:
+			return _reference_transform(reference).origin
+	return null
 
 ## Runs one stage of a quest against the loaded cell and returns the report lines.
 ## The executable comes from OBLIVION_EXE, or from the usual install layout next to Data.

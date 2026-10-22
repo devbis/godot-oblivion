@@ -13,7 +13,6 @@ var dead_actors: Dictionary = {}
 ## reference dictionary to its Godot transform in the loaded cell.
 func apply(runs: Array, cell: Dictionary, world: Node3D, transform_of: Callable) -> PackedStringArray:
 	var report := PackedStringArray()
-	var references := _references_by_name(cell)
 	for run_value: Variant in runs:
 		var run: Dictionary = run_value
 		if not bool(run.get("conditions_hold", false)):
@@ -21,8 +20,21 @@ func apply(runs: Array, cell: Dictionary, world: Node3D, transform_of: Callable)
 		report.push_back("entry" + (" (completes)" if bool(run.get("completes", false)) else ""))
 		for error_text: String in run.get("parse_errors", PackedStringArray()):
 			report.push_back("  parse error " + error_text)
-		for action_value: Variant in run.get("actions", []):
-			report.push_back("  " + _apply_action(action_value, references, world, transform_of))
+		report.append_array(apply_actions(run.get("actions", []), cell, world, transform_of))
+	return report
+
+
+## Applies a list of actions, such as the ones a quest driver tick returns.
+func apply_actions(actions: Array, cell: Dictionary, world: Node3D, transform_of: Callable) -> PackedStringArray:
+	var report := PackedStringArray()
+	var references := _references_by_name(cell)
+	for action_value: Variant in actions:
+		var action: Dictionary = action_value
+		if str(action.get("command", "")).to_lower() == "setstage":
+			# Stage changes are applied by the quest driver itself; this line only records them.
+			report.push_back("  stage change handled by the quest driver")
+			continue
+		report.push_back("  " + _apply_action(action, references, world, transform_of))
 	return report
 
 
