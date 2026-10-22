@@ -5,8 +5,10 @@
 #include <cctype>
 #include <chrono>
 #include <fstream>
-#include <iostream>
+#include <map>
+#include <ostream>
 #include <stdexcept>
+#include <system_error>
 
 namespace oblivion {
 namespace {
@@ -18,9 +20,48 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+// Calls visit(component) for each backslash-separated part of a normalized path.
+template <typename Visit>
+void for_each_component(std::string_view path, Visit visit) {
+    std::size_t begin = 0;
+    while (begin <= path.size()) {
+        const auto end = path.find('\\', begin);
+        const auto length = end == std::string_view::npos ? path.size() - begin : end - begin;
+        if (length > 0) visit(path.substr(begin, length));
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+}
+
+bool has_parent_component(std::string_view normalized) {
+    bool escapes = false;
+    for_each_component(normalized, [&](std::string_view component) {
+        if (component == "..") escapes = true;
+    });
+    return escapes;
+}
+
+// Indexes every loose file under root by its lowercase, backslash-separated
+// path relative to root. Lookups are then case-insensitive on any volume,
+// including case-sensitive ones where the on-disk directory names are mixed case.
+std::map<std::string, std::filesystem::path, std::less<>> index_loose_files(const std::filesystem::path& root) {
+    std::map<std::string, std::filesystem::path, std::less<>> index;
+    std::error_code error;
+    for (std::filesystem::recursive_directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
+        if (!it->is_regular_file(error)) continue;
+        std::string key;
+        for (const auto& part : it->path().lexically_relative(root)) {
+            if (!key.empty()) key.push_back('\\');
+            key += lower_ascii(part.string());
+        }
+        index.emplace(std::move(key), it->path());
+    }
+    return index;
+}
+
 } // namespace
 
-void GameData::open(const std::filesystem::path& data_directory, LoadProfile profile) {
+void GameData::open(const std::filesystem::path& data_directory, LoadProfile profile, std::ostream* log) {
     const auto startup_started = std::chrono::steady_clock::now();
     const bool visual_runtime = profile == LoadProfile::RuntimeVisuals;
     if (!std::filesystem::is_directory(data_directory))
@@ -68,14 +109,20 @@ void GameData::open(const std::filesystem::path& data_directory, LoadProfile pro
     Esm4Database esm;
     esm.open(esm_path, visual_runtime);
     const auto startup_finished = std::chrono::steady_clock::now();
-    const std::chrono::duration<double> archive_duration = archives_finished - archives_started;
-    const std::chrono::duration<double> esm_duration = startup_finished - archives_finished;
-    const std::chrono::duration<double> total_duration = startup_finished - startup_started;
-    std::clog << "OpenOB data index: " << archive_paths.size() << "/" << discovered_archive_count
-              << " BSA archives in " << archive_duration.count() << "s; ESM in "
-              << esm_duration.count() << "s; total " << total_duration.count() << "s"
-              << (visual_runtime ? " (runtime visuals profile)" : " (full profile)") << '\n';
+    if (log) {
+        const std::chrono::duration<double> archive_duration = archives_finished - archives_started;
+        const std::chrono::duration<double> esm_duration = startup_finished - archives_finished;
+        const std::chrono::duration<double> total_duration = startup_finished - startup_started;
+        *log << "OpenOB data index: " << archive_paths.size() << "/" << discovered_archive_count
+             << " BSA archives in " << archive_duration.count() << "s; ESM in "
+             << esm_duration.count() << "s; total " << total_duration.count() << "s"
+             << (visual_runtime ? " (runtime visuals profile)" : " (full profile)") << '\n';
+        if (esm.unplaced_reference_count() > 0)
+            *log << "OpenOB data index: " << esm.unplaced_reference_count()
+                 << " references have no owning cell in " << esm_path.string() << '\n';
+    }
     data_directory_ = data_directory;
+    loose_files_ = index_loose_files(data_directory);
     archives_ = std::move(archives);
     archive_paths_ = std::move(archive_paths);
     esm_ = std::move(esm);
@@ -139,17 +186,16 @@ std::vector<std::uint8_t> GameData::read_asset(std::string_view asset_path) cons
         throw std::runtime_error("game data is not open");
 
     const auto normalized = normalize_asset_path(asset_path);
+    if (has_parent_component(normalized))
+        throw std::runtime_error("asset path escapes the game Data directory: " + std::string(asset_path));
     std::vector<std::string> candidates{normalized};
     const auto extension = lower_ascii(std::filesystem::path(normalized).extension().string());
     if ((extension == ".nif" || extension == ".kf") && !normalized.starts_with("meshes\\"))
         candidates.push_back("meshes\\" + normalized);
 
     for (const auto& candidate : candidates) {
-        std::filesystem::path loose_path = data_directory_;
-        std::string relative = candidate;
-        std::replace(relative.begin(), relative.end(), '\\', std::filesystem::path::preferred_separator);
-        loose_path /= relative;
-        if (std::filesystem::is_regular_file(loose_path)) {
+        if (const auto loose = loose_files_.find(candidate); loose != loose_files_.end()) {
+            const auto& loose_path = loose->second;
             std::ifstream input(loose_path, std::ios::binary | std::ios::ate);
             const auto size = input.tellg();
             if (size < 0) throw std::runtime_error("cannot size " + loose_path.string());

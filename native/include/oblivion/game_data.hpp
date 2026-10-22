@@ -3,9 +3,12 @@
 #include "oblivion/bsa_archive.hpp"
 #include "oblivion/esm4_database.hpp"
 
+#include <cstdint>
 #include <filesystem>
-#include <optional>
+#include <iosfwd>
+#include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace oblivion {
@@ -14,7 +17,9 @@ class GameData {
 public:
     enum class LoadProfile { Full, RuntimeVisuals };
 
-    void open(const std::filesystem::path& data_directory, LoadProfile profile = LoadProfile::Full);
+    // Progress and diagnostics go to log when it is non-null; the default is silent.
+    void open(const std::filesystem::path& data_directory, LoadProfile profile = LoadProfile::Full,
+              std::ostream* log = nullptr);
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
@@ -44,6 +49,7 @@ private:
     Esm4Database esm_;
     std::vector<BsaArchive> archives_;
     std::vector<std::filesystem::path> archive_paths_;
+    std::map<std::string, std::filesystem::path, std::less<>> loose_files_;
     bool opened_ = false;
 };
 
