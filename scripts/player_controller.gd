@@ -18,6 +18,7 @@ extends CharacterBody3D
 @export var camera_collision_radius := 0.18
 @export var fly_speed_mps := 5.0
 @export var fly_fast_speed_mps := 15.0
+@export var chain_push_force_newtons := 20.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
 @onready var camera: Camera3D = $CameraPivot/Camera3D
@@ -35,6 +36,7 @@ var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
 const FACE_PREVIEW_MIN_DISTANCE := 0.002
 const CAMERA_COLLISION_MASK := 2
 const CAMERA_COLLISION_MARGIN := 0.08
+const CHAIN_COLLISION_LAYER := 16
 var _capture_mouse_on_focus := false
 var is_flying := false
 var _saved_collision_layer := 1
@@ -206,7 +208,30 @@ func _physics_process(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, 0.0, speed * 8.0 * delta)
 		velocity.z = move_toward(velocity.z, 0.0, speed * 8.0 * delta)
 
+	var requested_velocity := velocity
 	move_and_slide()
+	_push_contacted_chains(requested_velocity)
+
+func _push_contacted_chains(requested_velocity: Vector3) -> void:
+	var horizontal_velocity := Vector3(requested_velocity.x, 0.0, requested_velocity.z)
+	if horizontal_velocity.length_squared() < 0.01:
+		return
+	for collision_index in range(get_slide_collision_count()):
+		var collision := get_slide_collision(collision_index)
+		var chain := collision.get_collider() as RigidBody3D
+		if chain == null or (chain.collision_layer & CHAIN_COLLISION_LAYER) == 0:
+			continue
+		var normal := collision.get_normal()
+		var horizontal_normal := Vector3(normal.x, 0.0, normal.z)
+		if horizontal_normal.length_squared() < 0.01:
+			continue
+		horizontal_normal = horizontal_normal.normalized()
+		var push_speed := maxf(0.0, -horizontal_velocity.dot(horizontal_normal))
+		if push_speed <= 0.05:
+			continue
+		var force := -horizontal_normal * chain_push_force_newtons * clampf(push_speed / run_speed_mps, 0.0, 1.0)
+		var contact_offset := collision.get_position() - chain.global_position
+		chain.apply_force(force, contact_offset)
 
 func _update_camera_clearance(delta: float) -> void:
 	if is_flying:
