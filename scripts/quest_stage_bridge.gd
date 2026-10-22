@@ -55,6 +55,9 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 		"speech":
 			# A SayTo line: the topic's reply, printed as the subtitle would show it.
 			return "says: %s" % (str(arguments[0]) if not arguments.is_empty() else "")
+		"evp":
+			# The NPC re-evaluates its packages; the scene refreshes the routes after the result (see main.gd).
+			return "re-evaluates packages: %s" % label
 	return "not implemented: %s" % label
 
 

@@ -482,7 +482,7 @@ func _physics_process(delta: float) -> void:
 	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
-	if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
+	if _needs_route_refresh(result):
 		_refresh_npc_routes()
 
 ## Starts a quest at a stage (default 0) in the quest world, which is created on the first start.
@@ -501,8 +501,12 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
 		# character creation's race and sex are read.
 		quest_world.set_listener("Argonian", false)
-		if not quest_world.add_actor("ValenDreth"):
-			print("OpenOB quest: actor ValenDreth has no script")
+		# The intro's speakers. Each one's GameMode speaks when the Charactergen conversation reaches it: Renault
+		# when Charactergen's speaker is 2, the Emperor and the others when their turn comes.
+		for speaker: Array in [["ValenDrethRef", "ValenDreth"], ["RenoteRef", "Renote"], ["GlenroyRef", "Glenroy"], ["UrielSeptimRef", "UrielSeptim"], ["BaurusRef", "Baurus"]]:
+			quest_world.set_reference_base(speaker[0], speaker[1])
+			if not quest_world.add_actor(speaker[1]):
+				print("OpenOB quest: actor %s has no script" % speaker[1])
 	if quest_world.get_stage(quest_editor_id) < 0:
 		return PackedStringArray(["quest %s has no script" % quest_editor_id])
 	if route_quest_editor_id.is_empty():
@@ -510,6 +514,15 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	var report := _apply_driver_result(quest_world.start(quest_editor_id, stage, Callable(self, "_quest_distance")))
 	_refresh_npc_routes()
 	return report
+
+## True when a result changed a stage or asked the NPCs to re-evaluate their packages (evp), so the routes change.
+func _needs_route_refresh(result: Dictionary) -> bool:
+	if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
+		return true
+	for action: Dictionary in result.get("actions", []):
+		if str(action.get("command", "")).to_lower() == "evp":
+			return true
+	return false
 
 func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	var report := PackedStringArray()
@@ -566,13 +579,16 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		package = quest_world.select_package(route_quest_editor_id, npc_id)
 	actor["package"] = package
 	var waypoints: Array[Dictionary] = []
-	if not package.is_empty():
+	# A package without a location (for example waiting at the actor's editor location) keeps the actor in place.
+	if not package.is_empty() and int(package.get("location_form_id", 0)) != 0:
 		var position = _location_position(int(package.get("location_form_id", 0)))
 		if position == null:
 			print("OpenOB package %s for %s: its location is not in this cell" % [str(package.get("editor_id", "")), str(actor.get("name", ""))])
 		else:
 			var flags := int(package.get("flags", 0))
-			waypoints.push_back({"position": position, "speed_mps": 3.4 if (flags & 0x2000) != 0 else 1.3})
+			var speed := 3.4 if (flags & 0x2000) != 0 else 1.3
+			for point: Vector3 in _navigation_path((root as Node3D).global_position, position):
+				waypoints.push_back({"position": point, "speed_mps": speed})
 	root.call("configure_route", waypoints, false, 0.0)
 	if not root.has_meta("route_finished_connected"):
 		root.set_meta("route_finished_connected", true)
@@ -589,7 +605,7 @@ func _on_actor_route_finished(actor_name: String) -> void:
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
-		if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
+		if _needs_route_refresh(result):
 			_refresh_npc_routes()
 		return
 
@@ -2526,10 +2542,106 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
+	# The routes follow the navigation tiles of the cell, so they are baked before the quest starts.
+	if _navigation_tiles == null:
+		await _build_navigation_tiles()
 	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
 	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):
 			print("OpenOB quest: " + line)
+
+const NAVIGATION_TILE_SIZE_M := 25.6
+const NAVIGATION_TILE_OVERLAP_M := 2.0
+## The navigation regions of the loaded cell, one per tile (OpenMW bakes its navigation mesh the same way).
+var _navigation_tiles: Node3D = null
+
+## Bakes the walkable surfaces of the loaded cell in tiles. Each tile takes the static triangles that touch it, with an
+## overlap, so the tiles connect at their edges and stairs and floors on different levels join.
+func _build_navigation_tiles() -> void:
+	_clear_navigation_tiles()
+	var bodies: Array = []
+	_collect_static_bodies(self, bodies)
+	var triangles := PackedVector3Array()
+	for body: StaticBody3D in bodies:
+		for child: Node in body.get_children():
+			var shape_node := child as CollisionShape3D
+			if shape_node == null or not (shape_node.shape is ConcavePolygonShape3D):
+				continue
+			var faces: PackedVector3Array = (shape_node.shape as ConcavePolygonShape3D).get_faces()
+			var transform: Transform3D = body.global_transform * shape_node.transform
+			for vertex: Vector3 in faces:
+				triangles.push_back(transform * vertex)
+	if triangles.is_empty():
+		return
+	var lowest := triangles[0]
+	var highest := triangles[0]
+	for vertex: Vector3 in triangles:
+		lowest = Vector3(minf(lowest.x, vertex.x), minf(lowest.y, vertex.y), minf(lowest.z, vertex.z))
+		highest = Vector3(maxf(highest.x, vertex.x), maxf(highest.y, vertex.y), maxf(highest.z, vertex.z))
+	_navigation_tiles = Node3D.new()
+	_navigation_tiles.name = "NavigationTiles"
+	add_child(_navigation_tiles)
+	NavigationServer3D.map_set_edge_connection_margin(get_world_3d().navigation_map, 1.0)
+	var columns := int(ceil((highest.x - lowest.x) / NAVIGATION_TILE_SIZE_M))
+	var rows := int(ceil((highest.z - lowest.z) / NAVIGATION_TILE_SIZE_M))
+	var polygon_count := 0
+	for column in range(columns):
+		for row in range(rows):
+			var min_x := lowest.x + column * NAVIGATION_TILE_SIZE_M - NAVIGATION_TILE_OVERLAP_M
+			var min_z := lowest.z + row * NAVIGATION_TILE_SIZE_M - NAVIGATION_TILE_OVERLAP_M
+			var max_x := min_x + NAVIGATION_TILE_SIZE_M + 2.0 * NAVIGATION_TILE_OVERLAP_M
+			var max_z := min_z + NAVIGATION_TILE_SIZE_M + 2.0 * NAVIGATION_TILE_OVERLAP_M
+			var tile := PackedVector3Array()
+			for index in range(0, triangles.size(), 3):
+				var a := triangles[index]
+				var b := triangles[index + 1]
+				var c := triangles[index + 2]
+				if maxf(a.x, maxf(b.x, c.x)) < min_x or minf(a.x, minf(b.x, c.x)) > max_x:
+					continue
+				if maxf(a.z, maxf(b.z, c.z)) < min_z or minf(a.z, minf(b.z, c.z)) > max_z:
+					continue
+				# The bake expects the opposite winding to the one the collision faces come with.
+				tile.push_back(a)
+				tile.push_back(c)
+				tile.push_back(b)
+			if tile.is_empty():
+				continue
+			var geometry := NavigationMeshSourceGeometryData3D.new()
+			geometry.add_faces(tile, Transform3D.IDENTITY)
+			var nav_mesh := NavigationMesh.new()
+			nav_mesh.agent_radius = 0.18
+			nav_mesh.agent_height = 1.8
+			nav_mesh.agent_max_climb = 0.4
+			nav_mesh.agent_max_slope = 55.0
+			nav_mesh.cell_size = 0.2
+			nav_mesh.cell_height = 0.2
+			NavigationServer3D.bake_from_source_geometry_data(nav_mesh, geometry)
+			polygon_count += nav_mesh.get_polygon_count()
+			var region := NavigationRegion3D.new()
+			region.navigation_mesh = nav_mesh
+			_navigation_tiles.add_child(region)
+	print("OpenOB navigation: %d tiles, %d polygons" % [_navigation_tiles.get_child_count(), polygon_count])
+	# The navigation map takes the new regions on its next physics frames.
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+
+func _clear_navigation_tiles() -> void:
+	if is_instance_valid(_navigation_tiles):
+		_navigation_tiles.queue_free()
+	_navigation_tiles = null
+
+func _collect_static_bodies(node: Node, bodies: Array) -> void:
+	if node is StaticBody3D:
+		bodies.push_back(node)
+	for child: Node in node.get_children():
+		_collect_static_bodies(child, bodies)
+
+## The path from `from` to `to` over the navigation tiles, or just the target when the tiles do not connect them.
+func _navigation_path(from: Vector3, to: Vector3) -> PackedVector3Array:
+	var path := NavigationServer3D.map_get_path(get_world_3d().navigation_map, from, to, true)
+	if path.is_empty():
+		return PackedVector3Array([to])
+	return path
 
 func _update_npc_streaming() -> void:
 	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
@@ -2579,6 +2691,7 @@ func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generat
 		_npc_stream_busy = false
 
 func _clear_cell_actors() -> void:
+	_clear_navigation_tiles()
 	_npc_stream_generation += 1
 	_npc_stream_busy = false
 	_npc_loaded_reference_ids.clear()
@@ -3047,9 +3160,10 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 
 func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
 	var start_position := actor_root.global_position
+	# The floor may be a few metres below the placed position (the actor falls to it) or just above (it rises to it).
 	var query := PhysicsRayQueryParameters3D.create(
 		start_position + Vector3.UP * 2.1,
-		start_position - Vector3.UP * 3.0,
+		start_position - Vector3.UP * 12.0,
 		2,
 		[actor_root.get_rid(), player.get_rid()]
 	)

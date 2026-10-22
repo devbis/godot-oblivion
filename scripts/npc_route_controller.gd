@@ -21,6 +21,9 @@ var waypoint_index := 0
 var loops_route := false
 var is_walking := false
 var grounding_enabled := false
+## Whether the walk checks the floor ahead for a drop. A route of several points comes from the navigation tiles, which
+## already keep to walkable floor, so the check is only kept for a single straight target.
+var check_floor_ahead := true
 var _pause_remaining := 0.0
 var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
@@ -37,6 +40,7 @@ func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause:
 		waypoints.push_back(waypoint.get("position", global_position))
 		waypoint_speeds.push_back(float(waypoint.get("speed_mps", walk_speed_mps)))
 	loops_route = should_loop
+	check_floor_ahead = waypoints.size() <= 1
 	_pause_remaining = initial_pause
 	waypoint_index = 0
 	velocity = Vector3.ZERO
@@ -66,6 +70,7 @@ func _physics_process(delta: float) -> void:
 		if (
 			desired_horizontal_velocity.length_squared() > 0.0001
 			and is_on_floor()
+			and check_floor_ahead
 			and not _has_walkable_floor_ahead(desired_horizontal_velocity, delta)
 		):
 			desired_horizontal_velocity = Vector3.ZERO
