@@ -2,6 +2,7 @@
 #include "oblivion/esm4_database.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
+#include "oblivion/script_lexer.hpp"
 
 #include <NifFile.hpp>
 
@@ -258,6 +259,35 @@ Bytes esm_fixture() {
     append(gmst_data, string_subrecord("EDID", "fFixtureSetting"));
     append(records, record("GMST", 0x400, gmst_data));
 
+    // A quest-style script with a 2-entry variable table, one reference and a source text.
+    Bytes script_header;
+    u32(script_header, 0);  // unused
+    u32(script_header, 1);  // reference count
+    u32(script_header, 40); // compiled size
+    u32(script_header, 2);  // variable count
+    u16(script_header, 1);  // quest
+    u16(script_header, 1);  // enabled
+    Bytes script_data;
+    append(script_data, string_subrecord("EDID", "FixtureScript"));
+    subrecord(script_data, "SCHR", script_header);
+    Bytes first_variable;
+    u32(first_variable, 1);
+    u32(first_variable, 0); u32(first_variable, 0); u32(first_variable, 0);
+    u32(first_variable, 2); // float
+    u32(first_variable, 0);
+    subrecord(script_data, "SLSD", first_variable);
+    append(script_data, string_subrecord("SCVR", "fixtureFloat"));
+    Bytes second_variable;
+    u32(second_variable, 2);
+    u32(second_variable, 0); u32(second_variable, 0); u32(second_variable, 0);
+    u32(second_variable, 3); // reference
+    u32(second_variable, 0);
+    subrecord(script_data, "SLSD", second_variable);
+    append(script_data, string_subrecord("SCVR", "fixtureRef"));
+    append(script_data, id_subrecord("SCRO", 0x100));
+    append(script_data, string_subrecord("SCTX", "scn FixtureScript\nshort fixtureFloat\nBegin GameMode\n  set fixtureFloat to 1\nEnd\n"));
+    append(records, record("SCPT", 0x500, script_data));
+
     // Cell 0x20's references precede its CELL record, so they must still attach.
     Bytes first_children;
     append(first_children, cell_record(0x10, "StartCell", "Fixture Start"));
@@ -308,6 +338,18 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(database.find_cell(0x20) == next);
     CHECK(database.unplaced_reference_count() == 1);
 
+    const auto* script = database.find_script("fixturescript");
+    CHECK(script != nullptr && script == database.find_script(0x500));
+    CHECK(script->editor_id == "FixtureScript" && script->type == 1 && script->flags == 1);
+    CHECK(script->compiled_size == 40 && script->variable_count == 2);
+    CHECK(script->variables.size() == 2);
+    CHECK(script->variables[0].index == 1 && script->variables[0].type == 2);
+    CHECK(script->variables[0].name == "fixtureFloat");
+    CHECK(script->variables[1].index == 2 && script->variables[1].name == "fixtureRef");
+    CHECK(script->referenced_form_ids == std::vector<std::uint32_t>({0x100}));
+    CHECK(script->source == "scn FixtureScript\nshort fixtureFloat\nBegin GameMode\n  set fixtureFloat to 1\nEnd\n");
+    CHECK(database.find_script("missing") == nullptr);
+
     CHECK(database.find_record_type(0x400) != nullptr && *database.find_record_type(0x400) == "GMST");
     CHECK(database.float_game_settings().count("fFixtureSetting") == 1);
     CHECK(database.float_game_settings().at("fFixtureSetting") == 1.5f);
@@ -341,6 +383,44 @@ void test_loose_assets(const std::filesystem::path& directory) {
         rejected = true;
     }
     CHECK(rejected);
+}
+
+void test_script_lexer() {
+    const auto tokens = oblivion::tokenize_script("scn Test ; comment\nshort x\nset x to 1.5\nif x >= 1\n\"msg\"\n");
+    using Kind = oblivion::ScriptTokenKind;
+    const std::vector<Kind> expected_kinds{
+        Kind::Identifier, Kind::Identifier, Kind::Newline,
+        Kind::Identifier, Kind::Identifier, Kind::Newline,
+        Kind::Identifier, Kind::Identifier, Kind::Identifier, Kind::Number, Kind::Newline,
+        Kind::Identifier, Kind::Identifier, Kind::Operator, Kind::Number, Kind::Newline,
+        Kind::String, Kind::Newline,
+        Kind::EndOfFile,
+    };
+    CHECK(tokens.size() == expected_kinds.size());
+    for (std::size_t index = 0; index < tokens.size() && index < expected_kinds.size(); ++index)
+        CHECK(tokens[index].kind == expected_kinds[index]);
+    CHECK(tokens[1].text == "Test" && tokens[1].line == 1 && tokens[1].column == 5);
+    CHECK(tokens[3].line == 2 && tokens[3].text == "short");
+    CHECK(tokens[9].text == "1.5" && tokens[9].line == 3);
+    CHECK(tokens[13].text == ">=");
+    const auto logic = oblivion::tokenize_script("if a && b || !c\n");
+    CHECK(logic[2].text == "&&" && logic[4].text == "||" && logic[5].text == "!");
+    const auto member = oblivion::tokenize_script("myParent.activate mySelf 1\n");
+    CHECK(member[1].text == "." && member[2].text == "activate" && member[3].text == "mySelf");
+    CHECK(tokens[16].kind == Kind::String && tokens[16].text == "msg" && tokens[16].line == 5);
+    CHECK(tokens.back().line == 6);
+
+    // Errors become tokens with a line, and the rest of the script still tokenizes.
+    const auto broken = oblivion::tokenize_script("set x to @\nset y to \"open\nset z to 2\n");
+    std::size_t errors = 0;
+    for (const auto& token : broken)
+        if (token.kind == Kind::Error) ++errors;
+    CHECK(errors == 2);
+    CHECK(broken.back().kind == Kind::EndOfFile && broken.back().line == 4);
+    bool saw_z = false;
+    for (const auto& token : broken)
+        if (token.kind == Kind::Identifier && token.text == "z" && token.line == 3) saw_z = true;
+    CHECK(saw_z);
 }
 
 void test_nif_mesh_decoder() {
@@ -380,6 +460,7 @@ int main() {
         test_bsa_rejects_implausible_output_size(directory);
         test_esm4(directory);
         test_loose_assets(directory);
+        test_script_lexer();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

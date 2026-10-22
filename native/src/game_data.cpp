@@ -181,6 +181,14 @@ const std::string* GameData::find_record_type(std::uint32_t form_id) const {
     return esm_.find_record_type(form_id);
 }
 
+const ScriptRecord* GameData::find_script(std::uint32_t form_id) const {
+    return esm_.find_script(form_id);
+}
+
+const ScriptRecord* GameData::find_script(std::string_view editor_id) const {
+    return esm_.find_script(editor_id);
+}
+
 std::vector<std::uint8_t> GameData::read_asset(std::string_view asset_path) const {
     if (!opened_)
         throw std::runtime_error("game data is not open");

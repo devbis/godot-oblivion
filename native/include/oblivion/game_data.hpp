@@ -33,6 +33,9 @@ public:
     [[nodiscard]] std::vector<std::uint32_t> find_form_ids_by_editor_id_prefix(std::string_view prefix) const;
     [[nodiscard]] const std::string* find_editor_id(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
+    [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
+    [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
+    [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return esm_.scripts(); }
     [[nodiscard]] std::vector<std::uint8_t> read_asset(std::string_view asset_path) const;
     [[nodiscard]] bool is_open() const noexcept { return opened_; }
     [[nodiscard]] const std::filesystem::path& data_directory() const noexcept { return data_directory_; }

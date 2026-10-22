@@ -159,6 +159,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     worldspace_water_level_by_id_.clear();
     record_type_by_id_.clear();
     record_type_names_.clear();
+    script_by_id_.clear();
+    script_id_by_editor_id_.clear();
     record_type_index_.clear();
     references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
@@ -180,6 +182,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
             cell.land_texture_path = texture->second.find('/') == std::string::npos
                 ? "textures/landscape/" + texture->second : texture->second;
     }
+    for (const auto& [form_id, script] : script_by_id_)
+        script_id_by_editor_id_.try_emplace(lower_ascii(script.editor_id), form_id);
     for (const auto& [form_id, editor_id] : base_editor_id_by_id_)
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
@@ -327,6 +331,16 @@ void Esm4Database::attach_references() {
     references_by_cell_id_.clear();
 }
 
+const ScriptRecord* Esm4Database::find_script(std::uint32_t form_id) const {
+    const auto it = script_by_id_.find(form_id);
+    return it == script_by_id_.end() ? nullptr : &it->second;
+}
+
+const ScriptRecord* Esm4Database::find_script(std::string_view editor_id) const {
+    const auto it = script_id_by_editor_id_.find(lower_ascii(std::string(editor_id)));
+    return it == script_id_by_editor_id_.end() ? nullptr : find_script(it->second);
+}
+
 void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only) {
     if (bytes.size() < kTes4RecordHeaderSize)
         throw std::runtime_error("ESM file is too small");
@@ -408,6 +422,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_land = type == "LAND";
     bool is_land_texture = type == "LTEX";
     bool is_worldspace = type == "WRLD";
+    bool is_script = type == "SCPT";
     const bool is_item_model = type == "ARMO" || type == "CLOT" || type == "WEAP"
         || type == "HAIR" || type == "EYES" || type == "ALCH" || type == "AMMO"
         || type == "APPA" || type == "BOOK" || type == "INGR" || type == "KEYM"
@@ -426,6 +441,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     AiPackageRecord ai_package;
     ai_package.form_id = form_id;
     TreeBaseRecord tree;
+    ScriptRecord script;
+    script.form_id = form_id;
     std::vector<float> land_heights;
     std::map<std::uint32_t, std::size_t> land_texture_usage;
     int race_part_section = -1;
@@ -463,6 +480,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_outfit || is_ai_package || is_tree)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
+            if (is_script) script.editor_id = text;
             if (is_outfit) outfit.editor_id = text;
             if (is_ai_package) ai_package.editor_id = text;
         } else if (tag == "FULL" && is_cell) {
@@ -615,6 +633,21 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             ai_package.location_type = static_cast<std::int32_t>(u32(value));
             ai_package.location_form_id = u32(value + 4);
             ai_package.location_radius = static_cast<std::int32_t>(u32(value + 8));
+        } else if (tag == "SCHR" && is_script && subrecord_size >= 20) {
+            script.compiled_size = u32(value + 8);
+            script.variable_count = u32(value + 12);
+            script.type = u16(value + 16);
+            script.flags = u16(value + 18);
+        } else if (tag == "SCTX" && is_script) {
+            script.source.assign(reinterpret_cast<const char*>(value), subrecord_size);
+            while (!script.source.empty() && script.source.back() == '\0') script.source.pop_back();
+        } else if (tag == "SLSD" && is_script && subrecord_size >= 24) {
+            // SLSD is followed by its SCVR name, so the variable is completed then.
+            script.variables.push_back({u32(value), u32(value + 16), {}});
+        } else if (tag == "SCVR" && is_script && !script.variables.empty()) {
+            script.variables.back().name = read_zstring(value, subrecord_size);
+        } else if (tag == "SCRO" && is_script && subrecord_size >= 4) {
+            script.referenced_form_ids.push_back(u32(value));
         } else if (tag == "DATA" && is_reference && subrecord_size >= 24) {
             for (std::size_t i = 0; i < 3; ++i) {
                 reference.position[i] = f32(value + 4 * i);
@@ -670,6 +703,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_worldspace)
         worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
+    if (is_script)
+        script_by_id_[form_id] = std::move(script);
     record_type_by_id_[form_id] = intern_record_type(type);
     if (!base_editor_id.empty())
         base_editor_id_by_id_[form_id] = std::move(base_editor_id);

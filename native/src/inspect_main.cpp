@@ -1,5 +1,6 @@
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
+#include "oblivion/script_lexer.hpp"
 
 #include <iomanip>
 #include <iostream>
@@ -17,7 +18,7 @@
 namespace {
 
 void usage(const char* executable) {
-    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
+    std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --script EDID | --check-scripts | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
 }
 
 }
@@ -30,12 +31,14 @@ int main(int argc, char** argv) {
     const bool inspect_kf = argc >= 4 && mode == "--kf-summary";
     const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets"
         || mode == "--cell-actors" || mode == "--find-editor-id" || mode == "--list-editor-ids"
-        || mode == "--gmst-prefix");
+        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts");
     const bool list_assets = argc == 4 && mode == "--list-assets";
     const bool inspect_actors = argc == 4 && mode == "--cell-actors";
     const bool lookup_editor_id = argc == 4 && mode == "--find-editor-id";
     const bool list_editor_ids = argc == 4 && mode == "--list-editor-ids";
     const bool list_game_settings = argc == 4 && mode == "--gmst-prefix";
+    const bool show_script = argc == 4 && mode == "--script";
+    const bool check_scripts = argc == 3 && mode == "--check-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
         || inspect_kf || single_argument_mode;
@@ -54,6 +57,25 @@ int main(int argc, char** argv) {
             output.write(reinterpret_cast<const char*>(asset.data()), static_cast<std::streamsize>(asset.size()));
             if (!output) throw std::runtime_error("cannot write extracted asset");
             std::cout << "Extracted " << asset.size() << " bytes to " << argv[4] << ".\n";
+            return 0;
+        }
+        if (check_scripts) {
+            std::size_t total_tokens = 0;
+            std::size_t scripts_with_errors = 0;
+            for (const auto& [form_id, script] : data.scripts()) {
+                const auto tokens = oblivion::tokenize_script(script.source);
+                total_tokens += tokens.size();
+                bool reported = false;
+                for (const auto& token : tokens) {
+                    if (token.kind != oblivion::ScriptTokenKind::Error) continue;
+                    if (!reported && scripts_with_errors < 20)
+                        std::cout << script.editor_id << " line " << token.line << ": " << token.text << '\n';
+                    reported = true;
+                }
+                if (reported) ++scripts_with_errors;
+            }
+            std::cout << "scripts=" << data.scripts().size() << " tokens=" << total_tokens
+                      << " scripts_with_lexical_errors=" << scripts_with_errors << '\n';
             return 0;
         }
         if (argc >= 4) {
@@ -85,6 +107,28 @@ int main(int argc, char** argv) {
                               << " male_model=" << (model_path ? *model_path : "")
                               << " female_model=" << (female_model_path ? *female_model_path : "") << '\n';
                 }
+                return 0;
+            }
+            if (show_script) {
+                const auto* script = data.find_script(argv[3]);
+                if (!script) throw std::runtime_error("script not found: " + std::string(argv[3]));
+                std::cout << script->editor_id << " form=" << std::hex << std::setw(8) << std::setfill('0')
+                          << script->form_id << std::dec << " type=" << script->type << " flags=" << script->flags
+                          << " variables=" << script->variable_count << " compiled_size=" << script->compiled_size
+                          << " referenced=" << script->referenced_form_ids.size() << '\n';
+                for (const auto& variable : script->variables)
+                    std::cout << "  var " << variable.index << " type=" << variable.type << " name=" << variable.name << '\n';
+                for (const auto form_id : script->referenced_form_ids)
+                    std::cout << "  ref " << std::hex << std::setw(8) << std::setfill('0') << form_id << std::dec << '\n';
+                const auto tokens = oblivion::tokenize_script(script->source);
+                std::size_t lexical_errors = 0;
+                for (const auto& token : tokens)
+                    if (token.kind == oblivion::ScriptTokenKind::Error) {
+                        if (lexical_errors == 0) std::cout << "  first lexical error: line " << token.line << ": " << token.text << '\n';
+                        ++lexical_errors;
+                    }
+                std::cout << "  tokens=" << tokens.size() << " lexical_errors=" << lexical_errors << '\n';
+                std::cout << "--- source ---\n" << script->source << "\n--- end ---\n";
                 return 0;
             }
             if (list_game_settings) {
