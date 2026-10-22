@@ -40,7 +40,7 @@ const CHAIN_COLLISION_LAYER := 16
 var _capture_mouse_on_focus := false
 var is_flying := false
 var _saved_collision_layer := 1
-var _saved_collision_mask := 19
+var _saved_collision_mask := 23
 
 func _ready() -> void:
 	_camera_yaw = rotation.y

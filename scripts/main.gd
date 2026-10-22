@@ -2155,7 +2155,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			actor_name = "NPC_%08X" % int(reference.get("form_id", 0))
 		actor_root.name = actor_name
 		actor_root.collision_layer = 4
-		actor_root.collision_mask = 2
+		actor_root.collision_mask = 7
 		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 		actor_root.transform = _actor_reference_transform(reference)
 		add_child(actor_root)
@@ -2168,6 +2168,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = 0.9
 		actor_root.add_child(actor_collision)
+		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id, actor_capsule.radius)
+		if spawn_adjustment > 0.001:
+			print("OpenOB separated overlapping spawn for %s by %.3fm" % [actor_name, spawn_adjustment])
 		if _place_actor_on_generated_floor(actor_root):
 			grounded_actor_count += 1
 		var avatar := Node3D.new()
@@ -2888,6 +2891,50 @@ func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
 	actor_root.floor_snap_length = 0.35
 	actor_root.set("grounding_enabled", true)
 	return true
+
+func _separate_actor_spawn(actor_root: CharacterBody3D, reference_id: int, actor_radius: float) -> float:
+	var occupied_roots: Array[Node3D] = [player]
+	for pending_root: Node3D in _npc_pending_roots:
+		if pending_root != actor_root and is_instance_valid(pending_root):
+			occupied_roots.push_back(pending_root)
+	for actor: Dictionary in _npc_actors:
+		var existing_root := actor.get("root") as Node3D
+		if is_instance_valid(existing_root):
+			occupied_roots.push_back(existing_root)
+
+	var original_position := actor_root.global_position
+	var candidate_position := original_position
+	for _iteration in range(16):
+		var found_overlap := false
+		for other_root: Node3D in occupied_roots:
+			var other_position := other_root.global_position
+			if absf(candidate_position.y - other_position.y) >= 1.8:
+				continue
+			var other_radius := 0.32 if other_root == player else 0.30
+			var minimum_spacing := actor_radius + other_radius + 0.08
+			var offset := candidate_position - other_position
+			offset.y = 0.0
+			var distance := offset.length()
+			if distance >= minimum_spacing:
+				continue
+			var away_direction: Vector3
+			if distance > 0.001:
+				away_direction = offset / distance
+			else:
+				var angle := fposmod(float(reference_id & 0xFFFF) * 2.39996323, TAU)
+				away_direction = Vector3(cos(angle), 0.0, sin(angle))
+			candidate_position += away_direction * (minimum_spacing - distance + 0.01)
+			found_overlap = true
+			break
+		if not found_overlap:
+			break
+
+	actor_root.global_position = candidate_position
+	var adjustment := Vector2(
+		candidate_position.x - original_position.x,
+		candidate_position.z - original_position.z
+	).length()
+	return adjustment
 
 func _npc_waypoints(cell: Dictionary, actor_name: String, npc: Dictionary) -> Array[Dictionary]:
 	var waypoints: Array[Dictionary] = []
