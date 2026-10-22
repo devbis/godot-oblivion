@@ -46,6 +46,7 @@ struct QuestRecord {
 // The result script runs when the reply is given (for example it can set a quest stage).
 struct DialogResponse {
     std::uint32_t form_id = 0;
+    std::uint8_t flags = 0;                        // DATA byte 2: the response's flags (say once, goodbye, ...)
     std::string text;                              // NAM1
     std::uint32_t quest = 0;                       // QSTI: the quest the reply belongs to
     std::vector<QuestCondition> conditions;        // CTDA

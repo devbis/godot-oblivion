@@ -31,12 +31,14 @@ double speech_seconds(const std::string& text) {
     return std::max(1.0, static_cast<double>(text.size()) / 14.0);
 }
 
-// Writes "quest.variable" into another quest of the world. Ignored when there is no world or no such quest.
+// Writes "name.variable" into another quest of the world, or into the actor a reference stands for. Ignored otherwise.
 void write_foreign_variable(QuestWorld* world, const std::string& key, double value) {
     if (!world) return;
     const auto dot = key.find('.');
     if (dot == std::string::npos) return;
-    if (auto* other = world->find(key.substr(0, dot))) other->state().variables[key] = value;
+    const auto name = key.substr(0, dot);
+    if (auto* other = world->find(name)) other->state().variables[key] = value;
+    else world->set_actor_variable(name, key.substr(dot + 1), value);
 }
 
 std::string lower(std::string_view text) {
@@ -378,7 +380,30 @@ void QuestWorld::add_actor(std::uint32_t form_id, const ScriptRecord& script) {
     actors_.push_back(std::move(actor));
 }
 
-double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, QuestTick& tick, const DistanceFunction& distance) {
+void QuestWorld::set_reference_base(std::string_view reference, std::uint32_t base) {
+    reference_bases_[lower(reference)] = base;
+}
+
+bool QuestWorld::set_actor_variable(std::string_view reference, std::string_view variable, double value) {
+    const auto base = reference_base(reference);
+    if (!base) return false;
+    for (const auto& actor : actors_) {
+        if (actor->form_id != *base) continue;
+        actor->variables[lower(variable)] = value;
+        actor->pending[lower(variable)] = value;
+        return true;
+    }
+    return false;
+}
+
+std::optional<std::uint32_t> QuestWorld::reference_base(std::string_view reference) const {
+    const auto found = reference_bases_.find(lower(reference));
+    if (found == reference_bases_.end()) return std::nullopt;
+    return found->second;
+}
+
+double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
+                       const DistanceFunction& distance) {
     const auto* topic = find_topic_ ? find_topic_(topic_editor_id) : nullptr;
     if (!topic) {
         tick.unanswered.push_back("sayto");
@@ -393,7 +418,7 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     }
     DialogueContext context;
     context.speaker_base = speaker;
-    context.listener_base = kPlayerReference;
+    context.listener_base = listener;
     context.listener_race = listener_race_;
     context.listener_female = listener_female_;
     const auto run = quest->run_topic(*topic, context, distance);
@@ -414,8 +439,10 @@ namespace {
 // world's topics, and distances from the scene. Other commands go to the world's answers, or are recorded.
 class ActorTickHost final : public ScriptHost {
 public:
-    ActorTickHost(QuestWorld& world, std::uint32_t speaker, QuestTick& tick, double seconds, const DistanceFunction& distance)
-        : world_(world), speaker_(speaker), tick_(tick), seconds_(seconds), distance_(distance) {}
+    ActorTickHost(QuestWorld& world, std::uint32_t speaker, QuestTick& tick, double seconds, const DistanceFunction& distance,
+                  std::function<void()> take_writes)
+        : world_(world), speaker_(speaker), tick_(tick), seconds_(seconds), distance_(distance),
+          take_writes_(std::move(take_writes)) {}
 
     std::optional<ScriptValue> call_command(std::string_view name, const ScriptValue* target,
                                             const std::vector<ScriptValue>& arguments) override {
@@ -433,14 +460,25 @@ public:
             return ScriptValue::from_number(quest->has_entered(static_cast<unsigned>(arguments[1].number)) ? 1.0 : 0.0);
         if (command == "setstage" && quest && arguments.size() >= 2) {
             world_.set_stage(arguments[0].text, static_cast<unsigned>(arguments[1].number), tick_, distance_, 0);
+            take_writes_();
             return ScriptValue::from_number(0.0);
         }
         if (command == "startquest" && quest) {
             world_.begin(arguments[0].text, tick_, distance_, 0);
+            take_writes_();
             return ScriptValue::from_number(0.0);
         }
-        if (command == "sayto" && arguments.size() >= 2 && arguments[1].is_text)
-            return ScriptValue::from_number(world_.say(arguments[1].text, speaker_, tick_, distance_));
+        if (command == "sayto" && arguments.size() >= 2 && arguments[1].is_text) {
+            const auto seconds = world_.say(arguments[1].text, speaker_, listener_of(arguments[0]), tick_, distance_);
+            take_writes_();
+            return ScriptValue::from_number(seconds);
+        }
+        // `Say topic` has no listener: the line is for the player, as the game's subtitles show it.
+        if (command == "say" && !arguments.empty() && arguments[0].is_text) {
+            const auto seconds = world_.say(arguments[0].text, speaker_, kPlayerReference, tick_, distance_);
+            take_writes_();
+            return ScriptValue::from_number(seconds);
+        }
         if (command == "getdistance") {
             const auto from = target && target->is_text ? target->text : std::string("player");
             const auto to = !arguments.empty() && arguments[0].is_text ? arguments[0].text : std::string();
@@ -458,25 +496,41 @@ public:
     }
 
 private:
+    // The listener a SayTo names: the player, or the NPC base of the named reference (0 when it is not known).
+    std::uint32_t listener_of(const ScriptValue& value) const {
+        if (!value.is_text) return 0;
+        if (lower(value.text) == "player") return kPlayerReference;
+        return world_.reference_base(value.text).value_or(0);
+    }
+
     QuestWorld& world_;
     std::uint32_t speaker_;
     QuestTick& tick_;
     double seconds_;
     const DistanceFunction& distance_;
+    std::function<void()> take_writes_;
 };
 
 } // namespace
 
 void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double seconds_passed, const DistanceFunction& distance) {
     ScriptInterpreter interpreter(actor.ast);
+    actor.pending.clear();
     for (const auto& [key, value] : actor.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
-    ActorTickHost host(*this, actor.form_id, tick, seconds_passed, distance);
+    // Writes that other scripts made during this run (a stage the actor's SayTo set) replace what the run holds.
+    const auto take_writes = [&actor, &interpreter] {
+        for (const auto& [key, value] : actor.pending) interpreter.set_variable(key, ScriptValue::from_number(value));
+        actor.pending.clear();
+    };
+    ActorTickHost host(*this, actor.form_id, tick, seconds_passed, distance, take_writes);
     interpreter.run("gamemode", host);
     for (const auto& [key, value] : interpreter.variables()) {
         if (value.is_text) continue;
-        if (key.find('.') == std::string::npos) actor.variables[key] = value.number;
-        else write_foreign_variable(this, key, value.number);
+        if (key.find('.') != std::string::npos) write_foreign_variable(this, key, value.number);
+        else if (actor.pending.count(key) == 0) actor.variables[key] = value.number;
     }
+    for (const auto& [key, value] : actor.pending) actor.variables[key] = value;
+    actor.pending.clear();
 }
 
 void QuestWorld::set_stage(std::string_view editor_id, unsigned stage, QuestTick& tick, const DistanceFunction& distance, int depth) {

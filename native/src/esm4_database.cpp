@@ -729,6 +729,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             else if (tag == "QSTI" && subrecord_size >= 4) topic.quests.push_back(u32(value));
         } else if (is_response) {
             if (tag == "NAM1") response.text = read_zstring(value, subrecord_size);
+            else if (tag == "DATA" && subrecord_size >= 3) response.flags = value[2];
             else if (tag == "QSTI" && subrecord_size >= 4) response.quest = u32(value);
             else if (tag == "CTDA" && subrecord_size >= 24) {
                 QuestCondition condition;

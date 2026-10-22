@@ -944,6 +944,12 @@ public:
         return true;
     }
 
+    // Names the NPC a placed reference of the scene stands for, so SayTo to that reference is to that NPC.
+    void set_reference_base(const String& reference_name, const String& npc_editor_id) {
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        world_->set_reference_base(utf8_value(reference_name), game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u);
+    }
+
     // The player as a dialogue listener: the race (by editor ID) and sex that topic conditions read.
     void set_listener(const String& race_editor_id, bool female) {
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
@@ -994,6 +1000,7 @@ public:
         ClassDB::bind_method(D_METHOD("add_actor", "npc_editor_id"), &OblivionQuestWorld::add_actor);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_editor_id"), &OblivionQuestWorld::set_reference_base);
         ClassDB::bind_method(D_METHOD("select_package", "quest_editor_id", "npc_editor_id"), &OblivionQuestWorld::select_package);
         ClassDB::bind_method(D_METHOD("run_actor_event", "quest_editor_id", "npc_editor_id", "event", "detail", "distance"),
                              &OblivionQuestWorld::run_actor_event);

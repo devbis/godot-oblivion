@@ -446,7 +446,7 @@ int main(int argc, char** argv) {
                               << " replies=" << own << '\n';
                     for (const auto& response : topic.responses) {
                         if (!every_quest && response.quest != wanted_quest) continue;
-                        std::cout << "  reply: " << response.text << '\n';
+                        std::cout << "  reply: " << response.text << " [flags=0x" << std::hex << int(response.flags) << std::dec << "]\n";
                         for (const auto& condition : response.conditions)
                             std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << ' ' << condition.comparison
                                       << " function=" << condition.function_index << " param=" << std::hex << condition.parameter1

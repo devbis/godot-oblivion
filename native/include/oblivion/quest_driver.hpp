@@ -142,9 +142,18 @@ public:
     // StartQuest: enters the first stage of a quest that is not running yet. Does nothing otherwise.
     void begin(std::string_view editor_id, QuestTick& tick, const DistanceFunction& distance, int depth);
 
-    // SayTo: the first reply of the topic whose conditions hold for this speaker and the listener runs, and the
+    // SayTo: the first reply of the topic whose conditions hold for this speaker and listener runs, and the
     // seconds it takes to speak are returned (0 when nothing is said).
-    double say(std::string_view topic_editor_id, std::uint32_t speaker, QuestTick& tick, const DistanceFunction& distance);
+    double say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
+               const DistanceFunction& distance);
+
+    // The NPC base a placed reference of the scene stands for, so that SayTo to the reference names its base.
+    void set_reference_base(std::string_view reference, std::uint32_t base);
+    std::optional<std::uint32_t> reference_base(std::string_view reference) const;
+
+    // `Reference.variable = value` for an actor: the actor's own variable, taken by its GameMode run.
+    // Returns false when no actor stands for the reference.
+    bool set_actor_variable(std::string_view reference, std::string_view variable, double value);
 
     // The player as a listener: the race and sex that topic conditions read (GetIsRace, GetIsSex).
     void set_listener(std::uint32_t race, bool female) {
@@ -162,6 +171,7 @@ private:
         std::uint32_t form_id = 0;
         ScriptAst ast;
         std::map<std::string, double> variables;  // lowercase name, persists across ticks
+        std::map<std::string, double> pending;    // written by other scripts during a run, not yet taken by it
     };
 
     void run_actor_game_mode(ActorState& actor, QuestTick& tick, double seconds_passed, const DistanceFunction& distance);
@@ -169,6 +179,7 @@ private:
     ScriptCommandLookup lookup_;
     WorldAnswer answer_;
     TopicFinder find_topic_;
+    std::map<std::string, std::uint32_t> reference_bases_;  // lowercase reference name -> NPC base
     std::uint32_t listener_race_ = 0;
     bool listener_female_ = false;
     std::vector<std::unique_ptr<QuestDriver>> drivers_;
