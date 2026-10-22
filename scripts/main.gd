@@ -3247,7 +3247,7 @@ func _update_player_animation(delta: float) -> void:
 	if _player_skeleton == null:
 		return
 	var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
-	var is_on_floor_now := player.is_on_floor()
+	var is_on_floor_now: bool = player.is_on_floor() or player.is_stepping()
 	if not is_on_floor_now and player.velocity.y <= 0.1:
 		is_on_floor_now = _has_nearby_walkable_support()
 	if _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:

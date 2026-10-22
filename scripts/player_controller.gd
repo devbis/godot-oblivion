@@ -40,6 +40,7 @@ const CAMERA_COLLISION_MASK := 2
 const CAMERA_COLLISION_MARGIN := 0.08
 const CHAIN_COLLISION_LAYER := 16
 var _capture_mouse_on_focus := false
+var _stepper := CharacterStepper.new()
 var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
@@ -196,7 +197,11 @@ func _physics_process(delta: float) -> void:
 
 	_update_camera_clearance(delta)
 
-	if not is_on_floor():
+	# While a step is in progress the capsule rolls over a tread's rounded nose,
+	# where it is not on the floor yet. Gravity is held off so it can finish the step.
+	if _stepper.is_stepping():
+		velocity.y = 0.0
+	elif not is_on_floor():
 		velocity.y -= gravity_mps2 * delta
 	elif Input.is_action_just_pressed("jump"):
 		velocity.y = jump_speed_mps
@@ -215,82 +220,20 @@ func _physics_process(delta: float) -> void:
 	var requested_velocity := velocity
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
 	if (
-		horizontal_motion.length_squared() > 0.0001
-		and is_on_floor()
-		and _try_step_up(horizontal_motion)
+		(is_on_floor() or _stepper.is_stepping())
+		and _stepper.try_step_up(self, horizontal_motion, max_step_height_m, floor_max_angle)
 	):
 		return
+	_stepper.tick()
+	var was_on_floor := is_on_floor()
 	move_and_slide()
 	_push_contacted_chains(requested_velocity)
+	if (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
+		_stepper.try_step_down(self, max_step_height_m)
 
-func _try_step_up(horizontal_motion: Vector3) -> bool:
-	var original_transform := global_transform
-	var obstruction := KinematicCollision3D.new()
-	if not test_move(original_transform, horizontal_motion, obstruction, safe_margin):
-		return false
-	if obstruction.get_collider() is CharacterBody3D or obstruction.get_collider() is RigidBody3D:
-		return false
-	if obstruction.get_normal().dot(Vector3.UP) >= cos(floor_max_angle):
-		return false
-	# OpenMW ignores obstacles whose contact point is higher than the actor's
-	# configured step. The CharacterBody origin is at the feet, so this is the
-	# contact height relative to global_position.y.
-	if obstruction.get_position().y - global_position.y > max_step_height_m + safe_margin:
-		return false
-
-	# OpenMW's Stepper probes the available clearance above the actor, moves
-	# horizontally at that height, then traces down to a walkable surface. This
-	# keeps the rule independent of the stair mesh and also allows partial
-	# horizontal progress when another tread is reached in the same frame.
-	var step_height := max_step_height_m
-	var upward_motion := Vector3.UP * step_height
-	var ceiling := KinematicCollision3D.new()
-	if test_move(original_transform, upward_motion, ceiling, safe_margin):
-		step_height = maxf(0.0, ceiling.get_travel().y - safe_margin)
-	if step_height <= safe_margin * 2.0:
-		return false
-
-	var raised_transform := original_transform.translated(Vector3.UP * step_height)
-	var across_collision := KinematicCollision3D.new()
-	var horizontal_distance := horizontal_motion.length()
-	var horizontal_direction := horizontal_motion / horizontal_distance
-	var horizontal_progress := horizontal_motion
-	if test_move(raised_transform, horizontal_motion, across_collision, safe_margin):
-		horizontal_distance = clampf(across_collision.get_travel().dot(horizontal_direction), 0.0, horizontal_distance)
-		horizontal_distance = maxf(0.0, horizontal_distance - safe_margin)
-		horizontal_progress = horizontal_direction * horizontal_distance
-	if horizontal_distance <= safe_margin * 2.0:
-		return false
-
-	var across_transform := raised_transform.translated(horizontal_progress)
-	var downward_distance := step_height + floor_snap_length + horizontal_distance
-	var downward_motion := Vector3.DOWN * downward_distance
-	var landing := KinematicCollision3D.new()
-	if not test_move(across_transform, downward_motion, landing, safe_margin):
-		return false
-	if landing.get_collider() is CharacterBody3D or landing.get_collider() is RigidBody3D:
-		return false
-	if landing.get_normal().dot(Vector3.UP) < cos(floor_max_angle):
-		return false
-
-	global_transform = across_transform
-	var actual_landing := move_and_collide(downward_motion, false, safe_margin, true)
-	if (
-		actual_landing == null
-		or actual_landing.get_collider() is CharacterBody3D
-		or actual_landing.get_collider() is RigidBody3D
-		or actual_landing.get_normal().dot(Vector3.UP) < cos(floor_max_angle)
-	):
-		global_transform = original_transform
-		return false
-
-	# Refresh CharacterBody3D's floor state without advancing the actor again.
-	var horizontal_velocity := Vector3(velocity.x, 0.0, velocity.z)
-	velocity = Vector3.ZERO
-	move_and_slide()
-	velocity.x = horizontal_velocity.x
-	velocity.z = horizontal_velocity.z
-	return true
+## True while a step is in progress, so the actor is still treated as grounded.
+func is_stepping() -> bool:
+	return _stepper.is_stepping()
 
 func _push_contacted_chains(requested_velocity: Vector3) -> void:
 	var horizontal_velocity := Vector3(requested_velocity.x, 0.0, requested_velocity.z)

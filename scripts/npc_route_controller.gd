@@ -7,7 +7,7 @@ extends CharacterBody3D
 @export var gravity_mps2 := 9.8
 @export var arrival_distance := 0.08
 @export var waypoint_pause_seconds := 1.2
-@export var max_route_step_height_m := 0.35
+@export var max_route_step_height_m := 0.40
 @export var max_route_drop_m := 0.55
 @export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
 
@@ -20,6 +20,10 @@ var grounding_enabled := false
 var _pause_remaining := 0.0
 var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
+var _stepper := CharacterStepper.new()
+
+func _ready() -> void:
+	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
 
 func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause: float) -> void:
 	waypoints.clear()
@@ -53,7 +57,7 @@ func _physics_process(delta: float) -> void:
 			desired_horizontal_velocity = direction * speed
 
 	if grounding_enabled:
-		velocity.y = 0.0 if is_on_floor() else velocity.y - gravity_mps2 * delta
+		velocity.y = 0.0 if (is_on_floor() or _stepper.is_stepping()) else velocity.y - gravity_mps2 * delta
 		if (
 			desired_horizontal_velocity.length_squared() > 0.0001
 			and is_on_floor()
@@ -65,9 +69,21 @@ func _physics_process(delta: float) -> void:
 	velocity.x = desired_horizontal_velocity.x
 	velocity.z = desired_horizontal_velocity.z
 	var previous_position := global_position
-	move_and_slide()
+	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
+	var stepped := (
+		grounding_enabled
+		and (is_on_floor() or _stepper.is_stepping())
+		and _stepper.try_step_up(self, horizontal_motion, max_route_step_height_m, deg_to_rad(max_walkable_slope_degrees))
+	)
+	if not stepped:
+		_stepper.tick()
+		var was_on_floor := is_on_floor()
+		move_and_slide()
+		if grounding_enabled and (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
+			_stepper.try_step_down(self, max_route_step_height_m)
 	if grounding_enabled:
-		if is_on_floor():
+		# A step in progress is grounded too; otherwise a long descent would look like a fall.
+		if is_on_floor() or _stepper.is_stepping():
 			_last_grounded_position = global_position
 			_has_last_grounded_position = true
 		elif _has_last_grounded_position and global_position.y < _last_grounded_position.y - max_route_drop_m:
