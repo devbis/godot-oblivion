@@ -2,6 +2,7 @@
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
 #include "oblivion/command_table.hpp"
+#include "oblivion/script_interpreter.hpp"
 #include "oblivion/script_parser.hpp"
 
 #include <cctype>
@@ -71,11 +72,12 @@ int main(int argc, char** argv) {
     const bool show_script = argc == 4 && mode == "--script";
     const bool show_commands = argc == 4 && mode == "--commands";
     const bool check_arity = argc == 4 && mode == "--check-arity";
+    const bool run_script = (argc == 5 || argc == 6) && mode == "--run-script";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode;
+        || inspect_kf || single_argument_mode || run_script;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -157,6 +159,37 @@ int main(int argc, char** argv) {
                               << " male_model=" << (model_path ? *model_path : "")
                               << " female_model=" << (female_model_path ? *female_model_path : "") << '\n';
                 }
+                return 0;
+            }
+            if (run_script) {
+                // Runs one event with a host that implements no commands: the trace shows the path
+                // taken, and the list shows every command the script needs from the game.
+                class NothingImplementedHost final : public oblivion::ScriptHost {
+                public:
+                    std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
+                                                                      const std::vector<oblivion::ScriptValue>&) override {
+                        return std::nullopt;
+                    }
+                };
+                const auto* record = data.find_script(argv[3]);
+                if (!record) throw std::runtime_error("script not found: " + std::string(argv[3]));
+                const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[4], ".godot/openob/cache"));
+                const auto ast = oblivion::parse_script(record->source, lookup);
+                for (const auto& diagnostic : ast.diagnostics)
+                    std::cout << "parse line " << diagnostic.line << ": " << diagnostic.message << '\n';
+                const std::string event = argc == 6 ? argv[5] : "GameMode";
+                NothingImplementedHost host;
+                oblivion::ScriptInterpreter interpreter(ast);
+                const auto result = interpreter.run(event, host);
+                if (!result.found_block) {
+                    std::cout << "no block named " << event << '\n';
+                    return 1;
+                }
+                for (const auto& line : result.trace) std::cout << line << '\n';
+                std::cout << "unimplemented:";
+                for (const auto& name : result.unimplemented) std::cout << ' ' << name;
+                std::cout << "\nreturned=" << (result.returned ? "yes" : "no")
+                          << " step_limit_hit=" << (result.step_limit_hit ? "yes" : "no") << '\n';
                 return 0;
             }
             if (check_arity) {

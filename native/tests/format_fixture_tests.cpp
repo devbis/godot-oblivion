@@ -4,6 +4,7 @@
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
+#include "oblivion/script_interpreter.hpp"
 #include "oblivion/script_parser.hpp"
 
 #include <NifFile.hpp>
@@ -600,6 +601,69 @@ void test_command_table(const std::filesystem::path& directory) {
     CHECK(rebuilt.size() == 3 && rebuilt[2].name == "MessageBox");
 }
 
+// Records every command call and answers GetStage with 5; everything else is unimplemented.
+class RecordingHost final : public oblivion::ScriptHost {
+public:
+    std::vector<std::string> calls;
+    std::string last_target;
+
+    std::optional<oblivion::ScriptValue> call_command(std::string_view name, const oblivion::ScriptValue* target,
+                                                      const std::vector<oblivion::ScriptValue>& arguments) override {
+        calls.push_back(std::string(name) + "/" + std::to_string(arguments.size()));
+        if (target) last_target = target->text;
+        if (name == "GetStage") return oblivion::ScriptValue::from_number(5.0);
+        return std::nullopt;
+    }
+};
+
+void test_script_interpreter() {
+    const auto ast = oblivion::parse_script(
+        "scn Interp\n"
+        "short x\n"
+        "float y\n"
+        "begin GameMode\n"
+        "  set x to 2 + 3 * 2\n"
+        "  if x == 8\n"
+        "    GetStage QuestA\n"
+        "    set y to GetStage QuestA + 1\n"
+        "  else\n"
+        "    set y to 99\n"
+        "  endif\n"
+        "  Player.GetStage QuestB\n"
+        "  Activate mySelf\n"
+        "  Activate mySelf\n"
+        "  return\n"
+        "  set x to 0\n"
+        "end\n"
+        "begin OnActivate\n"
+        "  set y to 1\n"
+        "end\n");
+    CHECK(ast.diagnostics.empty());
+
+    oblivion::ScriptInterpreter interpreter(ast);
+    RecordingHost host;
+    const auto result = interpreter.run("gamemode", host);
+    CHECK(result.found_block && result.returned && !result.step_limit_hit);
+    CHECK(interpreter.variables().at("x").number == 8.0);
+    CHECK(interpreter.variables().at("y").number == 6.0);
+    CHECK(host.last_target == "Player");
+    // Activate is not implemented: it is reported once, not per call.
+    CHECK(result.unimplemented == std::vector<std::string>({"Activate"}));
+    CHECK(!result.trace.empty() && result.trace.back().find("return") != std::string::npos);
+
+    // Another block runs on its own event, and a missing event is reported as such.
+    RecordingHost other_host;
+    const auto activated = interpreter.run("OnActivate", other_host);
+    CHECK(activated.found_block && !activated.returned && interpreter.variables().at("y").number == 1.0);
+    CHECK(!interpreter.run("OnDeath", other_host).found_block);
+
+    // The step limit stops a run that would go on too long.
+    oblivion::ScriptInterpreter limited(ast);
+    limited.set_step_limit(3);
+    RecordingHost limited_host;
+    CHECK(limited.run("GameMode", limited_host).step_limit_hit);
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -640,6 +704,7 @@ int main() {
         test_script_lexer();
         test_script_parser();
         test_command_table(directory);
+        test_script_interpreter();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;
