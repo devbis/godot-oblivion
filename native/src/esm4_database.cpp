@@ -132,7 +132,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
         std::string_view("SLGM"), std::string_view("SGST"),
-        std::string_view("QUST"), std::string_view("SCPT"),
+        std::string_view("QUST"), std::string_view("SCPT"), std::string_view("DIAL"), std::string_view("INFO"),
     };
     return std::find(relevant_types.begin(), relevant_types.end(), type) != relevant_types.end();
 }

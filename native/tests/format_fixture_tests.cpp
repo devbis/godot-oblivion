@@ -990,6 +990,239 @@ void test_quest_driver() {
     CHECK(driver.state().variables.at("driver.ticks") == 2.0);
 }
 
+void test_quest_world() {
+    // Alpha's GameMode moves it to stage 1, whose result sets Beta to 2. Beta's GameMode then sees Alpha
+    // through GetStageDone and moves to 4, whose result starts Gamma. Gamma's stage 0 result runs once.
+    const auto quest_with = [](std::uint32_t form_id, std::string editor_id, std::vector<std::pair<unsigned, std::string>> results) {
+        oblivion::QuestRecord quest;
+        quest.form_id = form_id;
+        quest.editor_id = std::move(editor_id);
+        for (auto& [index, source] : results) {
+            oblivion::QuestStage stage;
+            stage.index = index;
+            oblivion::QuestStageEntry entry;
+            entry.result_source = std::move(source);
+            stage.entries.push_back(entry);
+            quest.stages.push_back(stage);
+        }
+        return quest;
+    };
+    const auto alpha = quest_with(0x800, "Alpha", {{1, "setstage Beta 2\n"}});
+    const auto beta = quest_with(0x810, "Beta", {{2, "Activate betaReady 1\n"}, {4, "startquest Gamma\n"}});
+    const auto gamma = quest_with(0x820, "Gamma", {{0, "Activate gammaStart 1\n"}});
+    oblivion::ScriptRecord alpha_script;
+    alpha_script.editor_id = "AlphaScript";
+    alpha_script.source =
+        "scn Alpha\n"
+        "begin GameMode\n"
+        "  if getstage Alpha == 0\n"
+        "    setstage Alpha 1\n"
+        "  endif\n"
+        "end\n";
+    oblivion::ScriptRecord beta_script;
+    beta_script.editor_id = "BetaScript";
+    beta_script.source =
+        "scn Beta\n"
+        "begin GameMode\n"
+        "  if getstage Beta == 2\n"
+        "    if getstagedone Alpha 1 == 1\n"
+        "      setstage Beta 4\n"
+        "    endif\n"
+        "  endif\n"
+        "end\n";
+    oblivion::ScriptRecord gamma_script;
+    gamma_script.editor_id = "GammaScript";
+    gamma_script.source = "scn Gamma\n";
+
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "getstage" || name == "getstagedone" || name == "setstage") return oblivion::ScriptCommandSignature{2, 2};
+        if (name == "startquest" || name == "Activate") return oblivion::ScriptCommandSignature{1, 2};
+        if (name == "getsecondspassed") return oblivion::ScriptCommandSignature{0, 0};
+        return std::nullopt;
+    };
+    oblivion::QuestWorld world(commands);
+    world.add(alpha, alpha_script);
+    world.add(beta, beta_script);
+    world.add(gamma, gamma_script);
+    CHECK(world.find("alpha") != nullptr && world.find_form(0x820) != nullptr && world.find("Missing") == nullptr);
+    CHECK(world.start("Alpha", 0).stage == 0);
+    CHECK(world.find("Beta")->stage() == 0 && !world.find("Beta")->has_entered(2));
+
+    const auto first = world.tick(0.1);
+    CHECK(world.find("Alpha")->stage() == 1);
+    CHECK(world.find("Beta")->stage() == 4);
+    CHECK(world.find("Beta")->has_entered(2) && world.find("Beta")->has_entered(4));
+    CHECK(world.find("Gamma")->stage() == 0);
+    bool saw_ready = false;
+    bool saw_start = false;
+    for (const auto& action : first.actions) {
+        if (!action.arguments.empty() && action.arguments[0].text == "betaReady") saw_ready = true;
+        if (!action.arguments.empty() && action.arguments[0].text == "gammaStart") saw_start = true;
+    }
+    CHECK(saw_ready && saw_start);
+    CHECK(first.stage_changes == std::vector<std::string>({"1", "2", "4", "0"}));
+
+    // Nothing is set again on later ticks, so the stage results do not run again.
+    const auto later = world.tick(0.1);
+    CHECK(later.stage_changes.empty() && later.actions.empty());
+
+    const auto unknown = world.start("Missing", 0);
+    CHECK(!unknown.parse_errors.empty());
+}
+
+void test_world_answers() {
+    // A low-health check reads GetAV of the player. Unanswered it reads 0, which is low; answered with full health it does not fire.
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x830;
+    quest.editor_id = "Health";
+    oblivion::QuestStage stage1;
+    stage1.index = 1;
+    oblivion::QuestStageEntry entry;
+    entry.result_source = "Activate healthLow 1\n";
+    stage1.entries.push_back(entry);
+    quest.stages = {stage1};
+    oblivion::ScriptRecord script;
+    script.editor_id = "HealthScript";
+    script.source =
+        "scn Health\n"
+        "begin GameMode\n"
+        "  if player.getav health < 40\n"
+        "    setstage Health 1\n"
+        "  endif\n"
+        "end\n";
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "getav") return oblivion::ScriptCommandSignature{1, 1};
+        if (name == "setstage") return oblivion::ScriptCommandSignature{2, 2};
+        if (name == "Activate") return oblivion::ScriptCommandSignature{1, 2};
+        return std::nullopt;
+    };
+
+    oblivion::QuestWorld unanswered(commands);
+    unanswered.add(quest, script);
+    unanswered.start("Health", 0);
+    unanswered.tick(0.1);
+    CHECK(unanswered.find("Health")->stage() == 1);
+
+    oblivion::QuestWorld answered(commands);
+    answered.set_answer([](std::string_view command, const oblivion::ScriptValue* target, const std::vector<oblivion::ScriptValue>& arguments) -> std::optional<oblivion::ScriptValue> {
+        if (command == "getav" && target && target->is_text && target->text == "player" && !arguments.empty() && arguments[0].text == "health")
+            return oblivion::ScriptValue::from_number(100.0);
+        return std::nullopt;
+    });
+    answered.add(quest, script);
+    answered.start("Health", 0);
+    answered.tick(0.1);
+    CHECK(answered.find("Health")->stage() == 0);
+}
+
+void test_cross_quest_variables() {
+    // Setter's stage 0 writes Holder's variable, then reads it back: the write reaches Holder's state and the read sees it.
+    oblivion::QuestRecord holder;
+    holder.form_id = 0x840;
+    holder.editor_id = "Holder";
+    oblivion::ScriptRecord holder_script;
+    holder_script.editor_id = "HolderScript";
+    holder_script.source = "scn Holder\nshort level\n";
+    holder_script.variables = {{1, 1, "level"}};
+
+    oblivion::QuestRecord setter;
+    setter.form_id = 0x850;
+    setter.editor_id = "Setter";
+    oblivion::QuestStage stage0;
+    stage0.index = 0;
+    oblivion::QuestStageEntry entry;
+    entry.result_source = "set Holder.level to 4\nif Holder.level == 4\n  Activate sawLevel 1\nendif\n";
+    stage0.entries.push_back(entry);
+    setter.stages = {stage0};
+    oblivion::ScriptRecord setter_script;
+    setter_script.editor_id = "SetterScript";
+    setter_script.source = "scn Setter\n";
+
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "Activate") return oblivion::ScriptCommandSignature{1, 2};
+        return std::nullopt;
+    };
+    oblivion::QuestWorld world(commands);
+    world.add(holder, holder_script);
+    world.add(setter, setter_script);
+    const auto started = world.start("Setter", 0);
+    CHECK(world.find("Holder")->state().variables.at("holder.level") == 4.0);
+    bool saw = false;
+    for (const auto& action : started.actions)
+        if (!action.arguments.empty() && action.arguments[0].text == "sawLevel") saw = true;
+    CHECK(saw);
+}
+
+void test_stage_writes_survive_game_mode() {
+    // GameMode sets `next` to 7 and then sets the stage; the stage's result sets it to 9. The value the stage set is the
+    // one that stays, so the GameMode's own write does not overwrite it when it ends.
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x860;
+    quest.editor_id = "Chain";
+    oblivion::QuestStage stage5;
+    stage5.index = 5;
+    oblivion::QuestStageEntry entry;
+    entry.result_source = "set Chain.next to 9\n";
+    stage5.entries.push_back(entry);
+    quest.stages = {stage5};
+    oblivion::ScriptRecord script;
+    script.editor_id = "ChainScript";
+    script.source =
+        "scn Chain\n"
+        "short next\n"
+        "begin GameMode\n"
+        "  if getstage Chain == 0\n"
+        "    set next to 7\n"
+        "    setstage Chain 5\n"
+        "  endif\n"
+        "end\n";
+    script.variables = {{1, 1, "next"}};
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "getstage") return oblivion::ScriptCommandSignature{2, 2};
+        if (name == "setstage") return oblivion::ScriptCommandSignature{2, 2};
+        return std::nullopt;
+    };
+    oblivion::QuestWorld world(commands);
+    world.add(quest, script);
+    world.start("Chain", 0);
+    world.tick(0.1);
+    CHECK(world.find("Chain")->stage() == 5);
+    CHECK(world.find("Chain")->state().variables.at("chain.next") == 9.0);
+}
+
+void test_short_circuit() {
+    // The right side of && and || is not evaluated when the left side decides: its command is never asked.
+    struct CountingHost final : oblivion::ScriptHost {
+        std::vector<std::string> asked;
+        std::optional<oblivion::ScriptValue> call_command(std::string_view name, const oblivion::ScriptValue*,
+                                                          const std::vector<oblivion::ScriptValue>&) override {
+            asked.push_back(std::string(name));
+            return oblivion::ScriptValue::from_number(1.0);
+        }
+    };
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "Probe") return oblivion::ScriptCommandSignature{0, 0};
+        return std::nullopt;
+    };
+    const auto ast = oblivion::parse_script(
+        "scn Short\n"
+        "begin GameMode\n"
+        "  if 0 == 1 && Probe\n"
+        "    set asked to 1\n"
+        "  endif\n"
+        "  if 1 == 1 || Probe\n"
+        "    set asked to asked + 1\n"
+        "  endif\n"
+        "  if 1 == 0 && Probe\n"
+        "    set asked to asked + 1\n"
+        "  endif\n"
+        "end\n", commands);
+    oblivion::ScriptInterpreter interpreter(ast);
+    CountingHost host;
+    interpreter.run("gamemode", host);
+    CHECK(host.asked.empty());
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -1038,6 +1271,11 @@ int main() {
         test_actor_package_event();
         test_quest_stage_actions(directory);
         test_quest_driver();
+        test_quest_world();
+        test_world_answers();
+        test_cross_quest_variables();
+        test_stage_writes_survive_game_mode();
+        test_short_circuit();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

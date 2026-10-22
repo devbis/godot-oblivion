@@ -106,8 +106,14 @@ const TEXTURE_FALLBACKS := {
 var data_reader: Object
 var current_cell: Dictionary = {}
 var quest_bridge := QuestStageBridge.new()
-## The running quest driver (OblivionQuestDriver), or null when no quest is running.
-var quest_driver: Object = null
+## The quests of the game running together (OblivionQuestWorld), or null before the first quest starts.
+var quest_world: Object = null
+## The quest whose packages drive the NPCs' routes: the first one started.
+var route_quest_editor_id := ""
+## Functions the quests asked for that nothing answers, reported once each.
+var _reported_unanswered: Dictionary = {}
+## Action lines of the quest bridge already reported, so a command asked on every tick is printed once.
+var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
 var _model_cache: Dictionary = {}
 var _physics_mesh_cache: Dictionary = {}
@@ -471,15 +477,16 @@ func _log_runtime_spawn_positions() -> void:
 	])
 
 func _physics_process(delta: float) -> void:
-	if quest_driver == null:
+	if quest_world == null:
 		return
-	var result: Dictionary = quest_driver.tick(delta, Callable(self, "_quest_distance"))
+	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
 	if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
 		_refresh_npc_routes()
 
-## Starts a quest driver at a stage (default 0). The driver then ticks every physics frame.
+## Starts a quest at a stage (default 0) in the quest world, which is created on the first start.
+## The world then ticks every physics frame, and every started quest runs its GameMode.
 func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	if data_reader == null or not data_reader.is_ready():
 		return PackedStringArray(["game data is not ready"])
@@ -487,10 +494,20 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	if not FileAccess.file_exists(executable_path):
 		return PackedStringArray(["Oblivion.exe not found at %s (set OBLIVION_EXE)" % executable_path])
 	var cache_dir := ProjectSettings.globalize_path("res://.godot/openob/cache")
-	quest_driver = data_reader.create_quest_driver(quest_editor_id, executable_path, cache_dir)
-	if quest_driver == null:
-		return PackedStringArray(["quest %s has no driver (missing quest or script)" % quest_editor_id])
-	var report := _apply_driver_result(quest_driver.start(stage, Callable(self, "_quest_distance")))
+	if quest_world == null:
+		quest_world = data_reader.create_quest_world(executable_path, cache_dir)
+		if quest_world == null:
+			return PackedStringArray(["quest world not created (command table of %s)" % executable_path])
+		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
+		# character creation's race and sex are read.
+		quest_world.set_listener("Argonian", false)
+		if not quest_world.add_actor("ValenDreth"):
+			print("OpenOB quest: actor ValenDreth has no script")
+	if quest_world.get_stage(quest_editor_id) < 0:
+		return PackedStringArray(["quest %s has no script" % quest_editor_id])
+	if route_quest_editor_id.is_empty():
+		route_quest_editor_id = quest_editor_id
+	var report := _apply_driver_result(quest_world.start(quest_editor_id, stage, Callable(self, "_quest_distance")))
 	_refresh_npc_routes()
 	return report
 
@@ -500,10 +517,17 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 		report.push_back("stage %s" % change)
 	for error_text: String in result.get("parse_errors", PackedStringArray()):
 		report.push_back("parse error " + error_text)
-	report.append_array(quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")))
-	var unanswered: PackedStringArray = result.get("unanswered", PackedStringArray())
-	if not unanswered.is_empty():
-		report.push_back("unanswered: " + ", ".join(unanswered))
+	# The same command comes back on every tick (a GameMode asks it each time); each distinct line is reported once.
+	for line: String in quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")):
+		if not _reported_bridge_lines.has(line):
+			_reported_bridge_lines[line] = true
+			report.push_back(line)
+	# A distance to a reference outside the loaded cell is far away by design (see _quest_distance), so it is not
+	# reported. Other functions the scene cannot answer come back on every tick; report each one only the first time.
+	for name: String in result.get("unanswered", PackedStringArray()):
+		if name != "getdistance" and not _reported_unanswered.has(name):
+			_reported_unanswered[name] = true
+			report.push_back("unanswered (first time): " + name)
 	return report
 
 ## Distance in game units between two named references of the loaded cell (or the player).
@@ -538,8 +562,8 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		return
 	var package: Dictionary = {}
 	var npc_id := str(actor.get("npc_editor_id", ""))
-	if quest_driver != null and not npc_id.is_empty():
-		package = quest_driver.select_package(npc_id)
+	if quest_world != null and not route_quest_editor_id.is_empty() and not npc_id.is_empty():
+		package = quest_world.select_package(route_quest_editor_id, npc_id)
 	actor["package"] = package
 	var waypoints: Array[Dictionary] = []
 	if not package.is_empty():
@@ -557,12 +581,12 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 ## The NPC reached the end of its package's route: run OnPackageDone on its script.
 func _on_actor_route_finished(actor_name: String) -> void:
 	for actor: Dictionary in _npc_actors:
-		if str(actor.get("name", "")) != actor_name or quest_driver == null:
+		if str(actor.get("name", "")) != actor_name or quest_world == null or route_quest_editor_id.is_empty():
 			continue
 		var package: Dictionary = actor.get("package", {})
 		if package.is_empty():
 			return
-		var result: Dictionary = quest_driver.run_actor_event(str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
+		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
 		if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
@@ -2503,7 +2527,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
 	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
-	if quest_driver == null:
+	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):
 			print("OpenOB quest: " + line)
 

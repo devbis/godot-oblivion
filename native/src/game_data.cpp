@@ -11,6 +11,12 @@
 #include <system_error>
 
 namespace oblivion {
+
+const DialogTopic* GameData::find_topic_by_editor_id(std::string_view editor_id) const {
+    for (const auto& [form_id, topic] : esm_.topics())
+        if (topic.editor_id == editor_id) return &topic;
+    return nullptr;
+}
 namespace {
 
 std::string lower_ascii(std::string value) {

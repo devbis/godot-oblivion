@@ -58,6 +58,34 @@ void usage(const char* executable) {
     std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --script EDID | --check-scripts | --parse-scripts | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
 }
 
+// Prints what driver ticks did, and totals the commands they asked for and the functions they could not answer.
+class TickReport {
+public:
+    void add(const oblivion::QuestTick& tick, const std::string& when) {
+        for (const auto& action : tick.actions) ++commands_[action.command];
+        for (const auto& name : tick.unanswered)
+            if (std::find(unanswered_.begin(), unanswered_.end(), name) == unanswered_.end()) unanswered_.push_back(name);
+        for (const auto& error : tick.parse_errors) std::cout << when << " parse " << error << '\n';
+        if (!tick.stage_changes.empty()) {
+            std::cout << when << " stages:";
+            for (const auto& change : tick.stage_changes) std::cout << ' ' << change;
+            std::cout << '\n';
+        }
+    }
+
+    void print_totals() const {
+        std::cout << "commands:";
+        for (const auto& [command, count] : commands_) std::cout << ' ' << command << 'x' << count;
+        std::cout << "\nunanswered:";
+        for (const auto& name : unanswered_) std::cout << ' ' << name;
+        std::cout << '\n';
+    }
+
+private:
+    std::map<std::string, std::size_t> commands_;
+    std::vector<std::string> unanswered_;
+};
+
 }
 
 int main(int argc, char** argv) {
@@ -82,6 +110,7 @@ int main(int argc, char** argv) {
     const bool show_source = argc == 5;
     const bool run_stage = argc == 6 && mode == "--run-stage";
     const bool tick_quest = argc == 7 && mode == "--tick-quest";
+    const bool tick_world = argc >= 7 && mode == "--tick-world";
     const bool show_topics = argc == 4 && mode == "--topics";
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
     const bool show_packages = (argc == 4 || argc == 5) && mode == "--packages";
@@ -93,7 +122,7 @@ int main(int argc, char** argv) {
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || show_topics || grep_sources || show_packages || package_done || run_topic;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || tick_world || show_topics || grep_sources || show_packages || package_done || run_topic;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -448,29 +477,48 @@ int main(int argc, char** argv) {
                 const auto seconds = std::stod(argv[5]);
                 const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[6], ".godot/openob/cache"));
                 oblivion::QuestDriver driver(*quest, *quest_script, lookup);
-                std::map<std::string, std::size_t> commands;
-                std::vector<std::string> unanswered;
-                const auto record = [&](const oblivion::QuestTick& tick, const std::string& when) {
-                    for (const auto& action : tick.actions) ++commands[action.command];
-                    for (const auto& name : tick.unanswered)
-                        if (std::find(unanswered.begin(), unanswered.end(), name) == unanswered.end()) unanswered.push_back(name);
-                    for (const auto& error : tick.parse_errors) std::cout << when << " parse " << error << '\n';
-                    if (!tick.stage_changes.empty()) {
-                        std::cout << when << " stages:";
-                        for (const auto& change : tick.stage_changes) std::cout << ' ' << change;
-                        std::cout << '\n';
-                    }
-                };
-                record(driver.start(0), "start");
+                TickReport report;
+                report.add(driver.start(0), "start");
                 for (int tick_index = 1; tick_index <= ticks; ++tick_index) {
                     const auto tick = driver.tick(seconds);
-                    record(tick, "tick " + std::to_string(tick_index));
+                    report.add(tick, "tick " + std::to_string(tick_index));
                 }
-                std::cout << "final stage " << driver.stage() << "; commands:";
-                for (const auto& [command, count] : commands) std::cout << ' ' << command << 'x' << count;
-                std::cout << "\nunanswered:";
-                for (const auto& name : unanswered) std::cout << ' ' << name;
-                std::cout << '\n';
+                std::cout << "final stage " << driver.stage() << "; ";
+                report.print_totals();
+                return 0;
+            }
+            if (tick_world) {
+                // Runs the quests named EDID:STAGE together, each started at its stage. Every quest with a script is
+                // registered, so a stage that sets or starts another quest reaches it. Distances are unknown, as in --tick-quest.
+                const auto ticks = std::stoi(argv[3]);
+                const auto seconds = std::stod(argv[4]);
+                const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[5], ".godot/openob/cache"));
+                oblivion::QuestWorld world(lookup);
+                world.set_answer(oblivion::answer_fresh_player);
+                world.set_topic_finder([&data](std::string_view editor_id) { return data.find_topic_by_editor_id(editor_id); });
+                // The player is an Argonian man here; the game's character creation decides the real one.
+                world.set_listener(data.find_form_id_by_editor_id("Argonian"), false);
+                for (const auto& [form_id, quest] : data.quests())
+                    if (const auto* quest_script = data.find_script(quest.script_form_id)) world.add(quest, *quest_script);
+                if (const auto* valen = data.find_npc_base(data.find_form_id_by_editor_id("ValenDreth")))
+                    if (const auto* valen_script = data.find_script(valen->script_form_id))
+                        world.add_actor(valen->form_id, *valen_script);
+                TickReport report;
+                std::vector<std::string> named;
+                for (int index = 6; index < argc; ++index) {
+                    const std::string spec = argv[index];
+                    const auto colon = spec.find(':');
+                    if (colon == std::string::npos) throw std::runtime_error("expected EDID:STAGE, got " + spec);
+                    named.push_back(spec.substr(0, colon));
+                    report.add(world.start(named.back(), static_cast<unsigned>(std::stoul(spec.substr(colon + 1)))), spec);
+                }
+                for (int tick_index = 1; tick_index <= ticks; ++tick_index)
+                    report.add(world.tick(seconds), "tick " + std::to_string(tick_index));
+                for (const auto& name : named) {
+                    const auto* driver = world.find(name);
+                    std::cout << name << " stage " << (driver ? driver->stage() : 0) << '\n';
+                }
+                report.print_totals();
                 return 0;
             }
             if (run_stage) {

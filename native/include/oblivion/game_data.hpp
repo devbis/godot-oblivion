@@ -40,6 +40,8 @@ public:
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const { return esm_.find_quest(editor_id); }
     [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const { return esm_.find_topic(form_id); }
     [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return esm_.topics(); }
+    // The topic with this editor ID. Topics are not in the editor-ID index, so this scans them.
+    [[nodiscard]] const DialogTopic* find_topic_by_editor_id(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return esm_.scripts(); }
     [[nodiscard]] std::vector<std::uint8_t> read_asset(std::string_view asset_path) const;
     [[nodiscard]] bool is_open() const noexcept { return opened_; }

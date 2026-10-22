@@ -16,13 +16,27 @@ std::string lower_text(std::string text) {
 // Records every command as an action and answers it with 0.
 class RecordingStageHost final : public ScriptHost {
 public:
-    RecordingStageHost(const QuestRecord& quest, unsigned stage, const ScriptRecord* quest_script, const QuestState& state)
-        : quest_(quest.form_id), stage_(stage), quest_script_(quest_script), state_(state), quest_key_(lower(quest.editor_id)) {}
+    RecordingStageHost(const QuestRecord& quest, unsigned stage, const ScriptRecord* quest_script, const QuestState& state,
+                       const ForeignVariableReader& read_foreign)
+        : quest_(quest.form_id), stage_(stage), quest_script_(quest_script), state_(state), quest_key_(lower(quest.editor_id)),
+          read_foreign_(read_foreign) {}
 
     std::vector<ScriptAction> actions;
 
     std::optional<ScriptValue> call_command(std::string_view name, const ScriptValue* target,
                                             const std::vector<ScriptValue>& arguments) override {
+        // `Quest.variable` with no arguments reads a quest variable: this quest's own, or another quest's.
+        if (target && target->is_text && arguments.empty()) {
+            if (lower(target->text) == quest_key_ && quest_script_) {
+                for (const auto& variable : quest_script_->variables) {
+                    if (lower(variable.name) != lower(std::string(name))) continue;
+                    const auto found = state_.variables.find(quest_key_ + "." + lower(variable.name));
+                    return ScriptValue::from_number(found == state_.variables.end() ? 0.0 : found->second);
+                }
+            } else if (read_foreign_) {
+                if (const auto value = read_foreign_(target->text, name)) return ScriptValue::from_number(*value);
+            }
+        }
         ScriptAction action;
         action.command = std::string(name);
         if (target) action.target = target->text;
@@ -59,40 +73,43 @@ private:
     const ScriptRecord* quest_script_;
     const QuestState& state_;
     std::string quest_key_;
+    const ForeignVariableReader& read_foreign_;
 };
 
 } // namespace
 
 std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned stage_index,
                                            const ScriptCommandLookup& lookup, const ScriptRecord* quest_script,
-                                           QuestState& state) {
+                                           QuestState& state, const ForeignVariableReader& read_foreign) {
     std::vector<StageEntryRun> runs;
     const QuestStage* stage = nullptr;
     for (const auto& candidate : quest.stages)
         if (candidate.index == stage_index) stage = &candidate;
     if (!stage) return runs;
 
-    // Fragments run with no script of their own; the interpreter only needs a script to outlive it.
-    const ScriptAst no_script;
-    ScriptInterpreter interpreter(no_script);
     const auto quest_prefix = lower_text(quest.editor_id) + ".";
     for (const auto& entry : stage->entries) {
         StageEntryRun run;
         run.completes = entry.completes;
         run.log_text = entry.log_text;
-        RecordingStageHost host(quest, stage_index, quest_script, state);
+        RecordingStageHost host(quest, stage_index, quest_script, state, read_foreign);
         run.conditions_hold = evaluate_conditions(entry.conditions, host, &run.missing_conditions);
         if (run.conditions_hold) {
-            // Quest variables set by earlier runs are visible to this fragment, and its writes are kept.
+            // Fragments run with no script of their own; the interpreter only needs a script to outlive it.
+            const ScriptAst no_script;
+            ScriptInterpreter interpreter(no_script);
+            // Quest variables are visible to this fragment, and its writes are kept.
             for (const auto& [key, value] : state.variables)
                 if (key.compare(0, quest_prefix.size(), quest_prefix) == 0) interpreter.set_variable(key, ScriptValue::from_number(value));
             const auto fragment = parse_fragment(entry.result_source, lookup);
             for (const auto& diagnostic : fragment.diagnostics)
                 run.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
             interpreter.run_body(fragment.statements, host);
-            for (const auto& [key, value] : interpreter.variables())
-                if (key.compare(0, quest_prefix.size(), quest_prefix) == 0 && value.is_text == false)
-                    state.variables[key] = value.number;
+            for (const auto& [key, value] : interpreter.variables()) {
+                if (value.is_text) continue;
+                if (key.compare(0, quest_prefix.size(), quest_prefix) == 0) state.variables[key] = value.number;
+                else if (key.find('.') != std::string::npos) run.foreign_writes.emplace_back(key, value.number);
+            }
             run.actions = std::move(host.actions);
         }
         runs.push_back(std::move(run));

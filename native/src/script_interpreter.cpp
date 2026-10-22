@@ -117,8 +117,20 @@ ScriptValue ScriptInterpreter::evaluate(const ScriptExpr& expr, RunState& state)
         return ScriptValue::from_number(number_of(expr.text));
     case ScriptExprKind::String:
         return ScriptValue::from_text(expr.text);
-    case ScriptExprKind::Name:
+    case ScriptExprKind::Name: {
+        // `Ref.name` written without a member call is a read of the ref's variable: a variable this run has set
+        // is used as it is, and anything else is a call on the ref, which the host answers.
+        const auto dot = expr.text.find('.');
+        if (dot != std::string::npos && variables_.find(lower(expr.text)) == variables_.end()) {
+            const auto target = ScriptValue::from_text(expr.text.substr(0, dot));
+            ScriptExpr member;
+            member.kind = ScriptExprKind::Call;
+            member.text = expr.text.substr(dot + 1);
+            member.line = expr.line;
+            return call(member, &target, state);
+        }
         return lookup_name(expr.text);
+    }
     case ScriptExprKind::Call:
         return call(expr, state.target, state);
     case ScriptExprKind::Member: {
@@ -131,11 +143,13 @@ ScriptValue ScriptInterpreter::evaluate(const ScriptExpr& expr, RunState& state)
         return ScriptValue::from_number(truthy(operand) ? 0.0 : 1.0);
     }
     case ScriptExprKind::Binary: {
-        const auto left = evaluate(expr.children[0], state);
-        const auto right = evaluate(expr.children[1], state);
         const auto& op = expr.text;
-        if (op == "&&") return ScriptValue::from_number(truthy(left) && truthy(right) ? 1.0 : 0.0);
-        if (op == "||") return ScriptValue::from_number(truthy(left) || truthy(right) ? 1.0 : 0.0);
+        const auto left = evaluate(expr.children[0], state);
+        // && and || decide from the left side when they can, so the right side (and any command in it) is not asked.
+        if (op == "&&" && !truthy(left)) return ScriptValue::from_number(0.0);
+        if (op == "||" && truthy(left)) return ScriptValue::from_number(1.0);
+        const auto right = evaluate(expr.children[1], state);
+        if (op == "&&" || op == "||") return ScriptValue::from_number(truthy(right) ? 1.0 : 0.0);
         if (op == "==" || op == "!=") {
             bool equal = false;
             if (left.is_text || right.is_text) equal = left.is_text && right.is_text && lower(left.text) == lower(right.text);

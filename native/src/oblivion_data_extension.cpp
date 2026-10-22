@@ -174,7 +174,7 @@ Dictionary action_to_dictionary(const oblivion::ScriptAction& action) {
 }
 
 // Forward declaration: the driver class is defined after the data class that creates it.
-class OblivionQuestDriver;
+class OblivionQuestWorld;
 
 class OblivionData final : public RefCounted {
     GDCLASS(OblivionData, RefCounted)
@@ -316,10 +316,9 @@ public:
 
     // Runs one stage of a quest and returns { "error": String, "runs": Array } where each run
     // describes an entry: whether its conditions hold, its log text, and the actions it requests.
-    // A quest driver for one quest of the loaded game. It keeps a reference to this data so the
-    // records it reads stay alive. Returns null when the quest or its script is missing.
-    Ref<OblivionQuestDriver> create_quest_driver(const String& quest_editor_id, const String& executable_path,
-                                                 const String& cache_dir) const;
+    // The quests of the loaded game, every one with a script, running together. It keeps a reference to this
+    // data so the records it reads stay alive. Returns null when the command table cannot be read.
+    Ref<OblivionQuestWorld> create_quest_world(const String& executable_path, const String& cache_dir) const;
 
     const oblivion::GameData* game_data() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -791,8 +790,7 @@ protected:
                                       "static_reference_radius", "tree_reference_radius"),
                              &OblivionData::find_exterior_region, DEFVAL(-1), DEFVAL(-1));
         ClassDB::bind_method(D_METHOD("find_cell", "editor_id"), &OblivionData::find_cell);
-        ClassDB::bind_method(D_METHOD("create_quest_driver", "quest_editor_id", "executable_path", "cache_dir"),
-                             &OblivionData::create_quest_driver);
+        ClassDB::bind_method(D_METHOD("create_quest_world", "executable_path", "cache_dir"), &OblivionData::create_quest_world);
         ClassDB::bind_method(D_METHOD("run_quest_stage", "quest_editor_id", "stage", "executable_path", "cache_dir"),
                              &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
@@ -904,35 +902,65 @@ private:
 };
 
 
-// Drives one quest of the loaded game: GameMode runs on each tick and stage results run when stages are set.
-// Results come back as Dictionaries; the caller applies the actions to the scene.
-class OblivionQuestDriver final : public RefCounted {
-    GDCLASS(OblivionQuestDriver, RefCounted)
+// The quests of the loaded game running together: GameMode of every started quest runs on each tick, and stage
+// results run when a stage is set, in this quest or another. Results come back as Dictionaries; the caller applies
+// the actions to the scene.
+class OblivionQuestWorld final : public RefCounted {
+    GDCLASS(OblivionQuestWorld, RefCounted)
 
 public:
-    // Starts the quest at a stage. `distance` is called as distance(from: String, to: String) and returns
+    // Starts a quest at a stage. `distance` is called as distance(from: String, to: String) and returns
     // a distance in game units, or null when the scene cannot answer.
-    Dictionary start(int64_t stage, const Callable& distance) {
-        return tick_to_dictionary(driver_->start(static_cast<unsigned>(stage), distance_function(distance)));
+    Dictionary start(const String& quest_editor_id, int64_t stage, const Callable& distance) {
+        return tick_to_dictionary(world_->start(utf8_value(quest_editor_id), static_cast<unsigned>(stage), distance_function(distance)));
     }
 
-    // Runs GameMode once after `seconds` have passed since the last tick.
+    // Runs GameMode of every started quest once after `seconds` have passed since the last tick.
     Dictionary tick(double seconds, const Callable& distance) {
-        return tick_to_dictionary(driver_->tick(seconds, distance_function(distance)));
+        return tick_to_dictionary(world_->tick(seconds, distance_function(distance)));
     }
 
-    int64_t get_stage() const { return static_cast<int64_t>(driver_->stage()); }
+    // The stage of a quest, or -1 when the quest is not in the world.
+    int64_t get_stage(const String& quest_editor_id) {
+        const auto* driver = world_->find(utf8_value(quest_editor_id));
+        return driver ? static_cast<int64_t>(driver->stage()) : -1;
+    }
 
-    // The package the NPC starts now, judged with this quest's stage. Empty when none holds.
-    Dictionary select_package(const String& npc_editor_id) const {
+    // A quest variable by name, or -1 when the quest is not in the world or does not declare it.
+    double get_variable(const String& quest_editor_id, const String& variable) {
+        const auto* driver = world_->find(utf8_value(quest_editor_id));
+        const auto value = driver ? driver->variable(utf8_value(variable)) : std::nullopt;
+        return value ? *value : -1.0;
+    }
+
+    // Registers an NPC whose script's GameMode runs on every tick. False when the NPC or its script is missing.
+    bool add_actor(const String& npc_editor_id) {
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        const auto form_id = game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u;
+        const auto* npc = game ? game->find_npc_base(form_id) : nullptr;
+        const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
+        if (!script) return false;
+        world_->add_actor(form_id, *script);
+        return true;
+    }
+
+    // The player as a dialogue listener: the race (by editor ID) and sex that topic conditions read.
+    void set_listener(const String& race_editor_id, bool female) {
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        world_->set_listener(game ? game->find_form_id_by_editor_id(utf8_value(race_editor_id)) : 0u, female);
+    }
+
+    // The package an NPC starts now, judged with the stage of the quest. Empty when none holds.
+    Dictionary select_package(const String& quest_editor_id, const String& npc_editor_id) {
         Dictionary result;
+        const auto* driver = world_->find(utf8_value(quest_editor_id));
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
         const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
-        if (!npc) return result;
+        if (!driver || !npc) return result;
         std::vector<const oblivion::AiPackageRecord*> packages;
         for (const auto package_id : npc->ai_package_form_ids)
             if (const auto* package = game->find_ai_package(package_id)) packages.push_back(package);
-        const auto* chosen = driver_->select_package(packages);
+        const auto* chosen = driver->select_package(packages);
         if (!chosen) return result;
         result["editor_id"] = utf8_text(chosen->editor_id);
         result["package_type"] = static_cast<int64_t>(chosen->package_type);
@@ -943,32 +971,37 @@ public:
         return result;
     }
 
-    // Runs an event of an NPC's script (for example OnPackageDone with the package name) on this quest.
-    Dictionary run_actor_event(const String& npc_editor_id, const String& event, const String& detail, const Callable& distance) {
+    // Runs an event of an NPC's script (for example OnPackageDone with the package name) on a quest.
+    Dictionary run_actor_event(const String& quest_editor_id, const String& npc_editor_id, const String& event,
+                               const String& detail, const Callable& distance) {
+        auto* driver = world_->find(utf8_value(quest_editor_id));
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
         const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
         const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
-        if (!script) return Dictionary();
-        return tick_to_dictionary(driver_->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
+        if (!driver || !script) return Dictionary();
+        return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
     }
 
-    void attach(const Ref<OblivionData>& owner, std::unique_ptr<oblivion::QuestDriver> driver) {
+    void attach(const Ref<OblivionData>& owner, std::unique_ptr<oblivion::QuestWorld> world) {
         owner_ = owner;
-        driver_ = std::move(driver);
+        world_ = std::move(world);
     }
 
     static void _bind_methods() {
-        ClassDB::bind_method(D_METHOD("start", "stage", "distance"), &OblivionQuestDriver::start);
-        ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestDriver::tick);
-        ClassDB::bind_method(D_METHOD("get_stage"), &OblivionQuestDriver::get_stage);
-        ClassDB::bind_method(D_METHOD("select_package", "npc_editor_id"), &OblivionQuestDriver::select_package);
-        ClassDB::bind_method(D_METHOD("run_actor_event", "npc_editor_id", "event", "detail", "distance"),
-                             &OblivionQuestDriver::run_actor_event);
+        ClassDB::bind_method(D_METHOD("start", "quest_editor_id", "stage", "distance"), &OblivionQuestWorld::start);
+        ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestWorld::tick);
+        ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
+        ClassDB::bind_method(D_METHOD("add_actor", "npc_editor_id"), &OblivionQuestWorld::add_actor);
+        ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
+        ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("select_package", "quest_editor_id", "npc_editor_id"), &OblivionQuestWorld::select_package);
+        ClassDB::bind_method(D_METHOD("run_actor_event", "quest_editor_id", "npc_editor_id", "event", "detail", "distance"),
+                             &OblivionQuestWorld::run_actor_event);
     }
 
 private:
     Ref<OblivionData> owner_;
-    std::unique_ptr<oblivion::QuestDriver> driver_;
+    std::unique_ptr<oblivion::QuestWorld> world_;
 
     static std::string utf8_value(const String& value) {
         const CharString text = value.utf8();
@@ -1004,34 +1037,32 @@ private:
     }
 };
 
-Ref<OblivionQuestDriver> OblivionData::create_quest_driver(const String& quest_editor_id, const String& executable_path,
-                                                           const String& cache_dir) const {
-    const CharString quest_value = quest_editor_id.utf8();
+Ref<OblivionQuestWorld> OblivionData::create_quest_world(const String& executable_path, const String& cache_dir) const {
     const CharString executable_value = executable_path.utf8();
     const CharString cache_value = cache_dir.utf8();
     const oblivion::GameData* game = game_data();
-    if (!game) return Ref<OblivionQuestDriver>();
-    const auto* quest = game->find_quest(quest_value.get_data());
-    if (!quest) return Ref<OblivionQuestDriver>();
-    const auto* script = game->find_script(quest->script_form_id);
-    if (!script) return Ref<OblivionQuestDriver>();
+    if (!game) return Ref<OblivionQuestWorld>();
     try {
         const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
-        Ref<OblivionQuestDriver> driver;
-        driver.instantiate();
-        driver->attach(Ref<OblivionData>(const_cast<OblivionData*>(this)),
-                       std::make_unique<oblivion::QuestDriver>(*quest, *script, oblivion::make_command_lookup(commands)));
-        return driver;
+        auto world = std::make_unique<oblivion::QuestWorld>(oblivion::make_command_lookup(commands));
+        world->set_answer(oblivion::answer_fresh_player);
+        world->set_topic_finder([game](std::string_view editor_id) { return game->find_topic_by_editor_id(editor_id); });
+        for (const auto& [form_id, quest] : game->quests())
+            if (const auto* script = game->find_script(quest.script_form_id)) world->add(quest, *script);
+        Ref<OblivionQuestWorld> result;
+        result.instantiate();
+        result->attach(Ref<OblivionData>(const_cast<OblivionData*>(this)), std::move(world));
+        return result;
     } catch (const std::exception& error) {
-        UtilityFunctions::push_error(String("quest driver: ") + utf8_text(error.what()));
-        return Ref<OblivionQuestDriver>();
+        UtilityFunctions::push_error(String("quest world: ") + utf8_text(error.what()));
+        return Ref<OblivionQuestWorld>();
     }
 }
 
 void register_oblivion_data_types(ModuleInitializationLevel level) {
     if (level != MODULE_INITIALIZATION_LEVEL_SCENE) return;
     ClassDB::register_class<OblivionData>();
-    ClassDB::register_class<OblivionQuestDriver>();
+    ClassDB::register_class<OblivionQuestWorld>();
 }
 
 void unregister_oblivion_data_types(ModuleInitializationLevel) {}

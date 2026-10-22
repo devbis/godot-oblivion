@@ -30,9 +30,10 @@ func apply_actions(actions: Array, cell: Dictionary, world: Node3D, transform_of
 	var references := _references_by_name(cell)
 	for action_value: Variant in actions:
 		var action: Dictionary = action_value
-		if str(action.get("command", "")).to_lower() == "setstage":
-			# Stage changes are applied by the quest driver itself; this line only records them.
-			report.push_back("  stage change handled by the quest driver")
+		var command := str(action.get("command", "")).to_lower()
+		if command == "setstage" or command == "startquest":
+			# Stage changes and quest starts are applied by the quest world itself; this line only records them.
+			report.push_back("  %s handled by the quest world" % command)
 			continue
 		report.push_back("  " + _apply_action(action, references, world, transform_of))
 	return report
