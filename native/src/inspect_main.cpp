@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     const bool inspect_kf = argc >= 4 && mode == "--kf-summary";
     const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets" || mode == "--parse-scripts"
         || mode == "--cell-actors" || mode == "--find-editor-id" || mode == "--list-editor-ids"
-        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts" || mode == "--parse-scripts" || mode == "--commands" || mode == "--check-arity");
+        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts" || mode == "--parse-scripts" || mode == "--commands" || mode == "--check-arity" || mode == "--quest");
     const bool list_assets = argc == 4 && mode == "--list-assets";
     const bool inspect_actors = argc == 4 && mode == "--cell-actors";
     const bool lookup_editor_id = argc == 4 && mode == "--find-editor-id";
@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
     const bool show_commands = argc == 4 && mode == "--commands";
     const bool check_arity = argc == 4 && mode == "--check-arity";
     const bool run_script = (argc == 5 || argc == 6) && mode == "--run-script";
+    const bool show_quest = argc == 4 && mode == "--quest";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
@@ -158,6 +159,31 @@ int main(int argc, char** argv) {
                               << " editor_id=" << (editor_id ? *editor_id : "?")
                               << " male_model=" << (model_path ? *model_path : "")
                               << " female_model=" << (female_model_path ? *female_model_path : "") << '\n';
+                }
+                return 0;
+            }
+            if (show_quest) {
+                // Prints the subrecords of a quest as read, to confirm their layout against the master.
+                const auto* quest = data.find_quest(argv[3]);
+                if (!quest) throw std::runtime_error("quest not found: " + std::string(argv[3]));
+                std::cout << quest->editor_id << " form=" << std::hex << std::setw(8) << std::setfill('0') << quest->form_id
+                          << std::dec << " script=" << std::hex << quest->script_form_id << std::dec
+                          << " flags=" << static_cast<unsigned>(quest->flags) << " priority=" << static_cast<unsigned>(quest->priority)
+                          << " stages=" << quest->stages.size() << '\n';
+                for (const auto& stage : quest->stages) {
+                    std::cout << "stage " << stage.index << '\n';
+                    for (const auto& entry : stage.entries) {
+                        std::cout << "  entry" << (entry.completes ? " completes" : "") << '\n';
+                        for (const auto& condition : entry.conditions)
+                            std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << " " << condition.comparison
+                                      << " function=" << condition.function_index << " opcode=" << std::hex
+                                      << (0x1000u + condition.function_index) << std::dec << " param=" << std::hex
+                                      << condition.parameter1 << std::dec << '\n';
+                        if (!entry.log_text.empty()) std::cout << "    log: " << entry.log_text << '\n';
+                        if (!entry.result_source.empty())
+                            std::cout << "    result: " << entry.result_source.size() << " bytes of source, "
+                                      << entry.result_references.size() << " references\n";
+                    }
                 }
                 return 0;
             }

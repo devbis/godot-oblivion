@@ -161,6 +161,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     record_type_names_.clear();
     script_by_id_.clear();
     script_id_by_editor_id_.clear();
+    quest_by_id_.clear();
+    quest_id_by_editor_id_.clear();
     record_type_index_.clear();
     references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
@@ -184,6 +186,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     }
     for (const auto& [form_id, script] : script_by_id_)
         script_id_by_editor_id_.try_emplace(lower_ascii(script.editor_id), form_id);
+    for (const auto& [form_id, quest] : quest_by_id_)
+        quest_id_by_editor_id_.try_emplace(lower_ascii(quest.editor_id), form_id);
     for (const auto& [form_id, editor_id] : base_editor_id_by_id_)
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
@@ -331,6 +335,16 @@ void Esm4Database::attach_references() {
     references_by_cell_id_.clear();
 }
 
+const QuestRecord* Esm4Database::find_quest(std::uint32_t form_id) const {
+    const auto it = quest_by_id_.find(form_id);
+    return it == quest_by_id_.end() ? nullptr : &it->second;
+}
+
+const QuestRecord* Esm4Database::find_quest(std::string_view editor_id) const {
+    const auto it = quest_id_by_editor_id_.find(lower_ascii(std::string(editor_id)));
+    return it == quest_id_by_editor_id_.end() ? nullptr : find_quest(it->second);
+}
+
 const ScriptRecord* Esm4Database::find_script(std::uint32_t form_id) const {
     const auto it = script_by_id_.find(form_id);
     return it == script_by_id_.end() ? nullptr : &it->second;
@@ -423,6 +437,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_land_texture = type == "LTEX";
     bool is_worldspace = type == "WRLD";
     bool is_script = type == "SCPT";
+    bool is_quest = type == "QUST";
+    QuestRecord quest;
+    quest.form_id = form_id;
     const bool is_item_model = type == "ARMO" || type == "CLOT" || type == "WEAP"
         || type == "HAIR" || type == "EYES" || type == "ALCH" || type == "AMMO"
         || type == "APPA" || type == "BOOK" || type == "INGR" || type == "KEYM"
@@ -481,6 +498,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_script) script.editor_id = text;
+            if (is_quest) quest.editor_id = text;
             if (is_outfit) outfit.editor_id = text;
             if (is_ai_package) ai_package.editor_id = text;
         } else if (tag == "FULL" && is_cell) {
@@ -633,6 +651,41 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             ai_package.location_type = static_cast<std::int32_t>(u32(value));
             ai_package.location_form_id = u32(value + 4);
             ai_package.location_radius = static_cast<std::int32_t>(u32(value + 8));
+        } else if (is_quest) {
+            // Stages start at INDX; each entry starts at QSDT and owns the CTDA, CNAM and
+            // result (SCTX, SCRO) subrecords that follow it, until the next QSDT or INDX.
+            if (tag == "FULL") {
+                quest.name = read_zstring(value, subrecord_size);
+            } else if (tag == "SCRI" && subrecord_size >= 4) {
+                quest.script_form_id = u32(value);
+            } else if (tag == "DATA" && subrecord_size >= 2) {
+                quest.flags = value[0];
+                quest.priority = value[1];
+            } else if (tag == "INDX" && subrecord_size >= 2) {
+                QuestStage stage;
+                stage.index = u16(value);
+                quest.stages.push_back(std::move(stage));
+            } else if (tag == "QSDT" && subrecord_size >= 1) {
+                if (quest.stages.empty()) quest.stages.push_back(QuestStage{});
+                quest.stages.back().entries.push_back(QuestStageEntry{});
+                quest.stages.back().entries.back().completes = value[0] != 0;
+            } else if (tag == "CTDA" && subrecord_size >= 24 && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
+                QuestCondition condition;
+                condition.operator_code = value[0];
+                condition.comparison = f32(value + 4);
+                condition.function_index = u16(value + 8);
+                condition.parameter1 = u32(value + 12);
+                condition.parameter2 = u32(value + 16);
+                quest.stages.back().entries.back().conditions.push_back(condition);
+            } else if (tag == "CNAM" && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
+                quest.stages.back().entries.back().log_text = read_zstring(value, subrecord_size);
+            } else if (tag == "SCTX" && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
+                quest.stages.back().entries.back().result_source.assign(reinterpret_cast<const char*>(value), subrecord_size);
+                while (!quest.stages.back().entries.back().result_source.empty() && quest.stages.back().entries.back().result_source.back() == '\0')
+                    quest.stages.back().entries.back().result_source.pop_back();
+            } else if (tag == "SCRO" && subrecord_size >= 4 && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
+                quest.stages.back().entries.back().result_references.push_back(u32(value));
+            }
         } else if (tag == "SCHR" && is_script && subrecord_size >= 20) {
             script.compiled_size = u32(value + 8);
             script.variable_count = u32(value + 12);
@@ -705,6 +758,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
     if (is_script)
         script_by_id_[form_id] = std::move(script);
+    if (is_quest)
+        quest_by_id_[form_id] = std::move(quest);
     record_type_by_id_[form_id] = intern_record_type(type);
     if (!base_editor_id.empty())
         base_editor_id_by_id_[form_id] = std::move(base_editor_id);

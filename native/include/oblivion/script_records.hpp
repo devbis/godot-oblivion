@@ -6,6 +6,42 @@
 
 namespace oblivion {
 
+// A CTDA condition. `function_index` is the command opcode minus 0x1000, so
+// function 58 is GetStage (checked against the command table); `parameter1` is
+// the form ID the condition is about, for GetStage the quest.
+struct QuestCondition {
+    std::uint8_t operator_code = 0;
+    float comparison = 0.0f;
+    std::uint16_t function_index = 0;
+    std::uint32_t parameter1 = 0;
+    std::uint32_t parameter2 = 0;
+};
+
+// One log entry of a stage (the QSDT group): its conditions, optional journal
+// text (CNAM), and the result script (SCTX source, SCRO references).
+struct QuestStageEntry {
+    bool completes = false;  // QSDT: the quest is complete after this entry
+    std::vector<QuestCondition> conditions;
+    std::string log_text;
+    std::string result_source;
+    std::vector<std::uint32_t> result_references;
+};
+
+struct QuestStage {
+    std::uint16_t index = 0;  // INDX
+    std::vector<QuestStageEntry> entries;
+};
+
+struct QuestRecord {
+    std::uint32_t form_id = 0;
+    std::string editor_id;
+    std::string name;
+    std::uint32_t script_form_id = 0;  // SCRI
+    std::uint8_t flags = 0;            // DATA, first byte
+    std::uint8_t priority = 0;         // DATA, second byte
+    std::vector<QuestStage> stages;
+};
+
 // One local variable declared by a script (SLSD followed by SCVR in the record).
 struct ScriptVariable {
     std::uint32_t index = 0;

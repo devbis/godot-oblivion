@@ -291,6 +291,31 @@ Bytes esm_fixture() {
     append(script_data, string_subrecord("SCTX", "scn FixtureScript\nshort fixtureFloat\nBegin GameMode\n  set fixtureFloat to 1\nEnd\n"));
     append(records, record("SCPT", 0x500, script_data));
 
+    // A quest with two stages: stage 10 has one entry with a GetStage condition, a journal
+    // line and a result script; stage 20 is completed without conditions.
+    Bytes quest_data;
+    append(quest_data, string_subrecord("EDID", "FixtureQuest"));
+    Bytes quest_flags;
+    u8(quest_flags, 1);
+    u8(quest_flags, 50);
+    subrecord(quest_data, "DATA", quest_flags);
+    Bytes condition(24, 0);
+    condition[0] = 0;
+    condition[8] = 58;  // function 58 = GetStage (opcode 0x103A)
+    for (int shift = 0; shift < 32; shift += 8) condition[12 + shift / 8] = static_cast<std::uint8_t>(0x100 >> shift);
+    Bytes comparison;
+    f32(comparison, 20.0f);
+    for (std::size_t i = 0; i < 4; ++i) condition[4 + i] = comparison[i];
+    subrecord(quest_data, "INDX", Bytes{10, 0});
+    subrecord(quest_data, "QSDT", Bytes{0});
+    subrecord(quest_data, "CTDA", condition);
+    append(quest_data, string_subrecord("CNAM", "Start the quest"));
+    append(quest_data, string_subrecord("SCTX", "setstage FixtureQuest 20\n"));
+    append(quest_data, id_subrecord("SCRO", 0x101));
+    subrecord(quest_data, "INDX", Bytes{20, 0});
+    subrecord(quest_data, "QSDT", Bytes{1});
+    append(records, record("QUST", 0x600, quest_data));
+
     // Cell 0x20's references precede its CELL record, so they must still attach.
     Bytes first_children;
     append(first_children, cell_record(0x10, "StartCell", "Fixture Start"));
@@ -352,6 +377,19 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(script->referenced_form_ids == std::vector<std::uint32_t>({0x100}));
     CHECK(script->source == "scn FixtureScript\nshort fixtureFloat\nBegin GameMode\n  set fixtureFloat to 1\nEnd\n");
     CHECK(database.find_script("missing") == nullptr);
+
+    const auto* quest = database.find_quest("fixturequest");
+    CHECK(quest != nullptr && quest == database.find_quest(0x600));
+    CHECK(quest->flags == 1 && quest->priority == 50);
+    CHECK(quest->stages.size() == 2 && quest->stages[0].index == 10 && quest->stages[1].index == 20);
+    const auto& entry = quest->stages[0].entries.at(0);
+    CHECK(!entry.completes && entry.log_text == "Start the quest");
+    CHECK(entry.conditions.size() == 1 && entry.conditions[0].function_index == 58);
+    CHECK(entry.conditions[0].comparison == 20.0f && entry.conditions[0].parameter1 == 0x100);
+    CHECK(entry.result_source == "setstage FixtureQuest 20\n" && entry.result_references == std::vector<std::uint32_t>({0x101}));
+    CHECK(quest->stages[1].entries.size() == 1 && quest->stages[1].entries[0].completes);
+    CHECK(quest->stages[1].entries[0].conditions.empty());
+    CHECK(database.find_quest("missing-quest") == nullptr);
 
     CHECK(database.find_record_type(0x400) != nullptr && *database.find_record_type(0x400) == "GMST");
     CHECK(database.float_game_settings().count("fFixtureSetting") == 1);

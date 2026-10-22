@@ -136,6 +136,8 @@ public:
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
+    [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const;
+    [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const;
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return cells_; }
     [[nodiscard]] std::size_t record_count() const noexcept { return record_count_; }
     // References whose owning cell never appeared in the file. They are kept
@@ -170,6 +172,8 @@ private:
     std::map<std::uint32_t, std::vector<PlacedReference>> references_by_cell_id_;
     std::map<std::uint32_t, std::uint32_t> cell_by_reference_id_;
     std::map<std::uint32_t, ScriptRecord> script_by_id_;
+    std::map<std::uint32_t, QuestRecord> quest_by_id_;
+    std::map<std::string, std::uint32_t> quest_id_by_editor_id_;
     std::map<std::string, std::uint32_t> script_id_by_editor_id_;
     std::map<std::string, float> float_game_settings_;
     std::size_t record_count_ = 0;

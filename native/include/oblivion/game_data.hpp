@@ -35,6 +35,8 @@ public:
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
+    [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const { return esm_.find_quest(form_id); }
+    [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const { return esm_.find_quest(editor_id); }
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return esm_.scripts(); }
     [[nodiscard]] std::vector<std::uint8_t> read_asset(std::string_view asset_path) const;
     [[nodiscard]] bool is_open() const noexcept { return opened_; }
