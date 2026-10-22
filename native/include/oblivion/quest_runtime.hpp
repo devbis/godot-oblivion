@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "oblivion/script_interpreter.hpp"
+#include "oblivion/esm4_database.hpp"
 #include "oblivion/script_records.hpp"
 
 namespace oblivion {
@@ -22,5 +23,10 @@ bool condition_joins_next(std::uint8_t code);
 // not implement are false and are named in `unimplemented`, once each.
 bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHost& host,
                          std::vector<std::string>* unimplemented = nullptr);
+
+// The package EvaluatePackage starts: the first package, in the actor's PKID order, whose
+// conditions hold. Returns null when none holds. Unanswered conditions count as false.
+const AiPackageRecord* select_package(const std::vector<const AiPackageRecord*>& packages, ScriptHost& host,
+                                      std::vector<std::string>* unanswered = nullptr);
 
 } // namespace oblivion

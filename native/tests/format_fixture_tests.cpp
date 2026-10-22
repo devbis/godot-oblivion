@@ -794,6 +794,35 @@ void test_quest_conditions() {
     CHECK(missing == std::vector<std::string>({"condition 365"}));
 }
 
+void test_package_selection() {
+    // Packages are chosen by the quest stage: the first whose condition holds starts.
+    oblivion::AiPackageRecord walk_early;
+    walk_early.editor_id = "WalkEarly";
+    oblivion::QuestCondition at_fifteen;
+    at_fifteen.function_index = 58;
+    at_fifteen.parameter1 = 0x100;
+    at_fifteen.comparison = 15.0f;
+    walk_early.conditions = {at_fifteen};
+    oblivion::AiPackageRecord walk_late;
+    walk_late.editor_id = "WalkLate";
+    oblivion::QuestCondition at_twenty = at_fifteen;
+    at_twenty.comparison = 20.0f;
+    walk_late.conditions = {at_twenty};
+    oblivion::AiPackageRecord always;
+    always.editor_id = "Always";
+    const std::vector<const oblivion::AiPackageRecord*> packages{&walk_late, &walk_early, &always};
+
+    StageHost host;
+    host.stage = 15;
+    CHECK(oblivion::select_package(packages, host) == &walk_early);
+    host.stage = 20;
+    CHECK(oblivion::select_package(packages, host) == &walk_late);
+    host.stage = 3;
+    CHECK(oblivion::select_package(packages, host) == &always);
+    // With only conditional packages and no match, nothing is selected.
+    CHECK(oblivion::select_package({&walk_early}, host) == nullptr);
+}
+
 void test_quest_stage_actions(const std::filesystem::path& directory) {
     // The fixture quest: stage 10 has a GetStage(0x100) == 20 entry that does not hold at 10, and
     // no-condition entries are checked in the ESM test. Here stage 20's completing entry runs.
@@ -958,6 +987,7 @@ int main() {
         test_event_blocks_by_target();
         test_script_fragment();
         test_quest_conditions();
+        test_package_selection();
         test_quest_stage_actions(directory);
         test_quest_driver();
         test_nif_mesh_decoder();

@@ -668,6 +668,14 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             npc.inventory.push_back({u32(value), static_cast<std::int32_t>(u32(value + 4))});
         } else if (tag == "PKID" && is_npc_base && subrecord_size >= 4) {
             npc.ai_package_form_ids.push_back(u32(value));
+        } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {
+            QuestCondition condition;
+            condition.operator_code = value[0];
+            condition.comparison = f32(value + 4);
+            condition.function_index = u16(value + 8);
+            condition.parameter1 = u32(value + 12);
+            condition.parameter2 = u32(value + 16);
+            ai_package.conditions.push_back(condition);
         } else if (tag == "PKDT" && is_ai_package) {
             if (subrecord_size >= 8) {
                 ai_package.flags = u32(value);

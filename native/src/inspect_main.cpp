@@ -4,6 +4,7 @@
 #include "oblivion/command_table.hpp"
 #include "oblivion/quest_runtime.hpp"
 #include "oblivion/quest_driver.hpp"
+#include "oblivion/quest_runtime.hpp"
 #include "oblivion/quest_stage.hpp"
 #include "oblivion/script_interpreter.hpp"
 #include "oblivion/script_parser.hpp"
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
     const bool tick_quest = argc == 7 && mode == "--tick-quest";
     const bool show_topics = argc == 4 && mode == "--topics";
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
-    const bool show_packages = argc == 4 && mode == "--packages";
+    const bool show_packages = (argc == 4 || argc == 5) && mode == "--packages";
     const bool survey_conditions = argc == 3 && mode == "--survey-conditions";
     const bool find_placed = argc == 5 && mode == "--find-placed";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
@@ -252,11 +253,36 @@ int main(int argc, char** argv) {
                 return 0;
             }
             if (show_packages) {
+                // With a stage, also prints the package EvaluatePackage picks when Charactergen is in that stage.
+                class StageAnswerHost final : public oblivion::ScriptHost {
+                public:
+                    std::uint32_t quest = 0;
+                    double stage = 0;
+                    std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
+                                                                      const std::vector<oblivion::ScriptValue>&) override {
+                        return std::nullopt;
+                    }
+                    std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1, std::uint32_t) override {
+                        if (function_index == 58 && parameter1 == quest) return stage;
+                        return std::nullopt;
+                    }
+                };
                 // AI packages of an NPC base record, in the order of its PKID list.
                 const auto npc_id = data.find_form_id_by_editor_id(argv[3]);
                 const auto* npc = data.find_npc_base(npc_id);
                 if (!npc) throw std::runtime_error("NPC not found: " + std::string(argv[3]));
                 const auto* npc_script = data.find_script(npc->script_form_id);
+                std::vector<const oblivion::AiPackageRecord*> ordered;
+                for (const auto package_id : npc->ai_package_form_ids)
+                    if (const auto* package = data.find_ai_package(package_id)) ordered.push_back(package);
+                if (argc == 5) {
+                    const auto* quest = data.find_quest("CharacterGen");
+                    StageAnswerHost host;
+                    host.quest = quest ? quest->form_id : 0;
+                    host.stage = std::stod(argv[4]);
+                    const auto* chosen = oblivion::select_package(ordered, host);
+                    std::cout << "stage " << argv[4] << ": evp picks " << (chosen ? chosen->editor_id : std::string("nothing")) << '\n';
+                }
                 std::cout << argv[3] << " form=" << std::hex << npc_id << std::dec << " script=" << (npc_script ? npc_script->editor_id : std::string("none"))
                           << " packages=" << npc->ai_package_form_ids.size() << '\n';
                 for (const auto package_id : npc->ai_package_form_ids) {
@@ -276,6 +302,10 @@ int main(int argc, char** argv) {
                               << " type=" << static_cast<unsigned>(package->package_type) << " flags=0x" << std::hex << package->flags << std::dec
                               << " location_type=" << package->location_type << " location=" << location_name
                               << " radius=" << package->location_radius << '\n';
+                    for (const auto& condition : package->conditions)
+                        std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << ' ' << condition.comparison
+                                  << " function=" << condition.function_index << " param=" << std::hex << condition.parameter1
+                                  << std::dec << " param2=" << condition.parameter2 << '\n';
                 }
                 return 0;
             }

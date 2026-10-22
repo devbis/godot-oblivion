@@ -97,6 +97,7 @@ struct AiPackageRecord {
     std::int32_t location_type = -1;
     std::uint32_t location_form_id = 0;
     std::int32_t location_radius = 0;
+    std::vector<QuestCondition> conditions;  // CTDA: the package starts only when these hold
 };
 
 struct CellRecord {

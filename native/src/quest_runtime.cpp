@@ -55,4 +55,13 @@ bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHo
     return all;
 }
 
+const AiPackageRecord* select_package(const std::vector<const AiPackageRecord*>& packages, ScriptHost& host,
+                                      std::vector<std::string>* unanswered) {
+    for (const auto* package : packages) {
+        if (!package) continue;
+        if (evaluate_conditions(package->conditions, host, unanswered)) return package;
+    }
+    return nullptr;
+}
+
 } // namespace oblivion
