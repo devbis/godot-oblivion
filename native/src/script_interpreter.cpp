@@ -35,18 +35,24 @@ ScriptInterpreter::ScriptInterpreter(const ScriptAst& script) : script_(script) 
 }
 
 ScriptRunResult ScriptInterpreter::run(std::string_view event, ScriptHost& host, const ScriptValue* target) {
-    ScriptRunResult result;
     const auto wanted = lower(event);
     for (const auto& block : script_.blocks) {
         if (lower(block.name) != wanted) continue;
+        auto result = run_body(block.body, host, target);
         result.found_block = true;
-        RunState state;
-        state.host = &host;
-        state.target = target;
-        state.result = &result;
-        run_statements(block.body, state);
-        break;
+        return result;
     }
+    return ScriptRunResult{};
+}
+
+ScriptRunResult ScriptInterpreter::run_body(const std::vector<ScriptStmt>& body, ScriptHost& host, const ScriptValue* target) {
+    ScriptRunResult result;
+    steps_ = 0;
+    RunState state;
+    state.host = &host;
+    state.target = target;
+    state.result = &result;
+    run_statements(body, state);
     return result;
 }
 

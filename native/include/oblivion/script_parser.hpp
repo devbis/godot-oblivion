@@ -5,6 +5,8 @@
 #include <optional>
 #include <string_view>
 
+#include <vector>
+
 #include "oblivion/script_ast.hpp"
 
 namespace oblivion {
@@ -17,6 +19,15 @@ struct ScriptCommandSignature {
 
 // Looks a command up by name (or short name); nullopt when the name is not a command.
 using ScriptCommandLookup = std::function<std::optional<ScriptCommandSignature>(std::string_view name)>;
+
+// A fragment is a statement list without a header or blocks, such as a quest
+// stage's result script. Diagnostics are reported as for scripts.
+struct ScriptFragment {
+    std::vector<ScriptStmt> statements;
+    std::vector<ScriptDiagnostic> diagnostics;
+};
+
+ScriptFragment parse_fragment(std::string_view source, const ScriptCommandLookup& lookup = {});
 
 // Parses classic TES4 script source into an AST. With a lookup, only known
 // commands take arguments, and never more than the table allows. Without one,

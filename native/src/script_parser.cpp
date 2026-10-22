@@ -37,6 +37,13 @@ public:
     Parser(std::vector<ScriptToken> tokens, const ScriptCommandLookup& lookup)
         : tokens_(std::move(tokens)), lookup_(lookup) {}
 
+    ScriptFragment parse_fragment() {
+        ScriptFragment fragment;
+        fragment.statements = parse_statements(std::vector<std::string_view>{});
+        fragment.diagnostics = std::move(diagnostics_);
+        return fragment;
+    }
+
     ScriptAst parse() {
         ScriptAst ast;
         while (true) {
@@ -443,6 +450,10 @@ private:
 
 ScriptAst parse_script(std::string_view source, const ScriptCommandLookup& lookup) {
     return Parser(tokenize_script(source), lookup).parse();
+}
+
+ScriptFragment parse_fragment(std::string_view source, const ScriptCommandLookup& lookup) {
+    return Parser(tokenize_script(source), lookup).parse_fragment();
 }
 
 } // namespace oblivion

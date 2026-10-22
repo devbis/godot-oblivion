@@ -61,6 +61,10 @@ public:
     // Runs the first block whose name matches `event`, case-insensitively.
     ScriptRunResult run(std::string_view event, ScriptHost& host, const ScriptValue* target = nullptr);
 
+    // Runs a statement list on its own, such as a quest stage's result script. Variables are
+    // the script's; names that are not variables resolve to text for the host.
+    ScriptRunResult run_body(const std::vector<ScriptStmt>& body, ScriptHost& host, const ScriptValue* target = nullptr);
+
     const std::map<std::string, ScriptValue>& variables() const { return variables_; }
     void set_variable(const std::string& name, ScriptValue value) { variables_[lower(name)] = std::move(value); }
 

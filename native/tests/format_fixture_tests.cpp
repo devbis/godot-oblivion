@@ -702,6 +702,27 @@ void test_script_interpreter() {
     CHECK(limited.run("GameMode", limited_host).step_limit_hit);
 }
 
+void test_script_fragment() {
+    // A stage result has no header: its statements run as they are.
+    const auto fragment = oblivion::parse_fragment(
+        "set counter to 2\n"
+        "if counter == 2\n"
+        "  Player.Kill\n"
+        "endif\n"
+        "end\n"
+        "set counter to 5\n");
+    CHECK(fragment.diagnostics.size() == 1 && fragment.diagnostics[0].line == 5);
+    CHECK(fragment.statements.size() == 3);
+
+    const oblivion::ScriptAst no_script;
+    oblivion::ScriptInterpreter interpreter(no_script);
+    RecordingHost host;
+    const auto result = interpreter.run_body(fragment.statements, host);
+    CHECK(interpreter.variables().at("counter").number == 5.0);
+    CHECK(result.unimplemented == std::vector<std::string>({"Kill"}));
+    CHECK(host.last_target == "Player");
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -743,6 +764,7 @@ int main() {
         test_script_parser();
         test_command_table(directory);
         test_script_interpreter();
+        test_script_fragment();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;
