@@ -15,6 +15,7 @@ add_subdirectory("${NIFLY_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/nifly")
 
 add_library(oblivion_data_core STATIC
     src/bsa_archive.cpp
+    src/command_table.cpp
     src/esm4_database.cpp
     src/game_data.cpp
     src/nif_mesh.cpp

@@ -1,4 +1,5 @@
 #include "oblivion/bsa_archive.hpp"
+#include "oblivion/command_table.hpp"
 #include "oblivion/esm4_database.hpp"
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
@@ -491,6 +492,114 @@ void test_script_parser() {
     CHECK(unclosed.diagnostics.size() == 1 && unclosed.diagnostics[0].line == 1);
 }
 
+// A PE32 image with three sections and a three-record command table: SetStage
+// (String, optional Integer), GetStage (no parameters) and MessageBox (one String).
+// The records are laid out the way the real executable stores them.
+Bytes command_table_executable() {
+    Bytes file(0x1000, 0);
+    const auto put32 = [&](std::size_t offset, std::uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8) file[offset + shift / 8] = static_cast<std::uint8_t>(value >> shift);
+    };
+    const auto put16 = [&](std::size_t offset, std::uint16_t value) {
+        file[offset] = static_cast<std::uint8_t>(value);
+        file[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    constexpr std::uint32_t image_base = 0x400000;
+    file[0] = 'M';
+    file[1] = 'Z';
+    put32(0x3C, 0x80);
+    file[0x80] = 'P';
+    file[0x81] = 'E';
+    put16(0x80 + 4 + 2, 3);     // NumberOfSections
+    put16(0x80 + 4 + 16, 0xE0); // SizeOfOptionalHeader
+    const std::size_t optional = 0x80 + 24;
+    put16(optional, 0x10B);     // PE32
+    put32(optional + 28, image_base);
+    const std::size_t sections = optional + 0xE0;
+    const std::array<std::array<std::uint32_t, 4>, 3> layout{{
+        {0x1000, 0x400, 0x400, 0},  // .text (unused)
+        {0x2000, 0x400, 0x800, 0},  // .rdata: strings
+        {0x3000, 0x400, 0xC00, 0},  // .data: command records and parameter tables
+    }};
+    for (std::size_t index = 0; index < layout.size(); ++index) {
+        const auto header = sections + 40 * index;
+        put32(header + 8, layout[index][1]);   // VirtualSize
+        put32(header + 12, layout[index][0]);  // VirtualAddress
+        put32(header + 16, layout[index][1]);  // SizeOfRawData
+        put32(header + 20, layout[index][2]);  // PointerToRawData
+    }
+    const auto text_at = [&](std::size_t offset, std::string_view text) {
+        for (std::size_t i = 0; i < text.size(); ++i) file[0x800 + offset + i] = static_cast<std::uint8_t>(text[i]);
+    };
+    const std::uint32_t rdata = image_base + 0x2000;
+    text_at(0x00, std::string("SetStage\0"));
+    text_at(0x20, std::string("GetStage\0"));
+    text_at(0x40, std::string("MessageBox\0"));
+    text_at(0x60, std::string("String\0"));
+    text_at(0x80, std::string("Integer\0"));
+    const std::uint32_t data = image_base + 0x3000;
+    const std::size_t records = 0xC00;
+    const std::size_t set_stage_params = 0x200;
+    const std::size_t message_params = 0x280;
+    const auto record = [&](std::size_t index, std::uint32_t name, std::uint32_t opcode, std::uint16_t count, std::uint32_t params) {
+        const auto at = records + 40 * index;
+        put32(at + 0, name);
+        put32(at + 8, opcode);
+        put16(at + 18, count);
+        put32(at + 20, params);
+    };
+    record(0, rdata + 0x00, 0x1171, 2, data + set_stage_params);
+    record(1, rdata + 0x20, 0x1172, 0, 0);
+    record(2, rdata + 0x40, 0x1000, 1, data + message_params);
+    // Parameter records: type name address, type id, optional flag.
+    put32(records + set_stage_params + 0, rdata + 0x60);
+    put32(records + set_stage_params + 4, 0);
+    put32(records + set_stage_params + 8, 0);
+    put32(records + set_stage_params + 12, rdata + 0x80);
+    put32(records + set_stage_params + 16, 1);
+    put32(records + set_stage_params + 20, 1);
+    put32(records + message_params + 0, rdata + 0x60);
+    put32(records + message_params + 4, 0);
+    put32(records + message_params + 8, 0);
+    // The bytes after the last record are zero, which ends the run.
+    return file;
+}
+
+void test_command_table(const std::filesystem::path& directory) {
+    const auto executable = command_table_executable();
+    const auto commands = oblivion::read_command_table(executable);
+    CHECK(commands.size() == 3);
+    CHECK(commands[0].name == "SetStage" && commands[0].opcode == 0x1171);
+    CHECK(commands[0].parameters.size() == 2);
+    CHECK(commands[0].parameters[0].type_name == "String" && !commands[0].parameters[0].optional);
+    CHECK(commands[0].parameters[1].type_name == "Integer" && commands[0].parameters[1].optional);
+    CHECK(commands[1].name == "GetStage" && commands[1].parameters.empty());
+    CHECK(commands[2].name == "MessageBox" && commands[2].parameters.size() == 1);
+
+    const auto lookup = oblivion::make_command_lookup(commands);
+    const auto set_stage = lookup("setstage");
+    CHECK(set_stage && set_stage->required_arguments == 1 && set_stage->max_arguments == 2);
+    CHECK(lookup("GetStage") && lookup("GetStage")->max_arguments == 0);
+    CHECK(!lookup("NoSuchCommand"));
+    // MessageBox takes button labels after the message, so its arguments are not capped.
+    CHECK(lookup("MessageBox") && lookup("MessageBox")->max_arguments > 1000);
+
+    // The first load reads the executable and writes the cache; the second uses it.
+    const auto exe_path = directory / "fixture.exe";
+    write_bytes(exe_path, executable);
+    const auto cache_dir = directory / "cache";
+    const auto first = oblivion::load_command_table(exe_path, cache_dir);
+    const auto cache_file = oblivion::command_table_cache_path(cache_dir, executable);
+    CHECK(std::filesystem::exists(cache_file));
+    const auto second = oblivion::load_command_table(exe_path, cache_dir);
+    CHECK(first.size() == second.size() && second[0].name == "SetStage" && second[0].parameters[1].optional);
+
+    // A damaged cache is rebuilt rather than trusted.
+    write_bytes(cache_file, Bytes{'b', 'a', 'd'});
+    const auto rebuilt = oblivion::load_command_table(exe_path, cache_dir);
+    CHECK(rebuilt.size() == 3 && rebuilt[2].name == "MessageBox");
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -530,6 +639,7 @@ int main() {
         test_loose_assets(directory);
         test_script_lexer();
         test_script_parser();
+        test_command_table(directory);
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

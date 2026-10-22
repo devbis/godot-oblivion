@@ -1,6 +1,7 @@
 #include "oblivion/script_parser.hpp"
 
 #include <cctype>
+#include <climits>
 #include <utility>
 #include <vector>
 
@@ -33,7 +34,8 @@ ScriptExpr make_binary(std::string op, ScriptExpr lhs, ScriptExpr rhs) {
 
 class Parser {
 public:
-    explicit Parser(std::vector<ScriptToken> tokens) : tokens_(std::move(tokens)) {}
+    Parser(std::vector<ScriptToken> tokens, const ScriptCommandLookup& lookup)
+        : tokens_(std::move(tokens)), lookup_(lookup) {}
 
     ScriptAst parse() {
         ScriptAst ast;
@@ -73,6 +75,7 @@ public:
 
 private:
     std::vector<ScriptToken> tokens_;
+    const ScriptCommandLookup& lookup_;
     std::size_t position_ = 0;
     std::vector<ScriptDiagnostic> diagnostics_;
 
@@ -313,22 +316,32 @@ private:
         return parse_postfix();
     }
 
+    // `ref.name` is a command call when the name is a command, and a variable of
+    // another reference otherwise. An unknown name followed by arguments is an error.
     ScriptExpr parse_postfix() {
         auto target = parse_primary(true);
-        if (!is_operator(peek(), ".")) return target;
+        if (!is_operator(peek(), ".") || peek(1).kind != ScriptTokenKind::Identifier) return target;
         const auto line = peek().line;
         advance();
-        ScriptExpr call;
-        call.kind = ScriptExprKind::Call;
-        call.line = line;
-        call.text = expect_identifier();
-        call.children = parse_arguments(line);
-        ScriptExpr member;
-        member.kind = ScriptExprKind::Member;
-        member.line = target.line;
-        member.children.push_back(std::move(target));
-        member.children.push_back(std::move(call));
-        return member;
+        const auto name = peek().text;
+        advance();
+        if (const auto signature = command_signature(name)) {
+            ScriptExpr call;
+            call.kind = ScriptExprKind::Call;
+            call.line = line;
+            call.text = name;
+            call.children = parse_arguments(line, signature->max_arguments);
+            ScriptExpr member;
+            member.kind = ScriptExprKind::Member;
+            member.line = target.line;
+            member.children.push_back(std::move(target));
+            member.children.push_back(std::move(call));
+            return member;
+        }
+        if (target.kind != ScriptExprKind::Name || starts_argument(line))
+            throw SyntaxError{line, "'" + name + "' is not a command"};
+        target.text += "." + name;
+        return target;
     }
 
     // A name followed by arguments on the same line is a command call.
@@ -364,10 +377,11 @@ private:
             advance();
             ScriptExpr expr;
             expr.line = token.line;
-            if (allow_arguments && starts_argument(peek(), token.line)) {
+            const auto signature = allow_arguments ? command_signature(token.text) : std::nullopt;
+            if (signature && starts_argument(token.line)) {
                 expr.kind = ScriptExprKind::Call;
                 expr.text = token.text;
-                expr.children = parse_arguments(token.line);
+                expr.children = parse_arguments(token.line, signature->max_arguments);
             } else {
                 expr.kind = ScriptExprKind::Name;
                 expr.text = token.text;
@@ -386,20 +400,39 @@ private:
         throw SyntaxError{token.line, describe(token)};
     }
 
-    static bool starts_argument(const ScriptToken& token, std::size_t line) {
+    // A command takes arguments only when the lookup knows it; without a lookup,
+    // any name takes the arguments that follow it on the same line.
+    std::optional<ScriptCommandSignature> command_signature(std::string_view name) const {
+        if (!lookup_) return ScriptCommandSignature{0, SIZE_MAX};
+        return lookup_(name);
+    }
+
+    bool starts_argument(std::size_t line) const {
+        const auto& token = peek();
         if (token.line != line) return false;
         if (token.kind == ScriptTokenKind::Identifier || token.kind == ScriptTokenKind::Number ||
             token.kind == ScriptTokenKind::String)
             return true;
-        return token.kind == ScriptTokenKind::Operator && token.text == "(";
+        if (token.kind == ScriptTokenKind::Operator && token.text == "(") return true;
+        // A negative literal such as `SetFactionRank Faction -1`.
+        return token.kind == ScriptTokenKind::Operator && token.text == "-" && peek(1).kind == ScriptTokenKind::Number
+            && peek(1).line == line;
     }
 
     // Arguments are primaries without nested command calls; parentheses group
-    // anything more complex. A comma between arguments is optional.
-    std::vector<ScriptExpr> parse_arguments(std::size_t line) {
+    // anything more complex. A comma between arguments is optional. At most
+    // `limit` arguments are taken, so the rest of the line stays for the caller.
+    std::vector<ScriptExpr> parse_arguments(std::size_t line, std::size_t limit) {
         std::vector<ScriptExpr> arguments;
-        while (starts_argument(peek(), line)) {
-            arguments.push_back(parse_primary(false));
+        while (arguments.size() < limit && starts_argument(line)) {
+            if (is_operator(peek(), "-")) {
+                advance();
+                auto number = parse_primary(false);
+                number.text = "-" + number.text;
+                arguments.push_back(std::move(number));
+            } else {
+                arguments.push_back(parse_primary(false));
+            }
             if (is_operator(peek(), ",")) advance();
         }
         return arguments;
@@ -408,8 +441,8 @@ private:
 
 } // namespace
 
-ScriptAst parse_script(std::string_view source) {
-    return Parser(tokenize_script(source)).parse();
+ScriptAst parse_script(std::string_view source, const ScriptCommandLookup& lookup) {
+    return Parser(tokenize_script(source), lookup).parse();
 }
 
 } // namespace oblivion

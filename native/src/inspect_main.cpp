@@ -1,14 +1,18 @@
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
+#include "oblivion/command_table.hpp"
 #include "oblivion/script_parser.hpp"
 
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <algorithm>
 #include <array>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <string>
 #include <unordered_map>
 
 #include <Animation.hpp>
@@ -17,6 +21,32 @@
 #include <Nodes.hpp>
 
 namespace {
+
+// Collects every command call (name and argument count) in a statement tree.
+std::string lower_name(std::string text) {
+    for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+void collect_calls(const oblivion::ScriptExpr& expr, std::vector<const oblivion::ScriptExpr*>& calls) {
+    if (expr.kind == oblivion::ScriptExprKind::Call) calls.push_back(&expr);
+    for (const auto& child : expr.children) collect_calls(child, calls);
+}
+
+void collect_calls(const std::vector<oblivion::ScriptStmt>& statements, std::vector<const oblivion::ScriptExpr*>& calls);
+
+void collect_calls(const oblivion::ScriptStmt& statement, std::vector<const oblivion::ScriptExpr*>& calls) {
+    for (const auto& child : statement.children) collect_calls(child, calls);
+    for (const auto& branch : statement.branches) {
+        collect_calls(branch.condition, calls);
+        collect_calls(branch.body, calls);
+    }
+    collect_calls(statement.else_body, calls);
+}
+
+void collect_calls(const std::vector<oblivion::ScriptStmt>& statements, std::vector<const oblivion::ScriptExpr*>& calls) {
+    for (const auto& statement : statements) collect_calls(statement, calls);
+}
 
 void usage(const char* executable) {
     std::cerr << "Usage: " << executable << " <Oblivion Data directory> [cell EDID | --cell-actors cell EDID | --find-editor-id EDID | --list-editor-ids prefix | --gmst-prefix prefix | --script EDID | --check-scripts | --parse-scripts | --asset path | --extract asset output | --nif-summary path ... | --rig-summary path ... | --kf-summary path ... | --list-assets prefix]\n";
@@ -30,17 +60,19 @@ int main(int argc, char** argv) {
     const bool inspect_nif = argc >= 4 && mode == "--nif-summary";
     const bool inspect_rig = argc >= 4 && mode == "--rig-summary";
     const bool inspect_kf = argc >= 4 && mode == "--kf-summary";
-    const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets"
+    const bool single_argument_mode = argc == 4 && (mode == "--asset" || mode == "--list-assets" || mode == "--parse-scripts"
         || mode == "--cell-actors" || mode == "--find-editor-id" || mode == "--list-editor-ids"
-        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts" || mode == "--parse-scripts");
+        || mode == "--gmst-prefix" || mode == "--script" || mode == "--check-scripts" || mode == "--parse-scripts" || mode == "--commands" || mode == "--check-arity");
     const bool list_assets = argc == 4 && mode == "--list-assets";
     const bool inspect_actors = argc == 4 && mode == "--cell-actors";
     const bool lookup_editor_id = argc == 4 && mode == "--find-editor-id";
     const bool list_editor_ids = argc == 4 && mode == "--list-editor-ids";
     const bool list_game_settings = argc == 4 && mode == "--gmst-prefix";
     const bool show_script = argc == 4 && mode == "--script";
+    const bool show_commands = argc == 4 && mode == "--commands";
+    const bool check_arity = argc == 4 && mode == "--check-arity";
     const bool check_scripts = argc == 3 && mode == "--check-scripts";
-    const bool parse_scripts = argc == 3 && mode == "--parse-scripts";
+    const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
         || inspect_kf || single_argument_mode;
@@ -62,14 +94,15 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (parse_scripts) {
+            const auto lookup = oblivion::make_command_lookup(oblivion::load_command_table(argv[3], ".godot/openob/cache"));
             std::size_t scripts_with_errors = 0;
             std::size_t shown = 0;
             for (const auto& [form_id, script] : data.scripts()) {
-                const auto ast = oblivion::parse_script(script.source);
+                const auto ast = oblivion::parse_script(script.source, lookup);
                 if (ast.diagnostics.empty()) continue;
                 ++scripts_with_errors;
                 for (const auto& diagnostic : ast.diagnostics) {
-                    if (shown++ >= 40) break;
+                    ++shown;
                     std::cout << script.editor_id << " line " << diagnostic.line << ": " << diagnostic.message << '\n';
                 }
             }
@@ -123,6 +156,50 @@ int main(int argc, char** argv) {
                               << " editor_id=" << (editor_id ? *editor_id : "?")
                               << " male_model=" << (model_path ? *model_path : "")
                               << " female_model=" << (female_model_path ? *female_model_path : "") << '\n';
+                }
+                return 0;
+            }
+            if (check_arity) {
+                // Compares the argument counts the parser inferred with the executable's command table.
+                const auto commands = oblivion::load_command_table(argv[3], ".godot/openob/cache");
+                const auto lookup = oblivion::make_command_lookup(commands);
+                std::size_t calls = 0, unknown = 0, mismatched = 0, shown = 0;
+                for (const auto& [form_id, script] : data.scripts()) {
+                    const auto ast = oblivion::parse_script(script.source, lookup);
+                    std::vector<const oblivion::ScriptExpr*> found;
+                    for (const auto& block : ast.blocks) collect_calls(block.body, found);
+                    for (const auto* call : found) {
+                        ++calls;
+                        const auto signature = lookup(call->text);
+                        if (!signature) {
+                            ++unknown;
+                            continue;
+                        }
+                        const auto given = call->children.size();
+                        if (given >= signature->required_arguments && given <= signature->max_arguments) continue;
+                        ++mismatched;
+                        if (shown++ < 30)
+                            std::cout << script.editor_id << " line " << call->line << ": " << call->text << " given " << given
+                                      << ", expects " << signature->required_arguments << ".." << signature->max_arguments << '\n';
+                    }
+                }
+                std::cout << "calls=" << calls << " unknown_commands=" << unknown << " arity_mismatches=" << mismatched << '\n';
+                return 0;
+            }
+            if (show_commands) {
+                // The table is read from the executable once and then kept under the project cache.
+                const auto commands = oblivion::load_command_table(argv[3], ".godot/openob/cache");
+                std::cout << commands.size() << " commands";
+                if (!commands.empty())
+                    std::cout << ", opcodes " << std::hex << commands.front().opcode << ".." << commands.back().opcode << std::dec;
+                std::cout << '\n';
+                for (std::size_t index = 0; index < commands.size() && index < 8; ++index) {
+                    const auto& command = commands[index];
+                    std::cout << std::hex << command.opcode << std::dec << ' ' << command.name << " (" << command.short_name << ")"
+                              << (command.needs_parent ? " parent" : "");
+                    for (const auto& parameter : command.parameters)
+                        std::cout << ' ' << parameter.type_name << (parameter.optional ? "?" : "");
+                    std::cout << '\n';
                 }
                 return 0;
             }
