@@ -7,6 +7,9 @@ extends CharacterBody3D
 @export var gravity_mps2 := 9.8
 @export var arrival_distance := 0.08
 @export var waypoint_pause_seconds := 1.2
+@export var max_route_step_height_m := 0.35
+@export var max_route_drop_m := 0.55
+@export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
 
 var waypoints: Array[Vector3] = []
 var waypoint_speeds: Array[float] = []
@@ -15,6 +18,8 @@ var loops_route := false
 var is_walking := false
 var grounding_enabled := false
 var _pause_remaining := 0.0
+var _last_grounded_position := Vector3.ZERO
+var _has_last_grounded_position := false
 
 func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause: float) -> void:
 	waypoints.clear()
@@ -27,6 +32,9 @@ func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause:
 	waypoint_index = 0
 	velocity = Vector3.ZERO
 	is_walking = false
+	if grounding_enabled:
+		_last_grounded_position = global_position
+		_has_last_grounded_position = true
 	set_physics_process(grounding_enabled or not waypoints.is_empty())
 
 func _physics_process(delta: float) -> void:
@@ -46,15 +54,50 @@ func _physics_process(delta: float) -> void:
 
 	if grounding_enabled:
 		velocity.y = 0.0 if is_on_floor() else velocity.y - gravity_mps2 * delta
+		if (
+			desired_horizontal_velocity.length_squared() > 0.0001
+			and is_on_floor()
+			and not _has_walkable_floor_ahead(desired_horizontal_velocity, delta)
+		):
+			desired_horizontal_velocity = Vector3.ZERO
 	else:
 		velocity.y = 0.0
 	velocity.x = desired_horizontal_velocity.x
 	velocity.z = desired_horizontal_velocity.z
 	var previous_position := global_position
 	move_and_slide()
+	if grounding_enabled:
+		if is_on_floor():
+			_last_grounded_position = global_position
+			_has_last_grounded_position = true
+		elif _has_last_grounded_position and global_position.y < _last_grounded_position.y - max_route_drop_m:
+			global_position = _last_grounded_position
+			velocity = Vector3.ZERO
+			_pause_remaining = maxf(_pause_remaining, waypoint_pause_seconds)
 	is_walking = (
 		desired_horizontal_velocity.length_squared() > 0.0001
 		and Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length_squared() > 0.0001
+	)
+
+func _has_walkable_floor_ahead(horizontal_velocity: Vector3, delta: float) -> bool:
+	var probe_position := global_position + Vector3(horizontal_velocity.x, 0.0, horizontal_velocity.z) * delta
+	var query := PhysicsRayQueryParameters3D.create(
+		probe_position + Vector3.UP * (max_route_step_height_m + 0.1),
+		probe_position - Vector3.UP * (max_route_drop_m + 0.1),
+		2,
+		[get_rid()]
+	)
+	query.collide_with_areas = false
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty():
+		return false
+	var floor_position: Vector3 = result.get("position", probe_position)
+	var floor_normal: Vector3 = result.get("normal", Vector3.UP)
+	var floor_delta := floor_position.y - global_position.y
+	return (
+		floor_delta <= max_route_step_height_m
+		and floor_delta >= -max_route_drop_m
+		and floor_normal.dot(Vector3.UP) >= cos(deg_to_rad(max_walkable_slope_degrees))
 	)
 
 func _advance_waypoint() -> void:
