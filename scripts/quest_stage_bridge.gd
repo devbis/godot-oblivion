@@ -103,8 +103,20 @@ func _play_dialogue_audio(action: Dictionary, arguments: Array, speaker_editor_i
 		speaker_form_id,
 		str(arguments[3]),
 		str(action.get("target", "")),
-		int(arguments[2])
+		int(arguments[2]),
+		_dialogue_face_expression(int(arguments[4])) if arguments.size() > 4 else "",
+		clampf(float(arguments[5]) / 100.0, 0.0, 1.0) if arguments.size() > 5 else 0.0
 	)
+
+
+func _dialogue_face_expression(emotion_type: int) -> String:
+	match emotion_type:
+		1: return "Anger"
+		3: return "Fear"
+		4: return "Sad"
+		5: return "Happy"
+		6: return "Surprise"
+		_: return ""
 
 
 func _move_to(target: String, arguments: Array, references: Dictionary, world: Node3D, transform_of: Callable, label: String) -> String:

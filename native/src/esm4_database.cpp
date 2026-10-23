@@ -760,6 +760,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 // Each TRDT starts a response; the NAM1 that follows is that response's text.
                 DialogResponseLine line;
                 line.number = subrecord_size >= 13 ? value[12] : static_cast<std::uint8_t>(response.lines.size() + 1);
+                if (subrecord_size >= 16) {
+                    line.emotion_type = u32(value);
+                    line.emotion_value = static_cast<std::int32_t>(u32(value + 4));
+                }
                 response.lines.push_back(std::move(line));
             } else if (tag == "NAM1") {
                 auto text = read_zstring(value, subrecord_size);

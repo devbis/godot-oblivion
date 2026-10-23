@@ -51,6 +51,8 @@ struct QuestRecord {
 // One spoken response of an INFO: TRDT's response number and the NAM1 text that follows it.
 struct DialogResponseLine {
     std::uint8_t number = 0;
+    std::uint32_t emotion_type = 0;              // TRDT: TES4 EmotionType (neutral, anger, fear, ...)
+    std::int32_t emotion_value = 0;              // TRDT: expression strength, 0..100
     std::string text;
     bool has_text = false;
 };

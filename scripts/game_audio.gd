@@ -2,6 +2,8 @@ extends Node
 ## Loads original Oblivion audio from the installed BSA archives and provides
 ## positional playback for locomotion, dialogue, equipment and world effects.
 
+const FaceGenData := preload("res://scripts/facegen_data.gd")
+
 const FOOTSTEP_GROUPS := ["earth", "grass", "metal", "snow", "stone", "water", "wood"]
 # Actual voice directories shipped in Oblivion's base voice archives. NPC race
 # does not always match its voice type (for example, Valen Dreth uses High Elf).
@@ -20,8 +22,11 @@ var _animation_poll_remaining := 0.0
 var _weapon_state_initialized := false
 var _last_weapon_form_id := 0
 var _observed_animations: Dictionary = {}
+var _dialogue_players: Dictionary = {}
 var _npc_female_cache: Dictionary = {}
 var _missing_voice_warnings: Dictionary = {}
+var _invalid_lip_warnings: Dictionary = {}
+var _reported_lip_files: Dictionary = {}
 var _last_world_loading := false
 var _last_interaction_toast := ""
 
@@ -34,10 +39,12 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	var current_scene := get_tree().current_scene
 	if current_scene != _scene_root:
+		_stop_all_dialogue()
 		_scene_root = current_scene
 		_data_reader = null
 		_weapon_state_initialized = false
 		_observed_animations.clear()
+	_prune_dialogue_players()
 	_reader_poll_remaining -= delta
 	if _reader_poll_remaining <= 0.0:
 		_reader_poll_remaining = 0.25
@@ -86,7 +93,9 @@ func play_dialogue(
 	speaker_form_id: int,
 	quest: String,
 	topic: String,
-	reply_form_id: int
+	reply_form_id: int,
+	expression_name := "",
+	expression_weight := 0.0
 ) -> void:
 	if reader == null or not is_instance_valid(reader) or not reader.has_method("read_asset"):
 		return
@@ -102,11 +111,13 @@ func play_dialogue(
 			groups_to_try.push_back(group)
 	var selected_stream: AudioStream
 	var selected_group := ""
+	var selected_asset_path := ""
 	for group: String in groups_to_try:
 		var asset_path := "sound\\voice\\oblivion.esm\\%s\\%s\\%s" % [group, sex, file_name]
 		selected_stream = _stream_for_asset(asset_path, reader)
 		if selected_stream != null:
 			selected_group = group
+			selected_asset_path = asset_path
 			break
 	if selected_stream == null:
 		if not _missing_voice_warnings.has(file_name):
@@ -115,10 +126,49 @@ func play_dialogue(
 		return
 	if selected_group != voice_group:
 		print("OpenOB audio: %s voice resolved in '%s' folder (race folder '%s' has no clip)" % [file_name, selected_group, voice_group])
+	var lip_path := selected_asset_path.trim_suffix(".mp3") + ".lip"
+	var lip_bytes: PackedByteArray = reader.call("read_asset", lip_path)
+	var lip_animation: Dictionary = {}
+	if not lip_bytes.is_empty():
+		lip_animation = FaceGenData.decode_lip(lip_bytes)
+		if lip_animation.has("error"):
+			if not _invalid_lip_warnings.has(lip_path):
+				_invalid_lip_warnings[lip_path] = true
+				push_warning("OpenOB audio: could not decode LIP file %s (%s)" % [lip_path, lip_animation.error])
+			lip_animation = {}
+		elif not _reported_lip_files.has(lip_path):
+			_reported_lip_files[lip_path] = true
+			print("OpenOB lip sync: loaded %s (%d frames, first frame %d)" % [
+				file_name, int(lip_animation.frame_count), int(lip_animation.first_frame)
+			])
 	var speaker := _speaker_node(scene_root, speaker_form_id)
 	var player_node := scene_root.get_node_or_null("Player") as Node3D if scene_root != null else null
 	var position := speaker.global_position if is_instance_valid(speaker) else player_node.global_position if is_instance_valid(player_node) else Vector3.ZERO
-	_play_stream(selected_stream, position + Vector3.UP * 1.2, speaker, voice_volume_db, 55.0, 3.0)
+	var reference_id := int(speaker.get_meta("reference_id", speaker_form_id)) if is_instance_valid(speaker) else speaker_form_id
+	_stop_dialogue(reference_id)
+	var bus_name := _ensure_dialogue_bus(reference_id)
+	if is_instance_valid(speaker) and scene_root.has_method("set_npc_dialogue_expression"):
+		scene_root.call("set_npc_dialogue_expression", reference_id, expression_name, expression_weight)
+	var dialogue_player := _play_stream(
+		selected_stream,
+		position + Vector3.UP * 1.2,
+		speaker,
+		voice_volume_db,
+		55.0,
+		3.0,
+		bus_name
+	)
+	if dialogue_player == null:
+		if is_instance_valid(speaker) and scene_root.has_method("clear_npc_dialogue_expression"):
+			scene_root.call("clear_npc_dialogue_expression", reference_id)
+		return
+	_dialogue_players[reference_id] = {
+		"player": dialogue_player,
+		"bus_name": bus_name,
+		"scene_root": scene_root,
+		"lip_animation": lip_animation,
+	}
+	dialogue_player.finished.connect(_on_dialogue_finished.bind(reference_id, dialogue_player.get_instance_id()), CONNECT_ONE_SHOT)
 
 
 ## Door SetOpenState uses original NIF animation data; this adds the matching
@@ -214,14 +264,17 @@ func _play_stream(
 	host: Node3D,
 	volume_db: float,
 	max_distance: float,
-	unit_size: float
-) -> void:
+	unit_size: float,
+	audio_bus := ""
+) -> AudioStreamPlayer3D:
 	var player := AudioStreamPlayer3D.new()
 	player.name = "OriginalGameAudio"
 	player.stream = stream
 	player.volume_db = volume_db
 	player.max_distance = max_distance
 	player.unit_size = unit_size
+	if not audio_bus.is_empty():
+		player.bus = audio_bus
 	player.finished.connect(player.queue_free)
 	if is_instance_valid(host) and host.is_inside_tree():
 		host.add_child(player)
@@ -233,6 +286,113 @@ func _play_stream(
 		parent.add_child(player)
 		player.global_position = position
 	player.play()
+	return player
+
+
+## Returns the voice level for the actor's own dialogue bus, scaled like the original game's FaceGen talk driver.
+func get_dialogue_talk_weight(reference_id: int) -> float:
+	var entry_value: Variant = _dialogue_players.get(reference_id)
+	if not entry_value is Dictionary:
+		return 0.0
+	var entry: Dictionary = entry_value
+	var player := entry.get("player") as AudioStreamPlayer3D
+	if not is_instance_valid(player) or not player.playing:
+		return 0.0
+	var bus_index := AudioServer.get_bus_index(str(entry.get("bus_name", "")))
+	if bus_index < 0:
+		return 0.0
+	var peak_db := maxf(
+		AudioServer.get_bus_peak_volume_left_db(bus_index, 0),
+		AudioServer.get_bus_peak_volume_right_db(bus_index, 0)
+	)
+	return clampf(db_to_linear(peak_db) * 2.0, 0.0, 1.0)
+
+
+## Returns the current 16 phoneme weights from the line's paired Oblivion LIP file.
+func get_dialogue_visemes(reference_id: int) -> PackedFloat32Array:
+	var entry_value: Variant = _dialogue_players.get(reference_id)
+	if not entry_value is Dictionary:
+		return PackedFloat32Array()
+	var entry: Dictionary = entry_value
+	var lip_value: Variant = entry.get("lip_animation", {})
+	var player := entry.get("player") as AudioStreamPlayer3D
+	if not lip_value is Dictionary or lip_value.is_empty() or not is_instance_valid(player) or not player.playing:
+		return PackedFloat32Array()
+	var audio_time := maxf(
+		0.0,
+		player.get_playback_position()
+			+ AudioServer.get_time_since_last_mix()
+			- AudioServer.get_output_latency()
+	)
+	audio_time = maxf(audio_time, float(entry.get("lip_sync_time", 0.0)))
+	entry["lip_sync_time"] = audio_time
+	_dialogue_players[reference_id] = entry
+	return FaceGenData.sample_lip_visemes(lip_value, audio_time)
+
+
+func _ensure_dialogue_bus(reference_id: int) -> String:
+	var bus_name := "OpenOBVoice_%08X" % reference_id
+	var bus_index := AudioServer.get_bus_index(bus_name)
+	if bus_index < 0:
+		AudioServer.add_bus()
+		bus_index = AudioServer.get_bus_count() - 1
+		AudioServer.set_bus_name(bus_index, bus_name)
+		AudioServer.set_bus_send(bus_index, "Master")
+	return bus_name
+
+
+func _on_dialogue_finished(reference_id: int, player_instance_id: int) -> void:
+	var entry_value: Variant = _dialogue_players.get(reference_id)
+	if not entry_value is Dictionary:
+		return
+	var entry: Dictionary = entry_value
+	var player := entry.get("player") as AudioStreamPlayer3D
+	if not is_instance_valid(player) or player.get_instance_id() != player_instance_id:
+		return
+	_dialogue_players.erase(reference_id)
+	_remove_dialogue_bus(str(entry.get("bus_name", "")))
+	_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+
+
+func _stop_dialogue(reference_id: int) -> void:
+	var entry_value: Variant = _dialogue_players.get(reference_id)
+	if not entry_value is Dictionary:
+		return
+	var entry: Dictionary = entry_value
+	_dialogue_players.erase(reference_id)
+	var player := entry.get("player") as AudioStreamPlayer3D
+	if is_instance_valid(player):
+		player.stop()
+		player.queue_free()
+	_remove_dialogue_bus(str(entry.get("bus_name", "")))
+	_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+
+
+func _stop_all_dialogue() -> void:
+	for reference_value: Variant in _dialogue_players.keys():
+		_stop_dialogue(int(reference_value))
+
+
+func _prune_dialogue_players() -> void:
+	for reference_value: Variant in _dialogue_players.keys():
+		var reference_id := int(reference_value)
+		var entry: Dictionary = _dialogue_players[reference_id]
+		if is_instance_valid(entry.get("player") as AudioStreamPlayer3D):
+			continue
+		_dialogue_players.erase(reference_id)
+		_remove_dialogue_bus(str(entry.get("bus_name", "")))
+		_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+
+
+func _clear_dialogue_expression(scene_root: Node, reference_id: int) -> void:
+	if is_instance_valid(scene_root) and scene_root.has_method("clear_npc_dialogue_expression"):
+		scene_root.call("clear_npc_dialogue_expression", reference_id)
+
+
+func _remove_dialogue_bus(bus_name: String) -> void:
+	var bus_index := AudioServer.get_bus_index(bus_name)
+	if bus_index > 0:
+		AudioServer.remove_bus(bus_index)
 
 
 func _surface_group(actor: Node3D) -> String:

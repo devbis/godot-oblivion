@@ -1,5 +1,133 @@
 extends RefCounted
-## Bounded readers for the FaceGen EGM and TRI geometry data shipped with Oblivion.
+## Bounded readers for Oblivion FaceGen EGM, TRI, and dialogue LIP data.
+
+const LIP_FRAME_RATE := 30.0
+const LIP_CURVES_PER_FRAME := 33
+const LIP_PHONEME_CURVE_START := 6
+const LIP_PHONEME_NAMES: Array[StringName] = [
+	&"Aah", &"BigAah", &"BMP", &"ChJSh", &"DST", &"Eee", &"Eh", &"FV",
+	&"I", &"K", &"N", &"Oh", &"OohQ", &"R", &"Th", &"W",
+]
+const LIP_MAX_FRAME_COUNT := 18000
+const LIP_MAX_DECODED_BYTES := 18000 * LIP_CURVES_PER_FRAME * 4
+
+
+## Decodes Oblivion's FaceFX LIP stream into its 33-float-per-frame curve grid.
+## Legacy files put the zero-run encoded payload directly after the 20-byte
+## header; some voice archives shift it by one byte. Character-generation LIPs
+## start the curve grid at byte 16 and can omit its final all-zero run.
+static func decode_lip(bytes: PackedByteArray) -> Dictionary:
+	if bytes.size() < 20 or int(bytes.decode_u32(0)) != 1:
+		return {"error": "invalid LIP header"}
+	var frame_count := int(bytes.decode_u16(12))
+	if frame_count <= 0 or frame_count > LIP_MAX_FRAME_COUNT:
+		return {"error": "invalid LIP frame count"}
+	var expected_size := frame_count * LIP_CURVES_PER_FRAME * 4
+	var payload_options: Array[Dictionary] = [
+		{"offset": 20, "first_offset": 16},
+		{"offset": 21, "first_offset": 17},
+		{"offset": 16, "first_offset": -1, "curve_grid": true},
+	]
+	for option_value: Variant in payload_options:
+		var option: Dictionary = option_value
+		var payload_offset := int(option.offset)
+		if payload_offset >= bytes.size():
+			continue
+		var first_frame := 0
+		var first_offset := int(option.first_offset)
+		if first_offset >= 0:
+			first_frame = _signed_int32(bytes, first_offset)
+			if first_frame < -120 or first_frame > 0:
+				continue
+		var curve_grid := bool(option.get("curve_grid", false))
+		var decoded_bytes := _decode_lip_rle(bytes, payload_offset, expected_size, curve_grid)
+		if decoded_bytes.is_empty():
+			continue
+		if curve_grid:
+			# Character-generation LIPs store the first curve value at byte 16 and
+			# omit the final all-zero run. Header u16@14 is that omitted byte count + 7.
+			var omitted_tail_bytes := expected_size - decoded_bytes.size()
+			if omitted_tail_bytes < 0 or omitted_tail_bytes % 4 != 0:
+				continue
+			if omitted_tail_bytes + 7 != int(bytes.decode_u16(14)):
+				continue
+			decoded_bytes.resize(expected_size)
+		var curves := PackedFloat32Array()
+		curves.resize(frame_count * LIP_CURVES_PER_FRAME)
+		var values_valid := true
+		for value_index in range(curves.size()):
+			var value := decoded_bytes.decode_float(value_index * 4)
+			if not (value >= -2.0 and value <= 2.0):
+				values_valid = false
+				break
+			curves[value_index] = value
+		if not values_valid:
+			continue
+		return {
+			"frame_count": frame_count,
+			"first_frame": first_frame,
+			"frame_rate": LIP_FRAME_RATE,
+			"curves": curves,
+		}
+	return {"error": "invalid LIP curve payload"}
+
+
+## Samples the 16 FaceGen phoneme channels at audio time, interpolating adjacent frames.
+static func sample_lip_visemes(lip: Dictionary, audio_time: float) -> PackedFloat32Array:
+	var weights := PackedFloat32Array()
+	weights.resize(LIP_PHONEME_NAMES.size())
+	var frame_count := int(lip.get("frame_count", 0))
+	var curves: PackedFloat32Array = lip.get("curves", PackedFloat32Array())
+	if frame_count <= 0 or curves.size() != frame_count * LIP_CURVES_PER_FRAME:
+		return weights
+	var frame_rate := float(lip.get("frame_rate", LIP_FRAME_RATE))
+	var first_frame := int(lip.get("first_frame", 0))
+	var frame_position := maxf(audio_time, 0.0) * frame_rate - float(first_frame)
+	frame_position = clampf(frame_position, 0.0, float(frame_count - 1))
+	var frame_a := int(floor(frame_position))
+	var frame_b := mini(frame_a + 1, frame_count - 1)
+	var blend := frame_position - float(frame_a)
+	for phoneme_index in range(LIP_PHONEME_NAMES.size()):
+		var curve_index := LIP_PHONEME_CURVE_START + phoneme_index
+		var value_a := curves[frame_a * LIP_CURVES_PER_FRAME + curve_index]
+		var value_b := curves[frame_b * LIP_CURVES_PER_FRAME + curve_index]
+		weights[phoneme_index] = clampf(lerpf(value_a, value_b, blend), 0.0, 1.0)
+	return weights
+
+
+static func _decode_lip_rle(
+	bytes: PackedByteArray,
+	offset: int,
+	expected_size: int,
+	allow_short := false
+) -> PackedByteArray:
+	var decoded := PackedByteArray()
+	var input_offset := offset
+	while input_offset < bytes.size():
+		var value := int(bytes[input_offset])
+		if value == 0:
+			if not _has_bytes(bytes, input_offset, 3):
+				return PackedByteArray()
+			var run_length := int(bytes.decode_u16(input_offset + 1))
+			if run_length <= 0 or decoded.size() + run_length > expected_size:
+				return PackedByteArray()
+			decoded.resize(decoded.size() + run_length)
+			input_offset += 3
+		else:
+			if decoded.size() >= expected_size:
+				return PackedByteArray()
+			decoded.push_back(value)
+			input_offset += 1
+		if decoded.size() > LIP_MAX_DECODED_BYTES:
+			return PackedByteArray()
+	if decoded.size() == expected_size or (allow_short and decoded.size() < expected_size):
+		return decoded
+	return PackedByteArray()
+
+
+static func _signed_int32(bytes: PackedByteArray, offset: int) -> int:
+	var value := int(bytes.decode_u32(offset))
+	return value - 0x100000000 if value >= 0x80000000 else value
 
 static func decode_egm(bytes: PackedByteArray) -> Dictionary:
 	if bytes.size() < 64 or bytes.slice(0, 8).get_string_from_ascii() != "FREGM002":
@@ -151,13 +279,21 @@ static func build_head_mesh(
 	var vertex_count := base_vertices.size()
 	if vertex_count != int(tri.get("vertex_count", -1)):
 		return null
+	var tri_vertices: PackedVector3Array = tri.get("vertices", PackedVector3Array())
+	if tri_vertices.size() < vertex_count:
+		return null
+	# FaceGen stores some component morphs in the full head basis, while rigid parts such as teeth use a local NIF basis.
+	var fitted_basis := _fit_basis_transform(base_vertices, tri_vertices, vertex_count)
+	if fitted_basis.is_empty() or float(fitted_basis.get("max_residual", INF)) > 0.001:
+		return null
+	var basis_transform: Basis = fitted_basis.get("basis", Basis.IDENTITY)
 	var symmetric_modes: Array = egm.get("symmetric_modes", [])
 	var asymmetric_modes: Array = egm.get("asymmetric_modes", [])
 	if symmetric_coefficients.size() != symmetric_modes.size() or asymmetric_coefficients.size() != asymmetric_modes.size():
 		return null
 	var morphed_vertices := base_vertices.duplicate()
-	_apply_modes(morphed_vertices, symmetric_modes, symmetric_coefficients, vertex_count)
-	_apply_modes(morphed_vertices, asymmetric_modes, asymmetric_coefficients, vertex_count)
+	_apply_modes(morphed_vertices, symmetric_modes, symmetric_coefficients, basis_transform)
+	_apply_modes(morphed_vertices, asymmetric_modes, asymmetric_coefficients, basis_transform)
 	var base_normals := _compute_normals(morphed_vertices, indices)
 	arrays[Mesh.ARRAY_VERTEX] = morphed_vertices
 	if arrays[Mesh.ARRAY_NORMAL] != null:
@@ -169,17 +305,19 @@ static func build_head_mesh(
 		morph_bounds = morph_bounds.expand(vertex)
 	for morph_value: Variant in tri.get("difference_morphs", []):
 		var morph: Dictionary = morph_value
-		var deltas: PackedVector3Array = morph.get("deltas", PackedVector3Array())
-		if deltas.size() != vertex_count:
+		var source_deltas: PackedVector3Array = morph.get("deltas", PackedVector3Array())
+		if source_deltas.size() != vertex_count:
 			return null
+		var deltas := PackedVector3Array()
+		deltas.resize(vertex_count)
 		var target_vertices := morphed_vertices.duplicate()
 		for vertex_index in range(vertex_count):
+			deltas[vertex_index] = basis_transform * source_deltas[vertex_index]
 			target_vertices[vertex_index] += deltas[vertex_index]
 			morph_bounds = morph_bounds.expand(target_vertices[vertex_index])
 		var shape_arrays: Array = _relative_shape_arrays(deltas, target_vertices, base_normals, indices)
 		blend_shape_names.push_back(str(morph.get("name", "")))
 		blend_shape_arrays.push_back(shape_arrays)
-	var tri_vertices: PackedVector3Array = tri.get("vertices", PackedVector3Array())
 	var target_vertex_count := int(tri.get("total_vertex_count", 0))
 	if tri_vertices.size() != target_vertex_count:
 		return null
@@ -199,7 +337,7 @@ static func build_head_mesh(
 			delta -= _morph_delta_at(symmetric_modes, symmetric_coefficients, vertex_index)
 			delta += _morph_delta_at(asymmetric_modes, asymmetric_coefficients, target_index)
 			delta -= _morph_delta_at(asymmetric_modes, asymmetric_coefficients, vertex_index)
-			deltas[vertex_index] = delta
+			deltas[vertex_index] = basis_transform * delta
 		var target_vertices := morphed_vertices.duplicate()
 		for affected_offset in range(affected.size()):
 			var vertex_index := affected[affected_offset]
@@ -220,15 +358,83 @@ static func _apply_modes(
 	vertices: PackedVector3Array,
 	modes: Array,
 	coefficients: PackedFloat32Array,
-	vertex_count: int
+	basis_transform: Basis
 ) -> void:
 	for mode_index in range(modes.size()):
 		var coefficient := coefficients[mode_index]
 		if absf(coefficient) < 0.000001:
 			continue
 		var mode: PackedVector3Array = modes[mode_index]
-		for vertex_index in range(vertex_count):
-			vertices[vertex_index] += mode[vertex_index] * coefficient
+		for vertex_index in range(vertices.size()):
+			vertices[vertex_index] += basis_transform * mode[vertex_index] * coefficient
+
+static func _fit_basis_transform(
+	positions: PackedVector3Array,
+	tri_vertices: PackedVector3Array,
+	vertex_count: int
+) -> Dictionary:
+	if positions.size() != vertex_count or tri_vertices.size() < vertex_count or vertex_count < 4:
+		return {}
+	var normal: Array = []
+	var rhs: Array = []
+	for row in 4:
+		normal.push_back([0.0, 0.0, 0.0, 0.0])
+	for axis in 3:
+		rhs.push_back([0.0, 0.0, 0.0, 0.0])
+	for vertex_index in range(vertex_count):
+		var source: Vector3 = tri_vertices[vertex_index]
+		var target: Vector3 = positions[vertex_index]
+		var basis_values: Array = [source.x, source.y, source.z, 1.0]
+		var target_values: Array = [target.x, target.y, target.z]
+		for row in 4:
+			for column in 4:
+				normal[row][column] += basis_values[row] * basis_values[column]
+			for axis in 3:
+				rhs[axis][row] += target_values[axis] * basis_values[row]
+	var coefficients: Array = []
+	for axis in 3:
+		var augmented: Array = []
+		for row in 4:
+			var values: Array = [0.0, 0.0, 0.0, 0.0, 0.0]
+			for column in 4:
+				values[column] = normal[row][column]
+			values[4] = rhs[axis][row]
+			augmented.push_back(values)
+		for column in 4:
+			var pivot := column
+			for row in range(column + 1, 4):
+				if absf(float(augmented[row][column])) > absf(float(augmented[pivot][column])):
+					pivot = row
+			if absf(float(augmented[pivot][column])) < 0.0000000001:
+				return {}
+			if pivot != column:
+				var swap: Array = augmented[pivot]
+				augmented[pivot] = augmented[column]
+				augmented[column] = swap
+			var divisor := float(augmented[column][column])
+			for index in range(column, 5):
+				augmented[column][index] = float(augmented[column][index]) / divisor
+			for row in 4:
+				if row == column:
+					continue
+				var factor := float(augmented[row][column])
+				for index in range(column, 5):
+					augmented[row][index] = float(augmented[row][index]) - factor * float(augmented[column][index])
+		var axis_coefficients: Array = []
+		for row in 4:
+			axis_coefficients.push_back(float(augmented[row][4]))
+		coefficients.push_back(axis_coefficients)
+	var transform := Basis(
+		Vector3(coefficients[0][0], coefficients[1][0], coefficients[2][0]),
+		Vector3(coefficients[0][1], coefficients[1][1], coefficients[2][1]),
+		Vector3(coefficients[0][2], coefficients[1][2], coefficients[2][2])
+	)
+	var offset := Vector3(coefficients[0][3], coefficients[1][3], coefficients[2][3])
+	var max_residual := 0.0
+	for vertex_index in range(vertex_count):
+		var fitted := transform * tri_vertices[vertex_index] + offset
+		max_residual = maxf(max_residual, positions[vertex_index].distance_to(fitted))
+	return {"basis": transform, "offset": offset, "max_residual": max_residual}
 
 static func _morph_delta_at(modes: Array, coefficients: PackedFloat32Array, vertex_index: int) -> Vector3:
 	var result := Vector3.ZERO

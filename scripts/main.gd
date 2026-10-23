@@ -7,6 +7,7 @@ const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
 const ActorFactory := preload("res://scripts/actor_factory.gd")
 const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
 const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
+const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
@@ -2064,6 +2065,10 @@ func _load_player_avatar() -> void:
 		"face_expression_previous": "",
 		"face_expression_previous_weight": 0.0,
 		"face_expression_transition": 0.25,
+		"face_talk_weight": 0.0,
+		"dialogue_face_active": false,
+		"dialogue_face_previous": "",
+		"dialogue_face_previous_weight": 0.0,
 		"expression_cycle": _available_face_expression_cycle(_player_face_meshes),
 		"blink_cooldown": randf_range(2.5, 5.5),
 		"blink_remaining": 0.0,
@@ -2784,6 +2789,10 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"face_expression_previous": "",
 			"face_expression_previous_weight": 0.0,
 			"face_expression_transition": 0.0,
+			"face_talk_weight": 0.0,
+			"dialogue_face_active": false,
+			"dialogue_face_previous": "",
+			"dialogue_face_previous_weight": 0.0,
 			"expression_cycle": expression_cycle,
 			"blink_cooldown": randf_range(2.5, 5.5),
 			"blink_remaining": 0.0,
@@ -3007,6 +3016,31 @@ func set_npc_expression(actor_name: String, expression_name: String, weight := 1
 		_set_face_expression(actor, expression_name, weight)
 		return
 
+
+func set_npc_dialogue_expression(reference_id: int, expression_name: String, weight: float) -> void:
+	for actor: Dictionary in _npc_actors:
+		if int(actor.get("reference_id", 0)) != reference_id:
+			continue
+		if not bool(actor.get("dialogue_face_active", false)):
+			actor["dialogue_face_previous"] = str(actor.get("face_expression", ""))
+			actor["dialogue_face_previous_weight"] = float(actor.get("face_expression_weight", 0.0))
+		actor["dialogue_face_active"] = true
+		_set_face_expression(actor, expression_name, weight)
+		return
+
+
+func clear_npc_dialogue_expression(reference_id: int) -> void:
+	for actor: Dictionary in _npc_actors:
+		if int(actor.get("reference_id", 0)) != reference_id or not bool(actor.get("dialogue_face_active", false)):
+			continue
+		var previous_name := str(actor.get("dialogue_face_previous", ""))
+		var previous_weight := float(actor.get("dialogue_face_previous_weight", 0.0))
+		actor["dialogue_face_active"] = false
+		actor["dialogue_face_previous"] = ""
+		actor["dialogue_face_previous_weight"] = 0.0
+		_set_face_expression(actor, previous_name, previous_weight)
+		return
+
 func _set_face_expression(actor: Dictionary, expression_name: String, weight: float) -> void:
 	actor["face_expression_previous"] = str(actor.get("face_expression", ""))
 	actor["face_expression_previous_weight"] = float(actor.get("face_expression_weight", 0.0))
@@ -3110,11 +3144,34 @@ func _update_face_blink(actor: Dictionary, delta: float) -> void:
 	_set_actor_face_shape(actor, "BlinkLeft", blink_weight)
 	_set_actor_face_shape(actor, "BlinkRight", blink_weight)
 
+
+func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> void:
+	if is_instance_valid(audio_manager) and audio_manager.has_method("get_dialogue_visemes"):
+		var visemes_value: Variant = audio_manager.call("get_dialogue_visemes", int(actor.get("reference_id", 0)))
+		if visemes_value is PackedFloat32Array and visemes_value.size() == FaceGenData.LIP_PHONEME_NAMES.size():
+			var visemes: PackedFloat32Array = visemes_value
+			for phoneme_index in range(FaceGenData.LIP_PHONEME_NAMES.size()):
+				_set_actor_face_shape(actor, str(FaceGenData.LIP_PHONEME_NAMES[phoneme_index]), visemes[phoneme_index])
+			actor["face_talk_weight"] = 0.0
+			return
+	for phoneme_name: StringName in FaceGenData.LIP_PHONEME_NAMES:
+		_set_actor_face_shape(actor, str(phoneme_name), 0.0)
+	var talk_target := 0.0
+	if is_instance_valid(audio_manager) and audio_manager.has_method("get_dialogue_talk_weight"):
+		talk_target = float(audio_manager.call("get_dialogue_talk_weight", int(actor.get("reference_id", 0))))
+	var blend := 1.0 - exp(-maxf(delta, 0.0) * 14.0)
+	var talk_weight := lerpf(float(actor.get("face_talk_weight", 0.0)), talk_target, blend)
+	if talk_target == 0.0 and talk_weight < 0.001:
+		talk_weight = 0.0
+	actor["face_talk_weight"] = talk_weight
+	_set_actor_face_shape(actor, "BigAah", talk_weight)
+
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
 
 func _update_npc_actors(delta: float) -> void:
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
 	for actor: Dictionary in _npc_actors:
 		var actor_root := actor.get("root") as Node3D
 		var skeleton := actor.get("skeleton") as Skeleton3D
@@ -3133,6 +3190,7 @@ func _update_npc_actors(delta: float) -> void:
 			continue
 		_update_face_blink(actor, delta)
 		_update_face_expression(actor, delta)
+		_update_face_talk(actor, delta, audio_manager)
 		var walking := bool(actor_root.get("is_walking"))
 		var horizontal_speed := Vector2(actor_root.velocity.x, actor_root.velocity.z).length()
 		var requested_animation := "Idle"

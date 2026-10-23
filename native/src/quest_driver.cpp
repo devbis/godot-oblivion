@@ -633,6 +633,9 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
         speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(speaker)));
         speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(run.reply->form_id)));
         speech.arguments.push_back(ScriptValue::from_text(quest->quest().editor_id));
+        const DialogResponseLine* first_line = run.reply->lines.empty() ? nullptr : &run.reply->lines.front();
+        speech.arguments.push_back(ScriptValue::from_number(first_line ? first_line->emotion_type : 0));
+        speech.arguments.push_back(ScriptValue::from_number(first_line ? first_line->emotion_value : 0));
         tick.actions.push_back(std::move(speech));
         if (speech_length_) {
             if (const auto seconds = speech_length_(speaker, quest->quest().editor_id, topic->editor_id,
