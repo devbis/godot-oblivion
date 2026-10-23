@@ -52,9 +52,13 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			return _move_to(target, arguments, references, world, transform_of, label)
 		"kill", "disable":
 			return _deactivate(target, command, world, label)
+		"setopenstate":
+			return _set_open_state(target, arguments, references, world, label)
 		"speech":
 			# A SayTo line: the topic's reply, printed as the subtitle would show it.
-			return "says: %s" % (str(arguments[0]) if not arguments.is_empty() else "")
+			var line := str(arguments[0]) if not arguments.is_empty() else ""
+			var who := str(arguments[1]) if arguments.size() > 1 else ""
+			return "says (%s): %s" % [who, line]
 		"evp":
 			# The NPC re-evaluates its packages; the scene refreshes the routes after the result (see main.gd).
 			return "re-evaluates packages: %s" % label
@@ -89,6 +93,36 @@ func _deactivate(target: String, command: String, world: Node3D, label: String) 
 	if command == "kill":
 		dead_actors[target] = true
 	return "applied: %s" % label
+
+
+## A door's open state: an open door lets bodies through, so its collision is switched off, and closing restores it.
+## The door keeps its model; it does not animate yet.
+func _set_open_state(target: String, arguments: Array, references: Dictionary, world: Node3D, label: String) -> String:
+	if target.is_empty() or arguments.is_empty():
+		return "not applied: %s needs a target and a state" % label
+	var reference: Dictionary = references.get(target, {})
+	if reference.is_empty():
+		return "not applied: %s, %s is not in this cell" % [label, target]
+	var reference_id := int(reference.get("form_id", 0))
+	var is_open := int(arguments[0]) != 0
+	var bodies := 0
+	for node: Node in world.find_children("GeneratedStaticMeshCollision", "StaticBody3D", true, false):
+		var body := node as StaticBody3D
+		if body == null or int(body.get_meta("reference_id", 0)) != reference_id:
+			continue
+		if is_open:
+			if not body.has_meta("closed_layer"):
+				body.set_meta("closed_layer", body.collision_layer)
+				body.set_meta("closed_mask", body.collision_mask)
+			body.collision_layer = 0
+			body.collision_mask = 0
+		elif body.has_meta("closed_layer"):
+			body.collision_layer = int(body.get_meta("closed_layer"))
+			body.collision_mask = int(body.get_meta("closed_mask"))
+		bodies += 1
+	if bodies == 0:
+		return "not applied: %s, %s has no collision in this cell" % [label, target]
+	return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
 
 
 func _store(target: String, command: String, arguments: Array) -> void:

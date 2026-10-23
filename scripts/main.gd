@@ -484,6 +484,102 @@ func _physics_process(delta: float) -> void:
 		print("OpenOB quest: " + line)
 	if _needs_route_refresh(result):
 		_refresh_npc_routes()
+	_fire_trigger_zones()
+
+## Trigger zones of the cell: a reference whose base has an object script with an OnTrigger block. The zone's OnTrigger
+## runs each time the player enters its box, until the script disables the zone.
+const TRIGGER_ZONE_SCRIPTS := {0x97A3C: "CGTriggerZoneCellScript"}
+var _trigger_zones: Array[Dictionary] = []
+
+func _find_trigger_zones() -> void:
+	_trigger_zones.clear()
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		var base := int(reference.get("base_form_id", 0))
+		if not TRIGGER_ZONE_SCRIPTS.has(base):
+			continue
+		var box := AABB()
+		var has_box := false
+		for mesh_entry: Dictionary in await _meshes_for_model(str(reference.get("model_path", ""))):
+			var mesh := mesh_entry.get("mesh") as Mesh
+			if mesh == null:
+				continue
+			box = mesh.get_aabb() if not has_box else box.merge(mesh.get_aabb())
+			has_box = true
+		if not has_box:
+			continue
+		var world_box := _reference_transform(reference) * box
+		_trigger_zones.push_back({"script": TRIGGER_ZONE_SCRIPTS[base], "box": world_box, "inside": false, "disabled": false})
+		print("OpenOB trigger zone %s: box %s" % [TRIGGER_ZONE_SCRIPTS[base], str(world_box)])
+
+## Doors do not stop the placed NPCs: in the game an actor opens a door by walking into it, and the door is not animated
+## here yet. The NPCs' bodies ignore the bodies of the cell's doors, so a route through a door is walked.
+func _let_actors_pass_doors() -> void:
+	var door_ids := {}
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(data_reader.find_record_type(int(reference.get("base_form_id", 0)))) == "DOOR":
+			door_ids[int(reference.get("form_id", 0))] = true
+	if door_ids.is_empty():
+		return
+	var doors: Array[StaticBody3D] = []
+	for node: Node in cell_visual_root.find_children("GeneratedStaticMeshCollision", "StaticBody3D", true, false):
+		var body := node as StaticBody3D
+		if body != null and door_ids.has(int(body.get_meta("reference_id", 0))):
+			doors.push_back(body)
+	for actor: Dictionary in _npc_actors:
+		var root := actor.get("root") as CharacterBody3D
+		if root == null:
+			continue
+		for door: StaticBody3D in doors:
+			root.add_collision_exception_with(door)
+	print("OpenOB doors: %d bodies the placed NPCs pass" % doors.size())
+
+## Length in seconds of a spoken reply, from its voice file. The voice folder is the speaker's voice type, which is not read
+## yet, so each race and sex folder is tried; a reply's form ID names one file. Null when no folder has it, so the quest
+## estimates the length from the text.
+const VOICE_FOLDERS := ["imperial", "nord", "breton", "redguard", "altmer", "bosmer", "dunmer", "khajiit", "argonian", "orc"]
+var _speech_length_cache: Dictionary = {}
+
+func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, _text: String) -> Variant:
+	var file_name := "%s_%s_%08x_1.mp3" % [quest.to_lower(), topic.to_lower(), reply]
+	if _speech_length_cache.has(file_name):
+		return _speech_length_cache[file_name]
+	var length: Variant = null
+	for folder: String in VOICE_FOLDERS:
+		for sex: String in ["m", "f"]:
+			var bytes: PackedByteArray = data_reader.read_asset("sound\\voice\\oblivion.esm\\%s\\%s\\%s" % [folder, sex, file_name])
+			if bytes.is_empty():
+				continue
+			var stream := AudioStreamMP3.new()
+			stream.data = bytes
+			length = stream.get_length()
+			break
+		if length != null:
+			break
+	_speech_length_cache[file_name] = length
+	return length
+
+## Runs the OnTrigger of each trigger zone the player has just entered, until the zone is disabled.
+func _fire_trigger_zones() -> void:
+	if quest_world == null:
+		return
+	for zone: Dictionary in _trigger_zones:
+		if bool(zone.get("disabled", false)):
+			continue
+		var inside := (zone.get("box") as AABB).has_point(player.global_position)
+		var was_inside := bool(zone.get("inside", false))
+		zone["inside"] = inside
+		if not inside or was_inside:
+			continue
+		var result: Dictionary = quest_world.run_object_event(str(zone.get("script", "")), "onTrigger", "player", Callable(self, "_quest_distance"))
+		for line: String in _apply_driver_result(result):
+			print("OpenOB trigger: " + line)
+		for action: Dictionary in result.get("actions", []):
+			if str(action.get("command", "")).to_lower() == "disable":
+				zone["disabled"] = true
+		if _needs_route_refresh(result):
+			_refresh_npc_routes()
 
 ## Starts a quest at a stage (default 0) in the quest world, which is created on the first start.
 ## The world then ticks every physics frame, and every started quest runs its GameMode.
@@ -498,6 +594,7 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		quest_world = data_reader.create_quest_world(executable_path, cache_dir)
 		if quest_world == null:
 			return PackedStringArray(["quest world not created (command table of %s)" % executable_path])
+		quest_world.set_speech_length(Callable(self, "_speech_seconds"))
 		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
 		# character creation's race and sex are read.
 		quest_world.set_listener("Argonian", false)
@@ -515,16 +612,23 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	_refresh_npc_routes()
 	return report
 
-## True when a result changed a stage or asked the NPCs to re-evaluate their packages (evp), so the routes change.
+## Names the speaker of each spoken line (its base form is the second argument) before the bridge prints it.
+func _name_speakers(result: Dictionary) -> void:
+	for action: Dictionary in result.get("actions", []):
+		var arguments: Array = action.get("arguments", [])
+		if str(action.get("command", "")).to_lower() == "speech" and arguments.size() > 1:
+			arguments[1] = str(data_reader.find_editor_id(int(arguments[1])))
+
+## True when a result asked the NPCs to re-evaluate their packages (evp). As in the game, a stage change alone does not
+## re-evaluate them: the data asks for it with evp, so a package that is still the first to hold keeps its route.
 func _needs_route_refresh(result: Dictionary) -> bool:
-	if not (result.get("stage_changes", PackedStringArray()) as PackedStringArray).is_empty():
-		return true
 	for action: Dictionary in result.get("actions", []):
 		if str(action.get("command", "")).to_lower() == "evp":
 			return true
 	return false
 
 func _apply_driver_result(result: Dictionary) -> PackedStringArray:
+	_name_speakers(result)
 	var report := PackedStringArray()
 	for change: String in result.get("stage_changes", PackedStringArray()):
 		report.push_back("stage %s" % change)
@@ -577,6 +681,10 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	var npc_id := str(actor.get("npc_editor_id", ""))
 	if quest_world != null and not route_quest_editor_id.is_empty() and not npc_id.is_empty():
 		package = quest_world.select_package(route_quest_editor_id, npc_id)
+	# The same package keeps its route: starting it again would finish at once and run its OnPackageDone again.
+	var previous: Dictionary = actor.get("package", {})
+	if not package.is_empty() and str(package.get("editor_id", "")) == str(previous.get("editor_id", "")):
+		return
 	actor["package"] = package
 	var waypoints: Array[Dictionary] = []
 	# A package without a location (for example waiting at the actor's editor location) keeps the actor in place.
@@ -2541,7 +2649,17 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_npc_loaded_reference_ids[reference_id] = true
 		_apply_face_expression(actor_state)
 		actor_count += 1
+	# TEMPORARY: placed NPCs pass through each other, so a narrow passage does not stop them. Revert by deleting this block.
+	for first_actor: Dictionary in _npc_actors:
+		for second_actor: Dictionary in _npc_actors:
+			var first_root = first_actor.get("root")
+			var second_root = second_actor.get("root")
+			if first_root != second_root and first_root is CharacterBody3D and second_root is CharacterBody3D:
+				(first_root as CharacterBody3D).add_collision_exception_with(second_root)
+	_let_actors_pass_doors()
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
+	if _trigger_zones.is_empty():
+		await _find_trigger_zones()
 	# The routes follow the navigation tiles of the cell, so they are baked before the quest starts.
 	if _navigation_tiles == null:
 		await _build_navigation_tiles()
@@ -2692,6 +2810,7 @@ func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generat
 
 func _clear_cell_actors() -> void:
 	_clear_navigation_tiles()
+	_trigger_zones.clear()
 	_npc_stream_generation += 1
 	_npc_stream_busy = false
 	_npc_loaded_reference_ids.clear()
