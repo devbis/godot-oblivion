@@ -28,21 +28,20 @@ const PLAYER_JUMP_KFS := {
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const ANIMATION_BLEND_DURATION := 0.18
+const InteractionTargeting := preload("res://scripts/interaction_targeting.gd")
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_HEAD_CULL_MARGIN := ActorFactory.PLAYER_HEAD_CULL_MARGIN
 const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
 const PLAYER_FACE_DETAIL_PARTS := ActorFactory.PLAYER_FACE_DETAIL_PARTS
 const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
-const ITEM_AIM_RANGE_M := 1.8
-const ACTOR_AIM_RANGE_M := 2.5
-const DOOR_AIM_RANGE_M := 2.5
-const AIM_REACH_ORIGIN_HEIGHT_M := 0.9
-const AIM_TARGET_COLLISION_MASK := 2 | 4 | 8 | 16
 const PICKUP_TARGET_COLLISION_LAYER := 8
-const HUD_RETICLE_TEXTURE_PATH := "Textures/Menus/Misc/hud_reticle.dds"
-const HUD_ACTIVATION_ATLAS_PATH := "Textures/Menus/Shared/all_activate_icons.dds"
-const TARGET_RETICLE_ICONS := {"item": 1, "door": 8, "npc": 11}
+## Provisional: there is no actor-value system yet, so the HUD ribbons show full vitals.
+const PROVISIONAL_PLAYER_VITALS := {
+	"health": {"current": 1.0, "max": 1.0},
+	"magic": {"current": 1.0, "max": 1.0},
+	"fatigue": {"current": 1.0, "max": 1.0},
+}
 const FIRST_PERSON_HIDDEN_EQUIPMENT_SLOTS := 0x002F
 const EXTERIOR_CELL_SIZE := 4096.0
 const EXTERIOR_STREAM_RADIUS := 9
@@ -75,9 +74,7 @@ const FEMALE_AVATAR_PARTS := ActorFactory.FEMALE_AVATAR_PARTS
 @onready var key_light: DirectionalLight3D = $KeyLight
 @onready var inventory_items_container: VBoxContainer = $StatusLayer/InventoryPanel/Margin/Contents/Scroll/Items
 @onready var interaction_hint_label: Label = $StatusLayer/InteractionHint
-@onready var default_reticle: TextureRect = $StatusLayer/DefaultReticle
-@onready var target_reticle: TextureRect = $StatusLayer/TargetReticle
-@onready var fallback_reticle: Label = $StatusLayer/FallbackReticle
+@onready var hud: Control = $StatusLayer/HUD
 @onready var face_profile_label: Label = $StatusLayer/FaceProfile
 @onready var face_view_button: Button = $StatusLayer/FaceView
 @onready var fly_mode_button: Button = $StatusLayer/FlyMode
@@ -147,8 +144,9 @@ var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
 var _inventory_open := false
 var _placed_items: Dictionary = {}
-var _aimed_target: Dictionary = {}
-var _activation_icon_textures: Dictionary = {}
+var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
+var targeting := InteractionTargeting.new()
+var _container_reference_cache: Dictionary = {}
 var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
 var _player_first_person_mode := false
@@ -163,6 +161,7 @@ var _player_start_position := Vector3.ZERO
 var _fallback_support: StaticBody3D
 
 func _ready() -> void:
+	_setup_targeting()
 	player.set_physics_process(false)
 	face_view_button.disabled = true
 	face_view_button.pressed.connect(_toggle_face_view)
@@ -209,8 +208,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
-	_update_interaction_hint(_aimed_target)
-	_update_reticle(_aimed_target)
+	_update_hud()
 	if Input.is_action_just_released("interact"):
 		_interact_ready = true
 	if (
@@ -221,24 +219,8 @@ func _process(_delta: float) -> void:
 		and Input.is_action_just_pressed("interact")
 	):
 		_interact_ready = false
-		var interaction_target := _aimed_target
-		match str(interaction_target.get("kind", "")):
-			"item":
-				var item: Dictionary = _placed_items.get(int(interaction_target.get("reference_id", 0)), {})
-				if not item.is_empty():
-					await _pick_up_placed_item(item)
-			"door":
-				if bool(interaction_target.get("locked", false)):
-					_show_interaction_toast("Locked")
-				elif bool(interaction_target.get("linked", false)):
-					await _transition_to_linked_cell(interaction_target.get("reference", {}))
-				else:
-					var door_reference: Dictionary = interaction_target.get("reference", {})
-					var state_key := "door_open_%08x" % int(interaction_target.get("reference_id", 0))
-					var is_open := has_meta(state_key) and bool(get_meta(state_key))
-					var report := quest_bridge.set_door_open_state(door_reference, not is_open, self)
-					if not report.begins_with("applied:"):
-						_show_interaction_toast("Cannot open %s" % str(interaction_target.get("display_name", "door")))
+		# Re-validate at the moment of the press: act on what is under the reticle now.
+		await _activate_target(targeting.acquire())
 		if not Input.is_action_pressed("interact"):
 			_interact_ready = true
 	if not _world_loading and not current_cell.is_empty() and not bool(current_cell.get("interior", true)):
@@ -317,7 +299,7 @@ func _load_game_data() -> void:
 		if current_cell.is_empty():
 			status_label.text = "Loaded game data, but %s was not found." % START_CELL_ID
 			return
-	await _load_reticle_assets()
+	await hud.load_assets(assets)
 
 	var summary: Dictionary = data_reader.get_summary()
 	var start_label := "Imperial Prison" if sewer_exit_spawn.is_empty() else "Imperial Sewer exit"
@@ -479,9 +461,9 @@ func _log_runtime_spawn_positions() -> void:
 
 func _physics_process(delta: float) -> void:
 	if not _world_loading and not _inventory_open and not player.face_preview_enabled:
-		_aimed_target = _acquire_aimed_target()
+		_aimed_target = targeting.acquire()
 	else:
-		_aimed_target = {}
+		_aimed_target = InteractionTargeting.empty_snapshot()
 	if quest_world == null:
 		return
 	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
@@ -972,6 +954,7 @@ func _load_cell_geometry(
 		_exterior_terrain_collision_bodies.clear()
 		_exterior_terrain_collision_attempted_ids.clear()
 		_placed_items.clear()
+		_container_reference_cache.clear()
 		director.clear_door_references()
 		# Doors are rebuilt closed, so the open marks of the previous cell go.
 		quest_bridge.reset_cell_state(self)
@@ -1271,8 +1254,8 @@ func _load_cell_geometry(
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
-	_update_interaction_hint({})
-	_update_reticle({})
+	_aimed_target = InteractionTargeting.empty_snapshot()
+	_update_hud()
 	_refresh_inventory_hud()
 	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d meshes, %d generated colliders, %d terrain tiles; culled %d distant references, skipped %d gates" % [
 		cell_label, reference_count, tree_reference_count, instance_count, collision_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
@@ -2409,75 +2392,34 @@ func _refresh_player_hair_visibility() -> void:
 		if is_instance_valid(hair_mesh):
 			hair_mesh.visible = not headwear_equipped and not player.is_first_person
 
-func _acquire_aimed_target() -> Dictionary:
-	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
-	if camera == null or not camera.current:
+## Wires the targeting service to the scene's lookups; called once the nodes exist.
+func _setup_targeting() -> void:
+	targeting.player = player
+	targeting.world_host = self
+	targeting.item_lookup = func(reference_id: int) -> Dictionary: return _placed_items.get(reference_id, {})
+	targeting.door_lookup = _door_reference_by_id
+	targeting.container_lookup = _container_reference_by_id
+	targeting.actor_lookup = func(collider: Node) -> Dictionary:
+		for actor: Dictionary in _npc_actors:
+			if actor.get("root") == collider:
+				return actor
 		return {}
-	var screen_center := get_viewport().get_visible_rect().get_center()
-	var ray_origin := camera.project_ray_origin(screen_center)
-	var ray_direction := camera.project_ray_normal(screen_center)
-	# The ray starts at the camera, but reach is the player's: the ranges are measured from the player's body, and the ray is
-	# long enough to cover the camera's distance behind (or in front of) the player.
-	var reach_origin := player.global_position + Vector3.UP * AIM_REACH_ORIGIN_HEIGHT_M
-	var max_reach := maxf(ITEM_AIM_RANGE_M, maxf(DOOR_AIM_RANGE_M, ACTOR_AIM_RANGE_M))
-	var query := PhysicsRayQueryParameters3D.create(
-		ray_origin,
-		ray_origin + ray_direction * (max_reach + ray_origin.distance_to(reach_origin)),
-		AIM_TARGET_COLLISION_MASK,
-		[player.get_rid()]
-	)
-	query.collide_with_areas = true
-	query.collide_with_bodies = true
-	var hit := get_world_3d().direct_space_state.intersect_ray(query)
-	if hit.is_empty():
-		return {}
-	var collider := hit.get("collider") as Node
-	if collider == null:
-		return {}
-	var hit_position: Vector3 = hit.get("position", ray_origin)
-	# A hit behind the player (the third-person camera looks past the player) is not reachable.
-	if ray_direction.dot(hit_position - reach_origin) <= 0.0:
-		return {}
-	var hit_distance := reach_origin.distance_to(hit_position)
-	var reference_id := int(collider.get_meta("reference_id", 0))
-	var item: Dictionary = _placed_items.get(reference_id, {})
-	if not item.is_empty():
-		if hit_distance > ITEM_AIM_RANGE_M:
-			return {}
-		return {
-			"kind": "item",
-			"reference_id": reference_id,
-			"display_name": str(item.get("display_name", item.get("editor_id", "item"))),
-		}
-	for actor: Dictionary in _npc_actors:
-		if actor.get("root") != collider:
+
+func _container_reference_by_id(reference_id: int) -> Dictionary:
+	if _container_reference_cache.has(reference_id):
+		return _container_reference_cache[reference_id]
+	var result := {}
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if int(reference.get("form_id", 0)) != reference_id:
 			continue
-		if hit_distance > ACTOR_AIM_RANGE_M:
-			return {}
-		return {
-			"kind": "npc",
-			"reference_id": reference_id,
-			"display_name": str(actor.get("display_name", actor.get("name", "NPC"))),
-		}
-	var door := _door_reference_by_id(reference_id)
-	if not door.is_empty():
-		if hit_distance > DOOR_AIM_RANGE_M:
-			return {}
-		var reference: Dictionary = door.get("reference", {})
-		var display_name := str(reference.get("reference_name", ""))
-		if display_name.is_empty():
-			display_name = str(reference.get("base_editor_id", "Door"))
-		if display_name.is_empty():
-			display_name = "Door"
-		return {
-			"kind": "door",
-			"reference_id": reference_id,
-			"reference": reference,
-			"display_name": display_name,
-			"locked": int(reference.get("lock_level", 0)) > 0,
-			"linked": int(reference.get("teleport_cell_id", 0)) != 0,
-		}
-	return {}
+		var base_form_id := int(reference.get("base_form_id", 0))
+		if str(data_reader.find_record_type(base_form_id)) == "CONT":
+			var name := str(data_reader.find_editor_id(base_form_id)).strip_edges()
+			result = {"reference": reference, "display_name": name if not name.is_empty() else "Container"}
+		break
+	_container_reference_cache[reference_id] = result
+	return result
 
 func _door_reference_by_id(reference_id: int) -> Dictionary:
 	if director.door_reference_lookup_cache.has(reference_id):
@@ -2498,42 +2440,36 @@ func _door_reference_by_id(reference_id: int) -> Dictionary:
 	director.door_reference_lookup_cache[reference_id] = {}
 	return {}
 
-func _load_reticle_assets() -> void:
-	var crosshair_texture := await assets.texture_for_path(HUD_RETICLE_TEXTURE_PATH)
-	default_reticle.texture = crosshair_texture
-	fallback_reticle.visible = crosshair_texture == null
-	var atlas := await assets.texture_for_path(HUD_ACTIVATION_ATLAS_PATH)
-	if atlas == null:
-		return
-	var cell_size := float(atlas.get_height())
-	for icon_index_value: Variant in TARGET_RETICLE_ICONS.values():
-		var icon_index := int(icon_index_value)
-		var left := float(icon_index - 1) * cell_size
-		if left + cell_size > float(atlas.get_width()):
-			continue
-		var icon_texture := AtlasTexture.new()
-		icon_texture.atlas = atlas
-		icon_texture.region = Rect2(left, 0.0, cell_size, cell_size)
-		_activation_icon_textures[icon_index] = icon_texture
-
-func _update_reticle(target: Dictionary) -> void:
-	var show_reticle: bool = not _world_loading and not _inventory_open and not player.face_preview_enabled
-	if not show_reticle:
-		default_reticle.visible = false
-		target_reticle.visible = false
-		fallback_reticle.visible = false
-		return
-	var icon_index := int(TARGET_RETICLE_ICONS.get(str(target.get("kind", "")), 0))
-	var icon_texture := _activation_icon_textures.get(icon_index) as Texture2D
-	if icon_texture != null:
-		target_reticle.texture = icon_texture
-		target_reticle.visible = true
-		default_reticle.visible = false
-		fallback_reticle.visible = false
+func _update_hud() -> void:
+	var visible_hud: bool = not _world_loading and not _inventory_open and not player.face_preview_enabled
+	hud.set_snapshot(_aimed_target, PROVISIONAL_PLAYER_VITALS, visible_hud)
+	if not visible_hud:
+		interaction_hint_label.visible = false
 	else:
-		default_reticle.visible = default_reticle.texture != null
-		target_reticle.visible = false
-		fallback_reticle.visible = default_reticle.texture == null
+		interaction_hint_label.text = _interaction_toast_text
+		interaction_hint_label.visible = _interaction_toast_remaining > 0.0
+
+## Executes the action of one target snapshot; the HUD displays the same snapshot.
+func _activate_target(target: Dictionary) -> void:
+	match str(target.get("action", "none")):
+		"take":
+			if str(target.get("kind", "")) == "item":
+				var item: Dictionary = _placed_items.get(int(target.get("reference_id", 0)), {})
+				if not item.is_empty():
+					await _pick_up_placed_item(item)
+		"enter":
+			await _transition_to_linked_cell(target.get("reference", {}))
+		"locked":
+			_show_interaction_toast("Locked")
+		"talk":
+			_show_interaction_toast("Dialogue unavailable")
+		"open":
+			var door_reference: Dictionary = target.get("reference", {})
+			var state_key := "door_open_%08x" % int(target.get("reference_id", 0))
+			var is_open := has_meta(state_key) and bool(get_meta(state_key))
+			var report := quest_bridge.set_door_open_state(door_reference, not is_open, self)
+			if not report.begins_with("applied:"):
+				_show_interaction_toast("Cannot open %s" % str(target.get("display_name", "door")))
 
 func _show_interaction_toast(message: String) -> void:
 	_interaction_toast_text = message
@@ -2721,25 +2657,6 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	# would move the eyes down by the height of the head.
 	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
-
-func _update_interaction_hint(target: Dictionary) -> void:
-	if _world_loading or _inventory_open or player.face_preview_enabled:
-		interaction_hint_label.visible = false
-		return
-	if _interaction_toast_remaining > 0.0:
-		interaction_hint_label.text = _interaction_toast_text
-	elif str(target.get("kind", "")) == "item":
-		interaction_hint_label.text = str(target.get("display_name", "item"))
-	elif str(target.get("kind", "")) == "door" and bool(target.get("locked", false)):
-		interaction_hint_label.text = "%s · Locked" % str(target.get("display_name", "Door"))
-	elif str(target.get("kind", "")) == "door":
-		interaction_hint_label.text = str(target.get("display_name", "Door"))
-	elif str(target.get("kind", "")) == "npc":
-		interaction_hint_label.text = str(target.get("display_name", "NPC"))
-	else:
-		interaction_hint_label.visible = false
-		return
-	interaction_hint_label.visible = true
 
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
 	if clear_existing:
