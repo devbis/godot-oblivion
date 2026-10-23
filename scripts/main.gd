@@ -4,6 +4,7 @@ const START_CELL_ID := "ImperialDungeon01"
 const START_MARKER_EDITOR_ID := "CGPlayerStartMarker"
 const START_MARKER_FORM_ID := 0x00032AB5
 const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
+const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
@@ -69,12 +70,6 @@ const STARTUP_NEAR_REFERENCE_DISTANCE := 18.0
 const STARTUP_NEAR_TERRAIN_DISTANCE := 86.0
 const NPC_NEAR_LOAD_DISTANCE := 18.0
 const NPC_VISIBLE_LOAD_DISTANCE := 72.0
-const UNSUPPORTED_PARTICLE_MODEL_FILENAMES := [
-	"fxdustcloudfaint01.nif",
-	"fxdustcloud01.nif",
-	"dustcloudhorizontal01.nif",
-	"fxlightbeamdust01.nif",
-]
 const PLAYER_AVATAR_PARTS := [
 	"Characters/_male/upperbody.nif",
 	"Characters/_male/lowerbody.nif",
@@ -91,12 +86,6 @@ const FEMALE_AVATAR_PARTS := [
 	"Characters/Imperial/headhuman.nif",
 	"Characters/Imperial/female/hair01.nif",
 ]
-const TEXTURE_FALLBACKS := {
-	"textures/characters/imperial/male/earmale.dds": "textures/characters/imperial/earshuman.dds",
-	"textures/characters/imperial/female/ear.dds": "textures/characters/imperial/earshuman.dds",
-	"textures/characters/hairf01.dds": "textures/characters/hair/short.dds",
-	"textures/characters/hairbrownm01.dds": "textures/characters/hair/short.dds",
-}
 
 @export_range(0.001, 1.0, 0.001) var game_units_to_meters := 0.01
 
@@ -116,6 +105,7 @@ const TEXTURE_FALLBACKS := {
 @onready var world_environment: WorldEnvironment = $WorldEnvironment
 
 var data_reader: Object
+var assets := NifAssetLibrary.new(self)
 var current_cell: Dictionary = {}
 var quest_bridge := QuestStageBridge.new()
 ## The quests of the game running together (OblivionQuestWorld), or null before the first quest starts.
@@ -127,12 +117,6 @@ var _reported_unanswered: Dictionary = {}
 ## Action lines of the quest bridge already reported, so a command asked on every tick is printed once.
 var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
-var _model_cache: Dictionary = {}
-var _physics_mesh_cache: Dictionary = {}
-var _nif_metadata_cache: Dictionary = {}
-var _collision_cache: Dictionary = {}
-var _material_cache: Dictionary = {}
-var _texture_cache: Dictionary = {}
 var _cell_load_generation := 0
 var _deferred_world_generation := 0
 var _npc_stream_generation := 0
@@ -211,6 +195,7 @@ func _ready() -> void:
 	_cell_material.albedo_color = Color(0.62, 0.58, 0.5)
 	_cell_material.roughness = 0.9
 	_cell_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	assets.cell_material = _cell_material
 	_interior_environment = world_environment.environment
 	_exterior_environment = _make_exterior_environment()
 	status_label.text = "OpenOB data reader starting…"
@@ -332,6 +317,7 @@ func _load_game_data() -> void:
 		return
 
 	data_reader = ClassDB.instantiate("OblivionData")
+	assets.data_reader = data_reader
 	data_reader.open_game_async(data_path)
 	status_label.text = "Reading Oblivion.esm and BSA indexes…"
 	while data_reader.is_loading():
@@ -545,7 +531,7 @@ func _find_trigger_zones(generation: int) -> void:
 			continue
 		var box := AABB()
 		var has_box := false
-		for mesh_entry: Dictionary in await _meshes_for_model(str(reference.get("model_path", ""))):
+		for mesh_entry: Dictionary in await assets.meshes_for_model(str(reference.get("model_path", ""))):
 			var mesh := mesh_entry.get("mesh") as Mesh
 			if mesh == null:
 				continue
@@ -1119,12 +1105,12 @@ func _load_cell_geometry(
 				continue
 			var use_single_billboard := tree_distance > EXTERIOR_TREE_NEAR_DISTANCE
 			var tree_mesh := _tree_billboard_mesh(tree_width, tree_height, use_single_billboard)
-			var tree_texture := await _texture_for_path(tree_texture_path)
+			var tree_texture := await assets.texture_for_path(tree_texture_path)
 			if generation != _cell_load_generation:
 				return false
 			if tree_mesh == null or tree_texture == null:
 				continue
-			var tree_material := await _material_for_texture(
+			var tree_material := await assets.material_for_texture(
 				tree_texture_path, false, true, 128, use_single_billboard
 			)
 			if generation != _cell_load_generation:
@@ -1172,13 +1158,13 @@ func _load_cell_geometry(
 		if is_pickup_item and _picked_up_reference_ids.has(int(reference.get("form_id", 0))):
 			continue
 		reference_count += 1
-		var meshes: Array = await _meshes_for_model(model_path)
+		var meshes: Array = await assets.meshes_for_model(model_path)
 		if generation != _cell_load_generation:
 			return false
 		if is_door:
 			_register_door_reference(reference, meshes)
 		var nif_key := model_path.to_lower().replace("\\", "/")
-		var physics_metadata: Dictionary = _nif_metadata_cache.get(nif_key, {})
+		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
 		if _supports_imported_nif_physics(physics_metadata, meshes):
 			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
 				int(reference.get("form_id", 0)), reference_transform, model_path, meshes, physics_metadata
@@ -1198,7 +1184,7 @@ func _load_cell_geometry(
 		)
 		if should_collide:
 			_exterior_collision_attempted_ids[int(reference.get("form_id", 0))] = true
-			_ensure_collision_shape(model_path)
+			assets.ensure_collision_shape(model_path)
 		var door_animation_root: Node3D = null
 		var door_node_hosts: Dictionary = {}
 		if is_door:
@@ -1387,7 +1373,7 @@ func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 	var texture_path := str(land.get("texture_path", ""))
 	if texture_path.is_empty():
 		texture_path = "textures/landscape/terrainhddirt01.dds"
-	instance.material_override = await _material_for_texture(texture_path)
+	instance.material_override = await assets.material_for_texture(texture_path)
 	if generation >= 0 and generation != _cell_load_generation:
 		return {}
 	instance.scale = Vector3.ONE * game_units_to_meters
@@ -1431,7 +1417,7 @@ func _add_terrain_cell_collider(land: Dictionary) -> bool:
 			if terrain_mesh != null:
 				_land_mesh_cache[mesh_key] = terrain_mesh
 		if terrain_mesh != null:
-			collision = _build_concave_shape(terrain_mesh.get_faces())
+			collision = NifAssetLibrary.build_concave_shape(terrain_mesh.get_faces())
 			if collision != null:
 				_land_collision_cache[cache_key] = collision
 	if collision == null:
@@ -1635,93 +1621,6 @@ func _stream_exterior_if_needed() -> void:
 	_world_loading = false
 	_start_deferred_cell_loading()
 
-var _nif_reader_busy := false
-
-## Reads one NIF through the native reader. Only called while _nif_reader_busy is held by the caller.
-func _read_nif_asset(model_path: String) -> Dictionary:
-	var attempts := 0
-	while not data_reader.request_nif_meshes(model_path):
-		attempts += 1
-		if attempts > 600 or data_reader == null:
-			return {"requested": false}
-		await get_tree().process_frame
-	while data_reader.is_asset_loading():
-		await get_tree().process_frame
-	var parse_error := str(data_reader.get_asset_error())
-	if not parse_error.is_empty():
-		return {"requested": true, "error": parse_error}
-	return {"requested": true, "error": "", "result": data_reader.take_nif_meshes()}
-
-func _meshes_for_model(model_path: String) -> Array:
-	var key := model_path.to_lower().replace("\\", "/")
-	if _model_cache.has(key):
-		return _model_cache[key]
-	# These original particle effect NIFs are not static meshes and the reader cannot decode them.
-	if key.get_file() in UNSUPPORTED_PARTICLE_MODEL_FILENAMES:
-		_model_cache[key] = []
-		return []
-	if data_reader == null or key.is_empty():
-		return []
-	# The native reader holds one asset at a time. Callers queue here, in order of arrival, so no request is dropped and
-	# a finished result is always taken by the coroutine that asked for it.
-	while _nif_reader_busy:
-		await get_tree().process_frame
-		if _model_cache.has(key):
-			return _model_cache[key]
-	_nif_reader_busy = true
-	var read_result: Dictionary = await _read_nif_asset(model_path)
-	_nif_reader_busy = false
-	if not bool(read_result.get("requested", false)):
-		# The reader never accepted the request (game data still loading): nothing is cached, so a later call retries.
-		return []
-	var parse_error := str(read_result.get("error", ""))
-	if not parse_error.is_empty():
-		push_warning("Could not parse NIF %s: %s" % [model_path, parse_error])
-		_model_cache[key] = []
-		return []
-
-	var result: Dictionary = read_result.get("result", {})
-	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
-	var physics_bodies: Array = result.get("physics_bodies", [])
-	var metadata := {
-		"nodes": result.get("nodes", []),
-		"animations": result.get("animations", []),
-		"physics_bodies": physics_bodies,
-		"physics_constraints": result.get("physics_constraints", []),
-	}
-	if not physics_bodies.is_empty():
-		metadata["source_bytes"] = source_bytes
-	_nif_metadata_cache[key] = metadata
-	var raw_meshes: Array = result.get("meshes", [])
-	# The NIF is hashed once; each mesh index derives its cache key from the digest.
-	var source_digest := DerivedResourceCache.digest_of(source_bytes) if not raw_meshes.is_empty() else ""
-	var godot_meshes: Array[Dictionary] = []
-	for index in range(raw_meshes.size()):
-		var mesh_data: Dictionary = raw_meshes[index]
-		var builder := Callable(self, "_build_godot_mesh").bind(mesh_data)
-		var resource := DerivedResourceCache.load_or_build_digest(
-			source_digest, "nif-arraymesh-normal-orientation-v2-%d" % index, builder
-		) as ArrayMesh
-		if resource != null:
-			godot_meshes.push_back({
-				"mesh": resource,
-				"mesh_name": str(mesh_data.get("name", "")),
-				"parent_node_name": str(mesh_data.get("parent_node_name", "")),
-				"parent_local_vertices": mesh_data.get("parent_local_vertices", PackedVector3Array()),
-				"parent_local_normals": mesh_data.get("parent_local_normals", PackedVector3Array()),
-				"uvs": mesh_data.get("uvs", PackedVector2Array()),
-				"indices": mesh_data.get("indices", PackedInt32Array()),
-				"bone_indices": mesh_data.get("bone_indices", PackedInt32Array()),
-				"bone_weights": mesh_data.get("bone_weights", PackedFloat32Array()),
-				"diffuse_texture_path": str(mesh_data.get("diffuse_texture_path", "")),
-				"alpha_blend": bool(mesh_data.get("alpha_blend", false)),
-				"alpha_test": bool(mesh_data.get("alpha_test", false)),
-				"alpha_threshold": int(mesh_data.get("alpha_threshold", 128)),
-				"bone_names": mesh_data.get("bone_names", []),
-			})
-	_model_cache[key] = godot_meshes
-	return godot_meshes
-
 func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool:
 	var bodies: Array = metadata.get("physics_bodies", [])
 	var constraints: Array = metadata.get("physics_constraints", [])
@@ -1758,33 +1657,6 @@ func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool
 		if not body_names.has(str(constraint.get("body_b_node_name", ""))):
 			return false
 	return true
-
-func _physics_mesh_for_entry(model_path: String, mesh_index: int, mesh_entry: Dictionary) -> ArrayMesh:
-	var model_key := model_path.to_lower().replace("\\", "/")
-	var cache_key := "%s|%d" % [model_key, mesh_index]
-	if _physics_mesh_cache.has(cache_key):
-		return _physics_mesh_cache[cache_key] as ArrayMesh
-	var metadata: Dictionary = _nif_metadata_cache.get(model_key, {})
-	var source_bytes: PackedByteArray = metadata.get("source_bytes", PackedByteArray())
-	var local_data := {
-		"vertices": mesh_entry.get("parent_local_vertices", PackedVector3Array()),
-		"normals": mesh_entry.get("parent_local_normals", PackedVector3Array()),
-		"uvs": mesh_entry.get("uvs", PackedVector2Array()),
-		"indices": mesh_entry.get("indices", PackedInt32Array()),
-		"bone_indices": mesh_entry.get("bone_indices", PackedInt32Array()),
-		"bone_weights": mesh_entry.get("bone_weights", PackedFloat32Array()),
-	}
-	var resource: ArrayMesh = null
-	if not source_bytes.is_empty():
-		var builder := Callable(self, "_build_godot_mesh").bind(local_data)
-		if not metadata.has("source_digest"):
-			metadata["source_digest"] = DerivedResourceCache.digest_of(source_bytes)
-		resource = DerivedResourceCache.load_or_build_digest(
-			str(metadata["source_digest"]), "nif-havok-node-local-v1-%d" % mesh_index, builder
-		) as ArrayMesh
-	if resource != null:
-		_physics_mesh_cache[cache_key] = resource
-	return resource
 
 func _create_imported_havok_shapes(shape_data: Dictionary) -> Array[CollisionShape3D]:
 	var collisions: Array[CollisionShape3D] = []
@@ -1918,7 +1790,7 @@ func _instantiate_imported_nif_physics(
 			physics_root.add_child(static_mesh)
 			mesh_count += 1
 			continue
-		var physical_mesh := _physics_mesh_for_entry(model_path, mesh_index, mesh_entry)
+		var physical_mesh := assets.physics_mesh_for_entry(model_path, mesh_index, mesh_entry)
 		if physical_mesh == null:
 			physics_root.queue_free()
 			return {}
@@ -1998,27 +1870,9 @@ func _instantiate_imported_nif_physics(
 	])
 	return {"body_count": body_count, "mesh_count": mesh_count}
 
-func _ensure_collision_shape(model_path: String) -> void:
-	var key := model_path.to_lower().replace("\\", "/")
-	var collision_key := key
-	if _collision_cache.has(collision_key):
-		return
-	var collision_faces := PackedVector3Array()
-	for mesh_entry: Dictionary in _model_cache.get(key, []):
-		var shape_name := str(mesh_entry.get("mesh_name", "")).to_lower()
-		if shape_name.contains("sky") or shape_name.contains("lightbeam") or shape_name.contains("dust"):
-			continue
-		var mesh := mesh_entry.get("mesh") as ArrayMesh
-		if mesh != null:
-			collision_faces.append_array(mesh.get_faces())
-	var built_shape := _build_concave_shape(collision_faces)
-	# A model that is not loaded yet, or that produced no faces, is not cached: it is retried once the meshes exist.
-	if built_shape != null:
-		_collision_cache[collision_key] = built_shape
-
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
 	var model_key := model_path.to_lower().replace("\\", "/")
-	var collision_shape := _collision_shape_for_model(model_key)
+	var collision_shape := assets.collision_shape_for_model(model_key)
 	if collision_shape == null:
 		return false
 	var static_body := StaticBody3D.new()
@@ -2070,18 +1924,6 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 	area.add_child(collision)
 	cell_visual_root.add_child(area)
 	return area
-
-func _collision_shape_for_model(model_key: String) -> Shape3D:
-	_ensure_collision_shape(model_key)
-	return _collision_cache.get(model_key) as Shape3D
-
-func _build_concave_shape(faces: PackedVector3Array) -> ConcavePolygonShape3D:
-	if faces.size() < 3 or faces.size() % 3 != 0:
-		return null
-	var shape := ConcavePolygonShape3D.new()
-	shape.backface_collision = true
-	shape.set_faces(faces)
-	return shape
 
 func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
@@ -2148,8 +1990,8 @@ func _load_exterior_reference_collider(reference: Dictionary, generation: int) -
 	var reference_transform := _reference_transform(reference)
 	var model_path := str(reference.get("model_path", ""))
 	var model_key := model_path.to_lower().replace("\\", "/")
-	if not _model_cache.has(model_key):
-		await _meshes_for_model(model_path)
+	if not assets.model_cache.has(model_key):
+		await assets.meshes_for_model(model_path)
 	if generation != _cell_load_generation or not _exterior_collision_stream_enabled:
 		if generation == _cell_load_generation:
 			_exterior_collision_attempted_ids.erase(reference_id)
@@ -2174,7 +2016,7 @@ func _material_for_reference(
 	alpha_test := false,
 	alpha_threshold := 128
 ) -> StandardMaterial3D:
-	var material := await _material_for_texture(texture_path, alpha_blend, alpha_test, alpha_threshold)
+	var material := await assets.material_for_texture(texture_path, alpha_blend, alpha_test, alpha_threshold)
 	if not _is_debug_service_model(model_path):
 		return material
 	var translucent := material.duplicate() as StandardMaterial3D
@@ -2202,13 +2044,13 @@ func _load_player_avatar() -> void:
 	avatar.scale = Vector3.ONE * game_units_to_meters
 	_player_avatar = avatar
 	player.add_child(avatar)
-	await _meshes_for_model(PLAYER_SKELETON)
-	var skeleton_metadata: Dictionary = _nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
+	await assets.meshes_for_model(PLAYER_SKELETON)
+	var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
 	_player_skeleton = _build_player_skeleton(skeleton_metadata.get("nodes", []))
 	if _player_skeleton != null:
 		avatar.add_child(_player_skeleton)
 		_align_avatar_to_floor_origin(avatar, _player_skeleton)
-	await _meshes_for_model(PLAYER_IDLE_KF)
+	await assets.meshes_for_model(PLAYER_IDLE_KF)
 	_player_animations["Idle"] = _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE)
 	var loaded_animation_names: Array[String] = []
 	for animation_name_value: Variant in _player_animations.keys():
@@ -2223,7 +2065,7 @@ func _load_player_avatar() -> void:
 	for model_path_value: Variant in PLAYER_AVATAR_PARTS:
 		player_model_paths.push_back(str(model_path_value))
 	for model_path: String in player_model_paths:
-		var meshes: Array = await _meshes_for_model(model_path)
+		var meshes: Array = await assets.meshes_for_model(model_path)
 		var part_mesh_count := 0
 		var is_face_model := model_path == PLAYER_FACE_HEAD_MODEL or PLAYER_FACE_DETAIL_PARTS.has(model_path)
 		var is_player_hair := model_path.to_lower() == PLAYER_HAIR_MODEL.to_lower()
@@ -2279,7 +2121,7 @@ func _load_player_avatar() -> void:
 				_player_body_meshes_by_slot[0x0004].push_back(instance)
 			elif model_path.to_lower() == PLAYER_AVATAR_PARTS[1].to_lower():
 				_player_body_meshes_by_slot[0x0008].push_back(instance)
-			instance.material_override = await _material_for_texture(
+			instance.material_override = await assets.material_for_texture(
 				str(mesh_entry.diffuse_texture_path),
 				bool(mesh_entry.get("alpha_blend", false)),
 				bool(mesh_entry.get("alpha_test", false)),
@@ -2332,7 +2174,7 @@ func _load_player_avatar() -> void:
 		])
 
 func _load_player_face_detail_part(model_path: String) -> void:
-	var meshes: Array = await _meshes_for_model(model_path)
+	var meshes: Array = await assets.meshes_for_model(model_path)
 	var facegen_data := _ensure_facegen_data(model_path)
 	var head_attachment := BoneAttachment3D.new()
 	head_attachment.name = model_path.get_file().get_basename() + "Attachment"
@@ -2358,7 +2200,7 @@ func _load_player_face_detail_part(model_path: String) -> void:
 		_player_face_meshes.push_back(instance)
 		_player_face_source_meshes.push_back(source_mesh)
 		_player_facegen_mesh_data.push_back(facegen_data)
-		instance.material_override = await _material_for_texture(
+		instance.material_override = await assets.material_for_texture(
 			str(mesh_entry.diffuse_texture_path),
 			bool(mesh_entry.get("alpha_blend", false)),
 			bool(mesh_entry.get("alpha_test", false)),
@@ -2380,12 +2222,12 @@ func _load_deferred_player_assets() -> void:
 	for animation_name: String in PLAYER_DIRECTIONAL_KFS:
 		var animation_info: Array = PLAYER_DIRECTIONAL_KFS[animation_name]
 		var asset_path := str(animation_info[0])
-		await _meshes_for_model(asset_path)
+		await assets.meshes_for_model(asset_path)
 		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
 	for animation_name: String in PLAYER_JUMP_KFS:
 		var animation_info: Array = PLAYER_JUMP_KFS[animation_name]
 		var asset_path := str(animation_info[0])
-		await _meshes_for_model(asset_path)
+		await assets.meshes_for_model(asset_path)
 		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
 	print("OpenOB loaded deferred player face parts and %d original movement animations" % _player_animations.size())
 
@@ -2727,10 +2569,10 @@ func _door_reference_by_id(reference_id: int) -> Dictionary:
 	return {}
 
 func _load_reticle_assets() -> void:
-	var crosshair_texture := await _texture_for_path(HUD_RETICLE_TEXTURE_PATH)
+	var crosshair_texture := await assets.texture_for_path(HUD_RETICLE_TEXTURE_PATH)
 	default_reticle.texture = crosshair_texture
 	fallback_reticle.visible = crosshair_texture == null
-	var atlas := await _texture_for_path(HUD_ACTIVATION_ATLAS_PATH)
+	var atlas := await assets.texture_for_path(HUD_ACTIVATION_ATLAS_PATH)
 	if atlas == null:
 		return
 	var cell_size := float(atlas.get_height())
@@ -3043,7 +2885,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		avatar.name = "OriginalActor"
 		avatar.scale = Vector3.ONE * game_units_to_meters
 		actor_root.add_child(avatar)
-		var skeleton_metadata: Dictionary = _nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
+		var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
 		var skeleton := _build_player_skeleton(skeleton_metadata.get("nodes", []))
 		if skeleton == null:
 			_discard_pending_npc(actor_root)
@@ -3176,9 +3018,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			if item_type == "WEAP":
 				weapon_attached = true
 		print("OpenOB attached equipment to %s: %s" % [actor_name, str(attached_item_names)])
-		await _meshes_for_model(PLAYER_IDLE_KF)
-		await _meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
-		await _meshes_for_model(PLAYER_FAST_FORWARD_KF)
+		await assets.meshes_for_model(PLAYER_IDLE_KF)
+		await assets.meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
+		await assets.meshes_for_model(PLAYER_FAST_FORWARD_KF)
 		if stream_generation != _npc_stream_generation:
 			_discard_pending_npc(actor_root)
 			return
@@ -3839,8 +3681,8 @@ func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
 
 func _uses_model_space_head_attachment(model_path: String) -> bool:
 	var normalized_path := model_path.to_lower().replace("\\", "/")
-	await _meshes_for_model(model_path)
-	var metadata: Dictionary = _nif_metadata_cache.get(normalized_path, {})
+	await assets.meshes_for_model(model_path)
+	var metadata: Dictionary = assets.nif_metadata_cache.get(normalized_path, {})
 	for node_value: Variant in metadata.get("nodes", []):
 		var node: Dictionary = node_value
 		if str(node.get("name", "")) == "Bip01 Head":
@@ -3862,7 +3704,7 @@ func _add_actor_model(
 	texture_override := "",
 	remove_bone_rest_rotation := false
 ) -> Array[MeshInstance3D]:
-	var meshes: Array = await _meshes_for_model(model_path)
+	var meshes: Array = await assets.meshes_for_model(model_path)
 	var attachment: Node3D = avatar
 	var added_instances: Array[MeshInstance3D] = []
 	var actor_head_model_path := _npc_head_model_path(npc_face_data) if not npc_face_data.is_empty() else ""
@@ -3917,7 +3759,7 @@ func _add_actor_model(
 			texture_path = _npc_race_texture_path(texture_path, race_texture_key)
 		if not eye_texture_path.is_empty() and model_path.to_lower().contains("eye"):
 			texture_path = eye_texture_path
-		var material := await _material_for_texture(
+		var material := await assets.material_for_texture(
 			texture_path,
 			bool(mesh_entry.get("alpha_blend", false)),
 			bool(mesh_entry.get("alpha_test", false)),
@@ -4452,7 +4294,7 @@ func _skin_for_mesh(bone_names: Array, skeleton: Skeleton3D) -> Skin:
 
 func _animation_sequence(asset_path: String, sequence_name: String, target_skeleton: Skeleton3D = null) -> Dictionary:
 	var key := asset_path.to_lower().replace("\\", "/")
-	var metadata: Dictionary = _nif_metadata_cache.get(key, {})
+	var metadata: Dictionary = assets.nif_metadata_cache.get(key, {})
 	var pose_skeleton := target_skeleton if target_skeleton != null else _player_skeleton
 	for animation_value: Variant in metadata.get("animations", []):
 		var animation: Dictionary = animation_value
@@ -4659,175 +4501,6 @@ func _sample_scalar_keys(keys: PackedFloat32Array, time: float) -> float:
 			return lerpf(keys[left + 1], keys[right + 1], weight)
 	var last := (key_count - 1) * 2
 	return keys[last + 1]
-
-func _material_for_texture(
-	texture_path: String,
-	alpha_blend := false,
-	alpha_test := false,
-	alpha_threshold := 128,
-	billboard := false
-) -> StandardMaterial3D:
-	var normalized_path := texture_path.strip_edges().replace("\\", "/")
-	if normalized_path.is_empty():
-		return _cell_material
-	var alpha_mode := "blend" if alpha_blend else "scissor" if alpha_test else "opaque"
-	var key := "%s|%s|%d|%s" % [normalized_path.to_lower(), alpha_mode, alpha_threshold, "billboard" if billboard else "fixed"]
-	if _material_cache.has(key):
-		return _material_cache[key]
-
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color.WHITE
-	material.roughness = 0.9
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	material.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y if billboard else BaseMaterial3D.BILLBOARD_DISABLED
-	material.billboard_keep_scale = billboard
-	if alpha_blend:
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	elif alpha_test:
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-		material.alpha_scissor_threshold = float(alpha_threshold) / 255.0
-	var texture := await _texture_for_path(normalized_path)
-	if texture != null:
-		material.albedo_texture = texture
-	else:
-		material.albedo_color = Color(0.62, 0.58, 0.5)
-	_material_cache[key] = material
-	return material
-
-func _texture_for_path(texture_path: String) -> Texture2D:
-	var key := texture_path.to_lower()
-	if _texture_cache.has(key):
-		return _texture_cache[key]
-	if data_reader == null:
-		return null
-
-	var source_bytes: PackedByteArray = data_reader.read_asset(texture_path)
-	if source_bytes.is_empty():
-		var fallback_path := str(TEXTURE_FALLBACKS.get(key, ""))
-		if not fallback_path.is_empty():
-			source_bytes = data_reader.read_asset(fallback_path)
-	if source_bytes.is_empty():
-		push_warning("Could not read texture %s" % texture_path)
-		_texture_cache[key] = null
-		return null
-	var kind := "oblivion-texture-%s" % texture_path.get_extension().to_lower()
-	var builder := Callable(self, "_build_godot_texture").bind(source_bytes, texture_path)
-	var resource := DerivedResourceCache.load_or_build(source_bytes, kind, builder) as Texture2D
-	_texture_cache[key] = resource
-	return resource
-
-func _build_godot_texture(source_bytes: PackedByteArray, texture_path: String) -> Texture2D:
-	var image := Image.new()
-	if texture_path.get_extension().to_lower() == "dds":
-		image = _decode_dds_image(source_bytes)
-		if image == null:
-			push_warning("Could not decode DDS texture %s" % texture_path)
-			return null
-		return ImageTexture.create_from_image(image)
-
-	var load_error: Error
-	match texture_path.get_extension().to_lower():
-		"tga":
-			load_error = image.load_tga_from_buffer(source_bytes)
-		"png":
-			load_error = image.load_png_from_buffer(source_bytes)
-		"jpg", "jpeg":
-			load_error = image.load_jpg_from_buffer(source_bytes)
-		_:
-			push_warning("Unsupported texture format: %s" % texture_path)
-			return null
-	if texture_path.get_extension().to_lower() == "dds" and (load_error != OK or image.is_empty()):
-		# Some shipped Oblivion DDS files omit the final 8-byte 1x1 DXT block.
-		# Pad only decoder input; cache identity still uses the unmodified asset.
-		var padded_bytes := source_bytes.duplicate()
-		padded_bytes.append_array(PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-		var padded_image := Image.new()
-		load_error = padded_image.load_dds_from_buffer(padded_bytes)
-		if load_error == OK and not padded_image.is_empty():
-			image = padded_image
-	if load_error != OK or image.is_empty():
-		push_warning("Could not decode texture %s (%s)" % [texture_path, error_string(load_error)])
-		return null
-	return ImageTexture.create_from_image(image)
-
-func _decode_dds_image(source_bytes: PackedByteArray) -> Image:
-	if source_bytes.size() < 128 or source_bytes.decode_u32(0) != 0x20534444:
-		return null
-	# Godot 4.7 rejects DDS files with partial mip chains. Oblivion commonly
-	# stores fewer levels than the DDS header's full-chain flag implies. Load the
-	# original top-level compressed image, then rebuild its mip chain in Godot.
-	var decoder_bytes := source_bytes.duplicate()
-	var dds_flags := decoder_bytes.decode_u32(8)
-	if (dds_flags & 0x20000) != 0:
-		decoder_bytes.encode_u32(8, dds_flags & ~0x20000)
-		decoder_bytes.encode_u32(28, 1)
-	var image := Image.new()
-	var load_error := image.load_dds_from_buffer(decoder_bytes)
-	if load_error != OK or image.is_empty():
-		return null
-	if image.is_compressed():
-		load_error = image.decompress()
-		if load_error != OK:
-			return null
-	if image.get_mipmap_count() == 0:
-		load_error = image.generate_mipmaps()
-		if load_error != OK:
-			return null
-	return image
-
-func _build_godot_mesh(mesh_data: Dictionary) -> ArrayMesh:
-	var vertices: PackedVector3Array = mesh_data.get("vertices", PackedVector3Array())
-	var normals: PackedVector3Array = mesh_data.get("normals", PackedVector3Array())
-	var uvs: PackedVector2Array = mesh_data.get("uvs", PackedVector2Array())
-	var indices: PackedInt32Array = mesh_data.get("indices", PackedInt32Array())
-	var bones: PackedInt32Array = mesh_data.get("bone_indices", PackedInt32Array())
-	var weights: PackedFloat32Array = mesh_data.get("bone_weights", PackedFloat32Array())
-	if vertices.is_empty() or indices.is_empty():
-		return null
-	# The converted Oblivion model normals shade opposite the intended sun side in
-	# Godot. Flip shading normals only; triangle winding still drives geometry and shadows.
-	for normal_index in range(normals.size()):
-		normals[normal_index] = -normals[normal_index]
-
-	if normals.size() != vertices.size():
-		var surface := SurfaceTool.new()
-		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-		for index in indices:
-			if uvs.size() == vertices.size():
-				surface.set_uv(uvs[index])
-			if bones.size() == vertices.size() * 4 and weights.size() == vertices.size() * 4:
-				var vertex_bones := PackedInt32Array()
-				var vertex_weights := PackedFloat32Array()
-				for influence in range(4):
-					vertex_bones.push_back(bones[index * 4 + influence])
-					vertex_weights.push_back(weights[index * 4 + influence])
-				surface.set_bones(vertex_bones)
-				surface.set_weights(vertex_weights)
-			surface.add_vertex(vertices[index])
-		surface.generate_normals()
-		var generated_mesh := surface.commit() as ArrayMesh
-		var generated_arrays := generated_mesh.surface_get_arrays(0)
-		var generated_normals: PackedVector3Array = generated_arrays[Mesh.ARRAY_NORMAL]
-		for normal_index in range(generated_normals.size()):
-			generated_normals[normal_index] = -generated_normals[normal_index]
-		generated_arrays[Mesh.ARRAY_NORMAL] = generated_normals
-		var flipped_mesh := ArrayMesh.new()
-		flipped_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, generated_arrays)
-		return flipped_mesh
-
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	if uvs.size() == vertices.size():
-		arrays[Mesh.ARRAY_TEX_UV] = uvs
-	arrays[Mesh.ARRAY_INDEX] = indices
-	if bones.size() == vertices.size() * 4 and weights.size() == vertices.size() * 4:
-		arrays[Mesh.ARRAY_BONES] = bones
-		arrays[Mesh.ARRAY_WEIGHTS] = weights
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
 
 func _reference_transform(reference: Dictionary) -> Transform3D:
 	var position: PackedFloat32Array = reference.get("position", PackedFloat32Array())
