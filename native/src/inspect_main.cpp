@@ -278,7 +278,8 @@ int main(int argc, char** argv) {
                                          const auto* script = data.find_script(reference.script_form_id);
                                          return (script ? script->editor_id : std::string("?")) + "@" + std::to_string(0);
                                      }() : std::string("none"))
-                                  << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2] << '\n';
+                                  << " pos=" << reference.position[0] << ',' << reference.position[1] << ',' << reference.position[2]
+                                  << " lock=" << static_cast<int>(reference.lock_level) << " key=" << std::hex << reference.lock_key_form_id << std::dec << '\n';
                     }
                 }
                 return 0;
@@ -395,6 +396,12 @@ int main(int argc, char** argv) {
                         for (const auto& reference : cell.references)
                             if (reference.form_id == package->location_form_id) location_name = reference.reference_name + "@" + cell.editor_id;
                         if (location_name != "?") break;
+                    }
+                    // A location that is not in any cell may be an unplaced reference: report the cell it names.
+                    if (location_name == "?") {
+                        for (const auto& [form_id, cell_id] : data.unplaced_references())
+                            if (form_id == package->location_form_id)
+                                location_name = "UNPLACED(cell " + std::to_string(cell_id) + ") form " + std::to_string(form_id);
                     }
                     std::cout << "  " << package->editor_id << " form=" << std::hex << package_id << std::dec
                               << " type=" << static_cast<unsigned>(package->package_type) << " flags=0x" << std::hex << package->flags << std::dec

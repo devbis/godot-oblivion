@@ -316,6 +316,12 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
                 else if (world_) world_->set_stage(action.arguments[0].text, next, tick, distance, depth + 1);
             } else if (command == "startquest" && world_) {
                 world_->begin(action.arguments[0].text, tick, distance, depth + 1);
+            } else if (command == "sayto" && world_ && !action.target.empty() && action.arguments.size() >= 2 && action.arguments[1].is_text) {
+                // `Ref.SayTo listener Topic` in a stage result: the reference speaks the topic to the listener.
+                const auto speaker = world_->reference_base(action.target).value_or(0);
+                const auto listener = lower(action.arguments[0].text) == "player" ? kPlayerReference
+                    : world_->reference_base(action.arguments[0].text).value_or(0);
+                world_->say(action.arguments[1].text, speaker, listener, tick, distance);
             }
         }
     }

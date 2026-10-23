@@ -842,6 +842,8 @@ private:
         entry["rotation"] = PackedFloat32Array{reference.rotation[0], reference.rotation[1], reference.rotation[2]};
         entry["teleport_ref_id"] = static_cast<int64_t>(reference.teleport_ref_id);
         entry["teleport_cell_id"] = static_cast<int64_t>(reference.teleport_cell_id);
+        entry["lock_level"] = static_cast<int64_t>(reference.lock_level);
+        entry["lock_key_form_id"] = static_cast<int64_t>(reference.lock_key_form_id);
         entry["teleport_position"] = PackedFloat32Array{reference.teleport_position[0], reference.teleport_position[1], reference.teleport_position[2]};
         entry["teleport_rotation"] = PackedFloat32Array{reference.teleport_rotation[0], reference.teleport_rotation[1], reference.teleport_rotation[2]};
         entry["editor_id"] = as_string(reference.editor_id);

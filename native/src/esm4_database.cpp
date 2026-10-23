@@ -335,6 +335,7 @@ void Esm4Database::attach_references() {
         const auto cell_it = cell_by_id_.find(cell_id);
         if (cell_it == cell_by_id_.end()) {
             unplaced_reference_count_ += references.size();
+            for (const auto& reference : references) unplaced_references_.emplace_back(reference.form_id, cell_id);
             continue;
         }
         auto& target = cells_[cell_it->second].references;
@@ -764,6 +765,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 reference.position[i] = f32(value + 4 * i);
                 reference.rotation[i] = f32(value + 12 + 4 * i);
             }
+        } else if (tag == "XLOC" && is_reference && subrecord_size >= 8) {
+            reference.lock_level = value[0];
+            reference.lock_key_form_id = u32(value + 4);
         } else if (tag == "XTEL" && is_reference && subrecord_size >= 28) {
             reference.teleport_ref_id = u32(value);
             for (std::size_t i = 0; i < 3; ++i) {
@@ -787,7 +791,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     } else if (is_reference) {
         // The owning CELL may appear after its references, so attachment is
         // deferred until the whole file has been read.
-        if (active_cell_id == 0) ++unplaced_reference_count_;
+        if (active_cell_id == 0) {
+            ++unplaced_reference_count_;
+            unplaced_references_.emplace_back(reference.form_id, 0u);
+        }
         else references_by_cell_id_[active_cell_id].push_back(std::move(reference));
     } else if (is_land && active_cell_id != 0) {
         if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end()) {

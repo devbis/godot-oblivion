@@ -25,6 +25,8 @@ struct PlacedReference {
     std::array<float, 3> rotation{};
     std::uint32_t teleport_ref_id = 0;
     std::uint32_t teleport_cell_id = 0;
+    std::uint8_t lock_level = 0;         // XLOC: 0 when the reference is not locked
+    std::uint32_t lock_key_form_id = 0;  // XLOC: the key that opens it (0 when none is named)
     std::array<float, 3> teleport_position{};
     std::array<float, 3> teleport_rotation{};
     std::string record_type;
@@ -149,6 +151,8 @@ public:
     // References whose owning cell never appeared in the file. They are kept
     // out of every cell rather than dropped silently, and counted here.
     [[nodiscard]] std::size_t unplaced_reference_count() const noexcept { return unplaced_reference_count_; }
+    // Form ID and owning cell ID (0 when the reference had no cell) of each reference that is not in any cell.
+    [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>& unplaced_references() const noexcept { return unplaced_references_; }
     [[nodiscard]] const std::map<std::string, float>& float_game_settings() const noexcept { return float_game_settings_; }
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
@@ -184,6 +188,7 @@ private:
     std::map<std::string, float> float_game_settings_;
     std::size_t record_count_ = 0;
     std::size_t unplaced_reference_count_ = 0;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> unplaced_references_;
     std::map<std::uint32_t, DialogTopic> topic_by_id_;
     std::map<std::uint32_t, std::vector<DialogResponse>> responses_by_topic_;
     std::uint32_t active_topic_id_ = 0;  // topic of the INFO group being walked
