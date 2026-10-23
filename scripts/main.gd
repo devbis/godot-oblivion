@@ -3236,8 +3236,15 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 	actor["face_talk_weight"] = talk_weight
 	_set_actor_face_shape(actor, "BigAah", talk_weight)
 
+## A gesture that plays once holds its final pose at least this long, and as long as the actor is still speaking: the
+## original special idles (pointing, halting) raise the arm in under a second and hold it.
+const NPC_GESTURE_MIN_HOLD_S := 2.5
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
+
+func _actor_is_speaking(audio_manager: Node, actor: Dictionary) -> bool:
+	return is_instance_valid(audio_manager) and audio_manager.has_method("is_dialogue_playing") \
+			and bool(audio_manager.call("is_dialogue_playing", int(actor.get("reference_id", 0))))
 
 func _update_npc_actors(delta: float) -> void:
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
@@ -3282,6 +3289,8 @@ func _update_npc_actors(delta: float) -> void:
 			if idle_animation.is_empty() or (
 				not bool(idle_animation.get("loops", true)) and str(actor.get("active_animation", "")) == NPC_IDLE_KEY
 				and float(actor.get("animation_time", 0.0)) >= float(idle_animation.get("stop_time", 0.0))
+				and float(Time.get_ticks_msec() - int(actor.get("idle_started_ms", 0))) * 0.001 >= NPC_GESTURE_MIN_HOLD_S
+				and not _actor_is_speaking(audio_manager, actor)
 			):
 				_end_npc_idle(actor)
 			else:
@@ -3358,6 +3367,7 @@ func _start_npc_idle(actor: Dictionary, kf_path: String, idle_id: String) -> voi
 	var animations: Dictionary = actor.get("animations", {})
 	animations[NPC_IDLE_KEY] = animation
 	actor["idle_active"] = true
+	actor["idle_started_ms"] = Time.get_ticks_msec()
 	# The IDLE record's group flag is not a reliable marker (PointForward is group 4, "special idle"), and gestures such as
 	# PointDownward or HoldUp key a few leg bones too. A clip that plays once is a gesture: it plays on over the walk (leg
 	# tracks skipped, the walk cycle underneath) instead of ending when the actor starts walking. Looping clips are states

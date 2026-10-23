@@ -289,6 +289,15 @@ func _play_stream(
 	return player
 
 
+## True while a dialogue line is playing for the actor (the line's voice, not its level).
+func is_dialogue_playing(reference_id: int) -> bool:
+	var entry_value: Variant = _dialogue_players.get(reference_id)
+	if not entry_value is Dictionary:
+		return false
+	var player := (entry_value as Dictionary).get("player") as AudioStreamPlayer3D
+	return is_instance_valid(player) and player.playing
+
+
 ## Returns the voice level for the actor's own dialogue bus, scaled like the original game's FaceGen talk driver.
 func get_dialogue_talk_weight(reference_id: int) -> float:
 	var entry_value: Variant = _dialogue_players.get(reference_id)
