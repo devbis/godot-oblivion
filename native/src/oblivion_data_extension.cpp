@@ -505,6 +505,15 @@ public:
         return record_type ? as_string(*record_type) : String{};
     }
 
+    PackedStringArray list_assets(const String& prefix) const {
+        const CharString utf8 = prefix.utf8();
+        PackedStringArray result;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return result;
+        for (const auto& path : data_->list_assets(utf8.get_data())) result.push_back(String::utf8(path.c_str()));
+        return result;
+    }
+
     PackedByteArray read_asset(const String& asset_path) const {
         const CharString path = asset_path.utf8();
         std::vector<uint8_t> bytes;
@@ -754,6 +763,7 @@ public:
             animation_item["name"] = String::utf8(animation.name.c_str());
             animation_item["start_time"] = animation.start_time;
             animation_item["stop_time"] = animation.stop_time;
+            animation_item["cycle_type"] = static_cast<int64_t>(animation.cycle_type);
             Array tracks;
             for (const auto& track : animation.tracks) {
                 Dictionary track_item;
@@ -809,6 +819,7 @@ protected:
         ClassDB::bind_method(D_METHOD("find_form_id_by_editor_id", "editor_id"), &OblivionData::find_form_id_by_editor_id);
         ClassDB::bind_method(D_METHOD("find_editor_id", "form_id"), &OblivionData::find_editor_id);
         ClassDB::bind_method(D_METHOD("find_record_type", "form_id"), &OblivionData::find_record_type);
+        ClassDB::bind_method(D_METHOD("list_assets", "prefix"), &OblivionData::list_assets);
         ClassDB::bind_method(D_METHOD("read_asset", "asset_path"), &OblivionData::read_asset);
         ClassDB::bind_method(D_METHOD("apply_facegen_texture_data", "image_data", "width", "height",
                                       "egt_data", "coefficients"), &OblivionData::apply_facegen_texture_data);

@@ -265,4 +265,19 @@ std::vector<std::uint8_t> GameData::read_asset(std::string_view asset_path) cons
     throw std::runtime_error("asset not found: " + std::string(asset_path));
 }
 
+std::vector<std::string> GameData::list_assets(std::string_view prefix) const {
+    std::vector<std::string> result;
+    if (!opened_) return result;
+    const auto normalized_prefix = normalize_asset_path(prefix);
+    for (const auto& archive : archives_)
+        for (auto& path : archive.list_paths(prefix)) result.push_back(std::move(path));
+    for (const auto& [path, file] : loose_files_) {
+        (void)file;
+        if (normalized_prefix.empty() || path.starts_with(normalized_prefix)) result.push_back(path);
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 } // namespace oblivion

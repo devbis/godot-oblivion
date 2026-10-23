@@ -433,6 +433,7 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         animation.name = sequence->name.get();
         animation.start_time = sequence->startTime;
         animation.stop_time = sequence->stopTime;
+        animation.cycle_type = static_cast<std::uint32_t>(sequence->cycleType);
         for (const auto& link : sequence->controlledBlocks) {
             auto* interpolator = file.GetHeader().GetBlock<nifly::NiTransformInterpolator>(link.interpolatorRef);
             if (!interpolator) continue;

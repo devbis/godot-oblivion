@@ -94,6 +94,8 @@ struct NifAnimationData {
     std::string name;
     float start_time = 0.0f;
     float stop_time = 0.0f;
+    // NiControllerSequence cycle type: 0 loop, 1 reverse, 2 clamp.
+    std::uint32_t cycle_type = 0;
     std::vector<NifAnimationTrackData> tracks;
 };
 

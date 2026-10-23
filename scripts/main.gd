@@ -37,6 +37,10 @@ const PLAYER_JUMP_KFS := {
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const ANIMATION_BLEND_DURATION := 0.18
+## Original idle and gesture clips (pointing, saluting, praying and so on), enumerated from the game archives at runtime.
+const PLAYER_GESTURE_PREFIX := "meshes/characters/_male/idleanims"
+const GESTURE_KEY := "Gesture"
+const GESTURE_MOVE_ACTIONS := ["move_forward", "move_back", "move_left", "move_right"]
 const InteractionTargeting := preload("res://scripts/interaction_targeting.gd")
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_HEAD_CULL_MARGIN := ActorFactory.PLAYER_HEAD_CULL_MARGIN
@@ -160,6 +164,12 @@ var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
 var _player_first_person_mode := false
 var _active_animation := ""
+var _gesture_clips: Array[Dictionary] = []
+var _gesture_index := -1
+var _gesture_active := false
+var _gesture_request_id := 0
+var _gesture_panel: PanelContainer
+var _gesture_list: VBoxContainer
 var _animation_time := 0.0
 var _player_animation_from_pose: Array[Dictionary] = []
 var _player_animation_blend_elapsed := ANIMATION_BLEND_DURATION
@@ -235,6 +245,8 @@ func _process(_delta: float) -> void:
 	if not _world_loading and not current_cell.is_empty() and not bool(current_cell.get("interior", true)):
 		await _stream_exterior_if_needed()
 	if _player_skeleton != null and not _world_loading:
+		if _gesture_panel_open() and (_world_loading or _inventory_open or player.face_preview_enabled):
+			_toggle_gesture_panel()
 		if not _inventory_open:
 			_update_player_animation(_delta)
 		player.set_first_person_eye_anchor(_player_first_person_camera_anchor())
@@ -269,7 +281,15 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.keycode == KEY_G:
 		_cycle_player_face_expression()
 	elif event.keycode == KEY_I:
+		if _gesture_panel_open():
+			_toggle_gesture_panel()
 		_toggle_inventory()
+	elif event.keycode == KEY_M:
+		_toggle_gesture_panel()
+	elif event.keycode == KEY_COMMA:
+		_step_gesture(-1)
+	elif event.keycode == KEY_PERIOD:
+		_step_gesture(1)
 	elif event.keycode == KEY_U:
 		_toggle_face_view()
 	elif event.keycode == KEY_Y:
@@ -1259,7 +1279,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nSpace interact · Y fly · I inventory · R camera · N face · U face view · G/F expression · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nSpace interact · Y fly · I inventory · M/,/. gestures · R camera · N face · U face view · G/F expression · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
@@ -3404,7 +3424,11 @@ func _update_player_animation(delta: float) -> void:
 	var is_on_floor_now: bool = player.is_on_floor() or player.is_stepping()
 	if not is_on_floor_now and player.velocity.y <= 0.1:
 		is_on_floor_now = _has_nearby_walkable_support()
-	if _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
+	if _gesture_active and _gesture_should_end(horizontal_speed, is_on_floor_now):
+		_end_gesture()
+	if _gesture_active:
+		_set_player_animation(GESTURE_KEY)
+	elif _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
 		_set_player_animation("JumpStart" if not _player_animations.get("JumpStart", {}).is_empty() else "JumpLoop")
 	elif not _player_was_on_floor and is_on_floor_now:
 		_set_player_animation("JumpLand" if not _player_animations.get("JumpLand", {}).is_empty() else _player_locomotion_animation(horizontal_speed))
@@ -3440,7 +3464,7 @@ func _update_player_animation(delta: float) -> void:
 		_player_skeleton,
 		animation,
 		_animation_time,
-		_active_animation not in ["JumpStart", "JumpLand"],
+		_active_animation not in ["JumpStart", "JumpLand"] and bool(animation.get("loops", true)),
 		_player_animation_from_pose,
 		blend_weight
 	)
@@ -3485,6 +3509,174 @@ func _set_player_animation(animation_name: String) -> void:
 		_player_animation_blend_elapsed = 0.0
 	_active_animation = animation_name
 	_animation_time = float(animation.get("start_time", 0.0))
+
+func _gesture_panel_open() -> bool:
+	return _gesture_panel != null and _gesture_panel.visible
+
+func _gestures_available() -> bool:
+	return (
+		data_reader != null and _player_skeleton != null and _player_deferred_assets_ready
+		and not _world_loading and not _inventory_open and not player.face_preview_enabled
+	)
+
+## A gesture ends when it finishes (non-looping clips), or when the player moves, jumps, crouches, or leaves the ground.
+## While the picker is open the keys belong to the panel, so only the animation state is checked.
+func _gesture_should_end(horizontal_speed: float, on_floor: bool) -> bool:
+	if not _gesture_active:
+		return false
+	var animation: Dictionary = _player_animations.get(GESTURE_KEY, {})
+	if animation.is_empty() or player.is_flying:
+		return true
+	if not bool(animation.get("loops", true)) and _active_animation == GESTURE_KEY \
+			and _animation_time >= float(animation.get("stop_time", 0.0)):
+		return true
+	if _gesture_panel_open():
+		return false
+	if horizontal_speed > 0.08 or not on_floor or player.is_crouching:
+		return true
+	if Input.is_action_pressed("jump") or Input.is_action_pressed("crouch"):
+		return true
+	for action: String in GESTURE_MOVE_ACTIONS:
+		if Input.is_action_pressed(action):
+			return true
+	return false
+
+func _end_gesture() -> void:
+	_gesture_active = false
+	_gesture_request_id += 1
+	_player_animations.erase(GESTURE_KEY)
+	if _active_animation == GESTURE_KEY:
+		_player_animation_from_pose = _capture_skeleton_pose(_player_skeleton)
+		_player_animation_blend_elapsed = 0.0
+		_active_animation = ""
+		_set_player_animation("Idle")
+
+## Lists every KF under the male idleanims folder in the game data, once.
+func _ensure_gesture_clips() -> void:
+	if not _gesture_clips.is_empty() or data_reader == null:
+		return
+	for path_value: Variant in data_reader.list_assets(PLAYER_GESTURE_PREFIX):
+		var archive_path := str(path_value).replace("\\", "/")
+		if not archive_path.ends_with(".kf"):
+			continue
+		_gesture_clips.push_back({
+			"name": archive_path.get_file().get_basename(),
+			"path": archive_path.trim_prefix("meshes/"),
+		})
+	_gesture_clips.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a.name) < str(b.name))
+
+func _step_gesture(direction: int) -> void:
+	if not _gestures_available() or _gesture_panel_open():
+		return
+	_ensure_gesture_clips()
+	if _gesture_clips.is_empty():
+		_show_interaction_toast("No gesture clips found")
+		return
+	_gesture_index = posmod(_gesture_index + direction, _gesture_clips.size()) if _gesture_index >= 0 \
+			else (0 if direction > 0 else _gesture_clips.size() - 1)
+	_play_gesture(_gesture_index)
+
+func _toggle_gesture_panel() -> void:
+	if _gesture_panel_open():
+		_gesture_panel.visible = false
+		player.set_physics_process(true)
+		player.capture_mouse()
+		return
+	if not _gestures_available():
+		return
+	_ensure_gesture_clips()
+	if _gesture_clips.is_empty():
+		_show_interaction_toast("No gesture clips found")
+		return
+	if _gesture_panel == null:
+		_build_gesture_panel()
+	player.velocity = Vector3.ZERO
+	player.set_physics_process(false)
+	player.release_mouse()
+	_gesture_panel.visible = true
+	var buttons := _gesture_list.get_children()
+	var focus_index := clampi(_gesture_index, 0, buttons.size() - 1)
+	(buttons[focus_index] as Button).grab_focus()
+
+func _build_gesture_panel() -> void:
+	_gesture_panel = PanelContainer.new()
+	_gesture_panel.name = "GesturePanel"
+	_gesture_panel.visible = false
+	_gesture_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_gesture_panel.offset_left = -180.0
+	_gesture_panel.offset_right = 180.0
+	_gesture_panel.offset_top = -190.0
+	_gesture_panel.offset_bottom = 190.0
+	_gesture_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_gesture_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	var margin := MarginContainer.new()
+	for side: String in ["left", "right"]:
+		margin.add_theme_constant_override("margin_" + side, 12)
+	for side: String in ["top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 10)
+	_gesture_panel.add_child(margin)
+	var contents := VBoxContainer.new()
+	margin.add_child(contents)
+	var title := Label.new()
+	title.text = "Gestures (%d) · click or Enter to play · M to close · , . step" % _gesture_clips.size()
+	contents.add_child(title)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(330, 310)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	contents.add_child(scroll)
+	_gesture_list = VBoxContainer.new()
+	_gesture_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_gesture_list)
+	for index in range(_gesture_clips.size()):
+		var button := Button.new()
+		button.text = str(_gesture_clips[index].name)
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.pressed.connect(_pick_gesture.bind(index))
+		_gesture_list.add_child(button)
+	$StatusLayer.add_child(_gesture_panel)
+
+func _pick_gesture(index: int) -> void:
+	_gesture_index = index
+	_toggle_gesture_panel()
+	_play_gesture(index)
+
+## Builds the animation for one clip, loading it on first use, and starts it. The first sequence in the file is played;
+## it loops when its cycle type is loop, otherwise it plays once and the player returns to idle.
+func _play_gesture(index: int) -> void:
+	var clip: Dictionary = _gesture_clips[index]
+	var clip_name := str(clip.name)
+	_gesture_request_id += 1
+	var request_id := _gesture_request_id
+	_show_interaction_toast("%s  (%d/%d)" % [clip_name, index + 1, _gesture_clips.size()])
+	var animation := await _gesture_animation(str(clip.path))
+	if request_id != _gesture_request_id:
+		return
+	if animation.is_empty():
+		_show_interaction_toast("Gesture failed to load: %s" % clip_name)
+		return
+	if not _gestures_available():
+		return
+	_player_animations[GESTURE_KEY] = animation
+	_gesture_active = true
+	_active_animation = ""
+	_set_player_animation(GESTURE_KEY)
+	_show_interaction_toast("%s  (%d/%d)%s" % [
+		clip_name, index + 1, _gesture_clips.size(), "" if bool(animation.loops) else " · once"
+	])
+
+func _gesture_animation(asset_path: String) -> Dictionary:
+	await assets.meshes_for_model(asset_path)
+	var metadata: Dictionary = assets.nif_metadata_cache.get(asset_path.to_lower(), {})
+	var sequences: Array = metadata.get("animations", [])
+	if sequences.is_empty():
+		return {}
+	var sequence_name := str((sequences[0] as Dictionary).get("name", ""))
+	var animation := _animation_sequence(asset_path, sequence_name).duplicate()
+	if animation.is_empty() or (animation.get("tracks", []) as Array).is_empty():
+		return {}
+	animation["loops"] = int(animation.get("cycle_type", 0)) == 0
+	return animation
 
 func _capture_skeleton_pose(skeleton: Skeleton3D) -> Array[Dictionary]:
 	var pose: Array[Dictionary] = []

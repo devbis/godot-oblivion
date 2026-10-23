@@ -48,6 +48,8 @@ public:
     [[nodiscard]] const DialogTopic* find_topic_by_editor_id(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return esm_.scripts(); }
     [[nodiscard]] std::vector<std::uint8_t> read_asset(std::string_view asset_path) const;
+    // Sorted unique normalized (lowercase, backslash) paths under a prefix, from loose files and every archive.
+    [[nodiscard]] std::vector<std::string> list_assets(std::string_view prefix) const;
     [[nodiscard]] bool is_open() const noexcept { return opened_; }
     [[nodiscard]] const std::filesystem::path& data_directory() const noexcept { return data_directory_; }
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return esm_.cells(); }
