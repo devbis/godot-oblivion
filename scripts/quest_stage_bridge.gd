@@ -78,10 +78,25 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			var who := str(arguments[1]) if arguments.size() > 1 else ""
 			_play_dialogue_audio(action, arguments, who, world)
 			return "says (%s): %s" % [who, line]
+		"pickidle":
+			return _pick_idle(target, arguments, world)
 		"evp":
 			# The NPC re-evaluates its packages; the scene refreshes the routes after the result (see main.gd).
 			return "re-evaluates packages: %s" % label
 	return "not implemented: %s" % label
+
+
+## PickIdle: the idle manager chose a clip for the actor (arguments: .kf path, IDLE editor id, form id, group flags).
+## An empty path means nothing matched and the actor goes back to its default idle. The scene plays it.
+func _pick_idle(target: String, arguments: Array, world: Node3D) -> String:
+	if target.is_empty() or arguments.size() < 4:
+		return "not applied: pickidle needs an actor"
+	if not world.has_method("play_npc_idle"):
+		return "not applied: %s.pickidle, the scene cannot play idles" % target
+	var kf_path := str(arguments[0])
+	var idle_id := str(arguments[1])
+	var done := str(world.call("play_npc_idle", target, kf_path, idle_id, int(arguments[3])))
+	return "picks idle: %s" % done
 
 
 func _play_dialogue_audio(action: Dictionary, arguments: Array, speaker_editor_id: String, world: Node3D) -> void:

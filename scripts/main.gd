@@ -40,6 +40,8 @@ const ANIMATION_BLEND_DURATION := 0.18
 ## Original idle and gesture clips (pointing, saluting, praying and so on), enumerated from the game archives at runtime.
 const PLAYER_GESTURE_PREFIX := "meshes/characters/_male/idleanims"
 const GESTURE_KEY := "Gesture"
+## Key of the clip an NPC plays for the idle manager's PickIdle (see play_npc_idle), next to its Idle and Forward clips.
+const NPC_IDLE_KEY := "ScriptIdle"
 const GESTURE_MOVE_ACTIONS := ["move_forward", "move_back", "move_left", "move_right"]
 const InteractionTargeting := preload("res://scripts/interaction_targeting.gd")
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
@@ -175,6 +177,8 @@ var _player_animation_from_pose: Array[Dictionary] = []
 var _player_animation_blend_elapsed := ANIMATION_BLEND_DURATION
 var _player_was_on_floor := true
 var _npc_actors: Array[Dictionary] = []
+## Idles the idle manager chose for NPCs that are not in the scene yet, by lowercase reference name; played when they load.
+var _pending_idles: Dictionary = {}
 var _npc_pending_roots: Array[Node3D] = []
 var _player_start_position := Vector3.ZERO
 var _fallback_support: StaticBody3D
@@ -714,6 +718,11 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	quest_world.set_reference_base(reference_name, base_form_id)
 	if not quest_world.add_actor(base_form_id, reference_name):
 		push_warning("OpenOB quest: no GameMode script for actor %s" % reference_name)
+	# An idle picked before this actor was streamed in plays now.
+	var pending: Dictionary = _pending_idles.get(reference_name.to_lower(), {})
+	if not pending.is_empty():
+		_pending_idles.erase(reference_name.to_lower())
+		_start_npc_idle(actor, str(pending.path), str(pending.idle_id))
 
 ## Names the speaker of each spoken line (its base form is the second argument) before the bridge prints it.
 func _name_speakers(result: Dictionary) -> void:
@@ -740,7 +749,7 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	# State and unsupported-command reports are summarized once. Speech is an event, so repeated identical dialogue lines
 	# remain visible each time the script says them.
 	for line: String in quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")):
-		if line.strip_edges().begins_with("says ("):
+		if line.strip_edges().begins_with("says (") or line.strip_edges().begins_with("picks idle"):
 			report.push_back(line)
 		elif not _reported_bridge_lines.has(line):
 			_reported_bridge_lines[line] = true
@@ -825,6 +834,8 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
 		actor["package_done"] = false
 	actor["package"] = package
+	if quest_world != null:
+		quest_world.set_actor_package(str(actor.get("reference_name", "")), int(package.get("form_id", 0)))
 	var waypoints: Array[Dictionary] = []
 	var route_path := PackedVector3Array()
 	var final_arrival_distance := 0.08
@@ -844,6 +855,9 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			route_path = director.navigation_path((root as Node3D).global_position, position, _actor_collision_radius(root as Node3D))
 			for point: Vector3 in route_path:
 				waypoints.push_back({"position": point, "speed_mps": speed})
+	# A route that starts ends the idle: the actor walks.
+	if not waypoints.is_empty():
+		_end_npc_idle(actor)
 	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance)
 	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
 		str(actor.get("reference_name", actor.get("name", "NPC"))),
@@ -2862,6 +2876,28 @@ func _setup_cell_once(stream_generation: int) -> void:
 	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):
 			print("OpenOB quest: " + line)
+		_run_debug_stages()
+
+## Developer check: OPENOB_DEBUG_STAGES="CharacterGen:58,CharacterGen:64" enters those quest stages one after the other
+## (a few hundred frames apart) once the cell's quest runs, so the effects of late intro stages (idles, speech) can be
+## watched in the log without playing the intro through.
+func _run_debug_stages() -> void:
+	var specification := OS.get_environment("OPENOB_DEBUG_STAGES").strip_edges()
+	if specification.is_empty():
+		return
+	for item: String in specification.split(",", false):
+		var parts := item.strip_edges().split(":")
+		if parts.size() != 2 or not parts[1].is_valid_int():
+			push_warning("OpenOB debug stage: expected QUEST:STAGE, got %s" % item)
+			continue
+		for _frame in range(400):
+			await get_tree().process_frame
+		if quest_world == null:
+			return
+		print("OpenOB debug stage: entering %s stage %s" % [parts[0], parts[1]])
+		for line: String in _apply_driver_result(quest_world.start(parts[0], int(parts[1]), Callable(self, "_quest_distance"))):
+			print("OpenOB quest: " + line)
+		_refresh_npc_routes()
 
 func _update_npc_streaming() -> void:
 	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
@@ -2945,6 +2981,7 @@ func _clear_cell_actors() -> void:
 		actor_root.set_process(false)
 		actor_root.queue_free()
 	_npc_actors.clear()
+	_pending_idles.clear()
 
 func _discard_pending_npc(actor_root: Node3D) -> void:
 	_npc_pending_roots.erase(actor_root)
@@ -3227,9 +3264,20 @@ func _update_npc_actors(delta: float) -> void:
 		var walking := bool(actor_root.get("is_walking"))
 		var horizontal_speed := Vector2(actor_root.velocity.x, actor_root.velocity.z).length()
 		var requested_animation := "Idle"
+		var animations: Dictionary = actor.get("animations", {})
 		if walking:
 			requested_animation = "FastForward" if horizontal_speed > 2.2 else "Forward"
-		var animations: Dictionary = actor.get("animations", {})
+			_end_npc_idle(actor)
+		elif bool(actor.get("idle_active", false)):
+			var idle_animation: Dictionary = animations.get(NPC_IDLE_KEY, {})
+			# A clip that plays once ends at its last key and the actor returns to its default idle.
+			if idle_animation.is_empty() or (
+				not bool(idle_animation.get("loops", true)) and str(actor.get("active_animation", "")) == NPC_IDLE_KEY
+				and float(actor.get("animation_time", 0.0)) >= float(idle_animation.get("stop_time", 0.0))
+			):
+				_end_npc_idle(actor)
+			else:
+				requested_animation = NPC_IDLE_KEY
 		var animation: Dictionary = animations.get(requested_animation, {})
 		if animation.is_empty() and requested_animation == "FastForward":
 			requested_animation = "Forward"
@@ -3254,9 +3302,67 @@ func _update_npc_actors(delta: float) -> void:
 			for pose_value: Variant in pose_from_value:
 				if pose_value is Dictionary:
 					pose_from.push_back(pose_value)
-		_apply_animation_pose(skeleton, animation, float(actor["animation_time"]), true, pose_from, blend_weight)
+		_apply_animation_pose(
+			skeleton, animation, float(actor["animation_time"]), bool(animation.get("loops", true)), pose_from, blend_weight
+		)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
+
+## The idle manager's PickIdle for one NPC (see QuestWorld.pick_idle): plays the chosen original clip on the actor
+## with the reference name. An empty path means no idle matched: the actor returns to its default idle. An actor that
+## is not in the scene yet gets the idle when it loads. Returns what was done, for the quest log.
+func play_npc_idle(reference_name: String, kf_path: String, idle_id: String, _group_flags: int) -> String:
+	var key := reference_name.to_lower()
+	var actor := _npc_actor_by_reference(key)
+	if actor.is_empty():
+		if kf_path.is_empty():
+			_pending_idles.erase(key)
+			return "%s is not in this cell, default idle" % reference_name
+		_pending_idles[key] = {"path": kf_path, "idle_id": idle_id}
+		return "%s is not loaded yet, %s waits for it" % [reference_name, idle_id]
+	if kf_path.is_empty():
+		var was_active := bool(actor.get("idle_active", false))
+		_end_npc_idle(actor)
+		return "%s returns to its default idle%s" % [reference_name, "" if was_active else " (no idle was playing)"]
+	_start_npc_idle(actor, kf_path, idle_id)
+	return "%s starts %s (%s)" % [reference_name, idle_id, kf_path]
+
+func _npc_actor_by_reference(lower_reference_name: String) -> Dictionary:
+	for actor: Dictionary in _npc_actors:
+		if str(actor.get("reference_name", "")).to_lower() == lower_reference_name:
+			return actor
+	return {}
+
+## Loads the clip on first use through the asset queue and plays it on the actor, blending from its current pose.
+## A newer idle or an ended one makes the pending load a no-op.
+func _start_npc_idle(actor: Dictionary, kf_path: String, idle_id: String) -> void:
+	var request := int(actor.get("idle_request", 0)) + 1
+	actor["idle_request"] = request
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	var animation := await _gesture_animation(kf_path.replace("\\", "/"), skeleton)
+	if request != int(actor.get("idle_request", 0)) or not is_instance_valid(skeleton):
+		return
+	if animation.is_empty():
+		push_warning("OpenOB npc idle: %s could not be loaded for %s" % [kf_path, str(actor.get("reference_name", ""))])
+		return
+	var animations: Dictionary = actor.get("animations", {})
+	animations[NPC_IDLE_KEY] = animation
+	actor["idle_active"] = true
+	# The pose to blend from is captured when the requested clip changes (see _update_npc_actors); a clip replaced by
+	# another starts from the first clip's pose, so force the change.
+	if str(actor.get("active_animation", "")) == NPC_IDLE_KEY:
+		actor["active_animation"] = ""
+	print("OpenOB npc idle: %s plays %s (%s, %s)" % [
+		str(actor.get("reference_name", "")), idle_id, kf_path, "loops" if bool(animation.loops) else "once"
+	])
+
+func _end_npc_idle(actor: Dictionary) -> void:
+	actor["idle_request"] = int(actor.get("idle_request", 0)) + 1
+	if not bool(actor.get("idle_active", false)):
+		return
+	actor["idle_active"] = false
+	(actor.get("animations", {}) as Dictionary).erase(NPC_IDLE_KEY)
+	print("OpenOB npc idle: %s returns to its default idle" % str(actor.get("reference_name", "")))
 
 func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void:
 	var root_bone := skeleton.find_bone("Bip01")
@@ -3665,14 +3771,14 @@ func _play_gesture(index: int) -> void:
 		clip_name, index + 1, _gesture_clips.size(), "" if bool(animation.loops) else " · once"
 	])
 
-func _gesture_animation(asset_path: String) -> Dictionary:
+func _gesture_animation(asset_path: String, target_skeleton: Skeleton3D = null) -> Dictionary:
 	await assets.meshes_for_model(asset_path)
 	var metadata: Dictionary = assets.nif_metadata_cache.get(asset_path.to_lower(), {})
 	var sequences: Array = metadata.get("animations", [])
 	if sequences.is_empty():
 		return {}
 	var sequence_name := str((sequences[0] as Dictionary).get("name", ""))
-	var animation := _animation_sequence(asset_path, sequence_name).duplicate()
+	var animation := _animation_sequence(asset_path, sequence_name, target_skeleton).duplicate()
 	if animation.is_empty() or (animation.get("tracks", []) as Array).is_empty():
 		return {}
 	animation["loops"] = int(animation.get("cycle_type", 0)) == 0
