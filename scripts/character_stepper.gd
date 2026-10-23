@@ -40,32 +40,49 @@ func try_step_up(body: CharacterBody3D, horizontal_motion: Vector3, max_step_hei
 	if obstruction.get_position().y - body.global_position.y > max_step_height + margin:
 		return false
 
-	# OpenMW's Stepper probes the available clearance above the actor, moves
-	# horizontally at that height, then traces down to a walkable surface. This
-	# keeps the rule independent of the stair mesh and also allows partial
-	# horizontal progress when another tread is reached in the same frame.
-	var step_height := max_step_height
-	var upward_motion := Vector3.UP * step_height
+	# Find the clearance available above the actor. The step itself starts at the
+	# obstacle's contact height; using all available headroom can push the actor
+	# into a doorway lintel even when the sill is low enough to step over.
+	var step_height := maxf(
+		margin * 2.0,
+		obstruction.get_position().y - body.global_position.y + margin
+	)
+	if step_height > max_step_height + margin:
+		return false
+	var upward_motion := Vector3.UP * max_step_height
 	var ceiling := KinematicCollision3D.new()
+	var max_clearance := max_step_height
 	if body.test_move(original_transform, upward_motion, ceiling, margin):
-		step_height = maxf(0.0, ceiling.get_travel().y - margin)
+		max_clearance = maxf(0.0, ceiling.get_travel().y - margin)
+		if max_clearance < step_height:
+			return false
 	if step_height <= margin * 2.0:
 		return false
 
-	var raised_transform := original_transform.translated(Vector3.UP * step_height)
-	var across_collision := KinematicCollision3D.new()
 	var horizontal_distance := horizontal_motion.length()
 	var horizontal_direction := horizontal_motion / horizontal_distance
-	var horizontal_progress := horizontal_motion
-	if body.test_move(raised_transform, horizontal_motion, across_collision, margin):
-		horizontal_distance = clampf(across_collision.get_travel().dot(horizontal_direction), 0.0, horizontal_distance)
-		horizontal_distance = maxf(0.0, horizontal_distance - margin)
-		horizontal_progress = horizontal_direction * horizontal_distance
-	if horizontal_distance <= margin * 2.0:
+	var raised_transform := Transform3D.IDENTITY
+	var horizontal_progress := Vector3.ZERO
+	var found_clearance := false
+	var candidate_height := step_height
+	while candidate_height <= max_clearance + margin:
+		raised_transform = original_transform.translated(Vector3.UP * candidate_height)
+		var across_collision := KinematicCollision3D.new()
+		if not body.test_move(raised_transform, horizontal_motion, across_collision, margin):
+			horizontal_progress = horizontal_motion
+			found_clearance = true
+			break
+		var available_distance := clampf(across_collision.get_travel().dot(horizontal_direction), 0.0, horizontal_distance)
+		if available_distance > margin * 2.0:
+			horizontal_progress = horizontal_direction * maxf(0.0, available_distance - margin)
+			found_clearance = true
+			break
+		candidate_height += maxf(margin * 2.0, 0.01)
+	if not found_clearance:
 		return false
 
 	var across_transform := raised_transform.translated(horizontal_progress)
-	var downward_distance := step_height + body.floor_snap_length + horizontal_distance
+	var downward_distance := candidate_height + body.floor_snap_length + horizontal_progress.length()
 	var downward_motion := Vector3.DOWN * downward_distance
 	# The downward trace may catch a tread's nose before its flat top, and a
 	# capsule's rounded base makes that contact steep. The rise is judged by the

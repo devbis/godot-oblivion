@@ -95,19 +95,83 @@ func _deactivate(target: String, command: String, world: Node3D, label: String) 
 	return "applied: %s" % label
 
 
-## A door's open state: an open door lets bodies through, so its collision is switched off, and closing restores it.
-## The door keeps its model; it does not animate yet.
+## Opens the referenced door for NPC route traversal. This is also used by
+## SetOpenState actions from the game's scripts.
+func set_door_open_state(reference: Dictionary, is_open: bool, world: Node3D) -> String:
+	var target := str(reference.get("reference_name", ""))
+	if target.is_empty():
+		target = "0x%08X" % int(reference.get("form_id", 0))
+	return _apply_door_open_state(reference, is_open, world, "%s.setopenstate" % target)
+
+
 func _set_open_state(target: String, arguments: Array, references: Dictionary, world: Node3D, label: String) -> String:
 	if target.is_empty() or arguments.is_empty():
 		return "not applied: %s needs a target and a state" % label
 	var reference: Dictionary = references.get(target, {})
 	if reference.is_empty():
 		return "not applied: %s, %s is not in this cell" % [label, target]
+	return _apply_door_open_state(reference, int(arguments[0]) != 0, world, label)
+
+
+func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D, label: String) -> String:
 	var reference_id := int(reference.get("form_id", 0))
-	var is_open := int(arguments[0]) != 0
-	var bodies := 0
-	for node: Node in world.find_children("GeneratedStaticMeshCollision", "StaticBody3D", true, false):
-		var body := node as StaticBody3D
+	var state_key := "door_open_%08x" % reference_id
+	if world.has_meta(state_key) and bool(world.get_meta(state_key)) == is_open:
+		return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
+	var animation_player := _door_animation_player(reference_id, world)
+	var sequence_name := _door_animation_name(animation_player, "Open" if is_open else "Close")
+	var body_count := _door_body_count(reference_id, world)
+	if animation_player != null and not sequence_name.is_empty():
+		world.set_meta(state_key, is_open)
+		animation_player.animation_finished.connect(
+			_finish_door_animation.bind(reference_id, is_open, world), CONNECT_ONE_SHOT
+		)
+		animation_player.play(sequence_name)
+		return "applied: %s (%s, NIF %s animation)" % [label, "open" if is_open else "closed", sequence_name]
+	if body_count == 0:
+		return "not applied: %s has no door collision or original NIF animation in this cell" % label
+	world.set_meta(state_key, is_open)
+	_set_door_collision(reference_id, is_open, world)
+	return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
+
+
+func _door_animation_player(reference_id: int, world: Node3D) -> AnimationPlayer:
+	for node: Node in world.find_children("*", "AnimationPlayer", true, false):
+		var animation_player := node as AnimationPlayer
+		if animation_player != null and int(animation_player.get_meta("reference_id", 0)) == reference_id:
+			return animation_player
+	return null
+
+
+func _door_animation_name(animation_player: AnimationPlayer, requested_name: String) -> String:
+	if animation_player == null:
+		return ""
+	for animation_name: StringName in animation_player.get_animation_list():
+		if str(animation_name).to_lower() == requested_name.to_lower():
+			return str(animation_name)
+	return ""
+
+
+func _door_body_count(reference_id: int, world: Node3D) -> int:
+	var count := 0
+	for node: Node in world.find_children("*", "PhysicsBody3D", true, false):
+		if int(node.get_meta("reference_id", 0)) == reference_id:
+			count += 1
+	return count
+
+
+func _finish_door_animation(_animation_name: StringName, reference_id: int, is_open: bool, world: Node3D) -> void:
+	if not is_instance_valid(world):
+		return
+	var state_key := "door_open_%08x" % reference_id
+	if not world.has_meta(state_key) or bool(world.get_meta(state_key)) != is_open:
+		return
+	_set_door_collision(reference_id, is_open, world)
+
+
+func _set_door_collision(reference_id: int, is_open: bool, world: Node3D) -> void:
+	for node: Node in world.find_children("*", "PhysicsBody3D", true, false):
+		var body := node as PhysicsBody3D
 		if body == null or int(body.get_meta("reference_id", 0)) != reference_id:
 			continue
 		if is_open:
@@ -119,10 +183,6 @@ func _set_open_state(target: String, arguments: Array, references: Dictionary, w
 		elif body.has_meta("closed_layer"):
 			body.collision_layer = int(body.get_meta("closed_layer"))
 			body.collision_mask = int(body.get_meta("closed_mask"))
-		bodies += 1
-	if bodies == 0:
-		return "not applied: %s, %s has no collision in this cell" % [label, target]
-	return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
 
 
 func _store(target: String, command: String, arguments: Array) -> void:

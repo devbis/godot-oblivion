@@ -485,18 +485,22 @@ func _physics_process(delta: float) -> void:
 	if _needs_route_refresh(result):
 		_refresh_npc_routes()
 	_fire_trigger_zones()
+	_player_route_timer -= delta
+	if _player_route_timer <= 0.0:
+		_player_route_timer = 0.5
+		_follow_player_routes()
+	_open_doors_on_npc_routes()
 
 ## Trigger zones of the cell: a reference whose base has an object script with an OnTrigger block. The zone's OnTrigger
 ## runs each time the player enters its box, until the script disables the zone.
-const TRIGGER_ZONE_SCRIPTS := {0x97A3C: "CGTriggerZoneCellScript"}
 var _trigger_zones: Array[Dictionary] = []
 
 func _find_trigger_zones() -> void:
 	_trigger_zones.clear()
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
-		var base := int(reference.get("base_form_id", 0))
-		if not TRIGGER_ZONE_SCRIPTS.has(base):
+		var script_form_id := int(reference.get("script_form_id", 0))
+		if script_form_id == 0:
 			continue
 		var box := AABB()
 		var has_box := false
@@ -509,31 +513,114 @@ func _find_trigger_zones() -> void:
 		if not has_box:
 			continue
 		var world_box := _reference_transform(reference) * box
-		_trigger_zones.push_back({"script": TRIGGER_ZONE_SCRIPTS[base], "box": world_box, "inside": false, "disabled": false})
-		print("OpenOB trigger zone %s: box %s" % [TRIGGER_ZONE_SCRIPTS[base], str(world_box)])
+		_trigger_zones.push_back({"script_form_id": script_form_id, "box": world_box, "inside": false, "disabled": false})
+		print("OpenOB scripted trigger %08X: box %s" % [script_form_id, str(world_box)])
 
-## Doors do not stop the placed NPCs: in the game an actor opens a door by walking into it, and the door is not animated
-## here yet. The NPCs' bodies ignore the bodies of the cell's doors, so a route through a door is walked.
-func _let_actors_pass_doors() -> void:
-	var door_ids := {}
+## Door bounds let navigation plan a route through a doorway. The door itself stays
+## solid until an NPC route reaches it and asks the door controller to open it.
+var _door_boxes: Array[AABB] = []
+var _door_references: Array[Dictionary] = []
+
+func _find_door_boxes() -> void:
+	_door_boxes.clear()
+	_door_references.clear()
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
-		if str(data_reader.find_record_type(int(reference.get("base_form_id", 0)))) == "DOOR":
-			door_ids[int(reference.get("form_id", 0))] = true
-	if door_ids.is_empty():
-		return
-	var doors: Array[StaticBody3D] = []
-	for node: Node in cell_visual_root.find_children("GeneratedStaticMeshCollision", "StaticBody3D", true, false):
-		var body := node as StaticBody3D
-		if body != null and door_ids.has(int(body.get_meta("reference_id", 0))):
-			doors.push_back(body)
-	for actor: Dictionary in _npc_actors:
-		var root := actor.get("root") as CharacterBody3D
-		if root == null:
+		if str(data_reader.find_record_type(int(reference.get("base_form_id", 0)))) != "DOOR":
 			continue
-		for door: StaticBody3D in doors:
-			root.add_collision_exception_with(door)
-	print("OpenOB doors: %d bodies the placed NPCs pass" % doors.size())
+		var box := AABB()
+		var has_box := false
+		for mesh_entry: Dictionary in await _meshes_for_model(str(reference.get("model_path", ""))):
+			var mesh := mesh_entry.get("mesh") as Mesh
+			if mesh == null:
+				continue
+			box = mesh.get_aabb() if not has_box else box.merge(mesh.get_aabb())
+			has_box = true
+		if has_box:
+			var reference_transform := _reference_transform(reference)
+			var world_box := reference_transform * box
+			_door_boxes.push_back(world_box)
+			_door_references.push_back({
+				"reference": reference,
+				"box": world_box,
+				"local_box": box,
+				"transform": reference_transform,
+			})
+
+func _in_door_box(point: Vector3) -> bool:
+	for box: AABB in _door_boxes:
+		if box.has_point(point):
+			return true
+	return false
+
+## Travel and follow packages can cross a closed doorway in the nav mesh. When
+## an upcoming route segment crosses a door and the actor is close to it, open
+## that actual DOOR reference before the actor reaches its collision body.
+const DOOR_APPROACH_MARGIN_M := 0.5
+
+func _open_doors_on_npc_routes() -> void:
+	for actor: Dictionary in _npc_actors:
+		var package: Dictionary = actor.get("package", {})
+		if package.is_empty():
+			continue
+		var root := actor.get("root") as Node3D
+		if not is_instance_valid(root):
+			continue
+		var route_value: Variant = root.get("waypoints")
+		if not route_value is Array:
+			continue
+		var route_points: Array = route_value
+		var waypoint_index := int(root.get("waypoint_index"))
+		if waypoint_index < 0 or waypoint_index >= route_points.size():
+			continue
+		var route_start := root.global_position
+		var actor_radius := _actor_collision_radius(root)
+		for door: Dictionary in _door_references:
+			var reference: Dictionary = door.get("reference", {})
+			var state_key := "door_open_%08x" % int(reference.get("form_id", 0))
+			if has_meta(state_key) and bool(get_meta(state_key)):
+				continue
+			var box: AABB = door.get("box", AABB())
+			var activation_bounds := box.grow(actor_radius)
+			var route_crosses_door := false
+			for route_index in range(waypoint_index, route_points.size()):
+				var segment_start: Vector3 = route_start if route_index == waypoint_index else route_points[route_index - 1]
+				var segment_end: Vector3 = route_points[route_index]
+				if activation_bounds.intersects_segment(segment_start, segment_end) != null:
+					route_crosses_door = true
+					break
+			if not route_crosses_door:
+				continue
+			var closest_door_point := Vector3(
+				clampf(route_start.x, box.position.x, box.end.x),
+				clampf(route_start.y, box.position.y, box.end.y),
+				clampf(route_start.z, box.position.z, box.end.z)
+			)
+			var distance_to_door := Vector2(route_start.x - closest_door_point.x, route_start.z - closest_door_point.z).length()
+			if distance_to_door > actor_radius + DOOR_APPROACH_MARGIN_M:
+				continue
+			var report := quest_bridge.set_door_open_state(reference, true, self)
+			if report.begins_with("applied:"):
+				print("OpenOB door: " + report)
+			else:
+				push_warning("OpenOB AI door: " + report)
+
+func _actor_collision_radius(actor: Node3D) -> float:
+	for child: Node in actor.get_children():
+		var collision := child as CollisionShape3D
+		if collision == null or collision.shape == null:
+			continue
+		var shape_margin := collision.shape.margin
+		if collision.shape is CapsuleShape3D:
+			return (collision.shape as CapsuleShape3D).radius + shape_margin
+		if collision.shape is CylinderShape3D:
+			return (collision.shape as CylinderShape3D).radius + shape_margin
+		if collision.shape is SphereShape3D:
+			return (collision.shape as SphereShape3D).radius + shape_margin
+		if collision.shape is BoxShape3D:
+			var box_shape := collision.shape as BoxShape3D
+			return maxf(box_shape.size.x, box_shape.size.z) * 0.5 + shape_margin
+	return 0.0
 
 ## Length in seconds of a spoken reply, from its voice file. The voice folder is the speaker's voice type, which is not read
 ## yet, so each race and sex folder is tried; a reply's form ID names one file. Null when no folder has it, so the quest
@@ -560,6 +647,34 @@ func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, _t
 	_speech_length_cache[file_name] = length
 	return length
 
+var _player_route_timer := 0.0
+
+## A package near the player (the player's reference is its location) keeps its NPC walking to the player as the player
+## moves: the route is set again when the player has moved more than a metre from the route's target.
+func _follow_player_routes() -> void:
+	for actor: Dictionary in _npc_actors:
+		var package: Dictionary = actor.get("package", {})
+		if int(package.get("location_form_id", 0)) != 0x14:
+			continue
+		var root := actor.get("root") as Node3D
+		if not is_instance_valid(root):
+			continue
+		var target: Vector3 = actor.get("route_target", Vector3.INF)
+		if target.distance_to(player.global_position) <= 1.0:
+			continue
+		actor["route_target"] = player.global_position
+		var waypoints: Array[Dictionary] = []
+		var route_path := _navigation_path(root.global_position, player.global_position, _actor_collision_radius(root))
+		for point: Vector3 in route_path:
+			waypoints.push_back({"position": point, "speed_mps": 1.3})
+		root.call("configure_route", waypoints, false, 0.0, _package_arrival_radius(package, root))
+		print("OpenOB AI route update: %s from=%s destination=Player at=%s path=%s" % [
+			str(actor.get("reference_name", actor.get("name", "NPC"))),
+			str(root.global_position),
+			str(player.global_position),
+			str(route_path),
+		])
+
 ## Runs the OnTrigger of each trigger zone the player has just entered, until the zone is disabled.
 func _fire_trigger_zones() -> void:
 	if quest_world == null:
@@ -572,7 +687,7 @@ func _fire_trigger_zones() -> void:
 		zone["inside"] = inside
 		if not inside or was_inside:
 			continue
-		var result: Dictionary = quest_world.run_object_event(str(zone.get("script", "")), "onTrigger", "player", Callable(self, "_quest_distance"))
+		var result: Dictionary = quest_world.run_object_event(int(zone.get("script_form_id", 0)), "onTrigger", "player", Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB trigger: " + line)
 		for action: Dictionary in result.get("actions", []):
@@ -598,12 +713,8 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
 		# character creation's race and sex are read.
 		quest_world.set_listener("Argonian", false)
-		# The intro's speakers. Each one's GameMode speaks when the Charactergen conversation reaches it: Renault
-		# when Charactergen's speaker is 2, the Emperor and the others when their turn comes.
-		for speaker: Array in [["ValenDrethRef", "ValenDreth"], ["RenoteRef", "Renote"], ["GlenroyRef", "Glenroy"], ["UrielSeptimRef", "UrielSeptim"], ["BaurusRef", "Baurus"]]:
-			quest_world.set_reference_base(speaker[0], speaker[1])
-			if not quest_world.add_actor(speaker[1]):
-				print("OpenOB quest: actor %s has no script" % speaker[1])
+		for actor: Dictionary in _npc_actors:
+			_register_quest_actor(actor)
 	if quest_world.get_stage(quest_editor_id) < 0:
 		return PackedStringArray(["quest %s has no script" % quest_editor_id])
 	if route_quest_editor_id.is_empty():
@@ -611,6 +722,16 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	var report := _apply_driver_result(quest_world.start(quest_editor_id, stage, Callable(self, "_quest_distance")))
 	_refresh_npc_routes()
 	return report
+
+
+func _register_quest_actor(actor: Dictionary) -> void:
+	if quest_world == null:
+		return
+	var reference_name := str(actor.get("reference_name", ""))
+	var base_form_id := int(actor.get("base_form_id", 0))
+	quest_world.set_reference_base(reference_name, base_form_id)
+	if not quest_world.add_actor(base_form_id, reference_name):
+		push_warning("OpenOB quest: no GameMode script for actor %s" % reference_name)
 
 ## Names the speaker of each spoken line (its base form is the second argument) before the bridge prints it.
 func _name_speakers(result: Dictionary) -> void:
@@ -634,9 +755,12 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 		report.push_back("stage %s" % change)
 	for error_text: String in result.get("parse_errors", PackedStringArray()):
 		report.push_back("parse error " + error_text)
-	# The same command comes back on every tick (a GameMode asks it each time); each distinct line is reported once.
+	# State and unsupported-command reports are summarized once. Speech is an event, so repeated identical dialogue lines
+	# remain visible each time the script says them.
 	for line: String in quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")):
-		if not _reported_bridge_lines.has(line):
+		if line.strip_edges().begins_with("says ("):
+			report.push_back(line)
+		elif not _reported_bridge_lines.has(line):
 			_reported_bridge_lines[line] = true
 			report.push_back(line)
 	# A distance to a reference outside the loaded cell is far away by design (see _quest_distance), so it is not
@@ -684,20 +808,51 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	# The same package keeps its route: starting it again would finish at once and run its OnPackageDone again.
 	var previous: Dictionary = actor.get("package", {})
 	if not package.is_empty() and str(package.get("editor_id", "")) == str(previous.get("editor_id", "")):
+		var current_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+		var current_index := int(root.get("waypoint_index"))
+		var remaining_path: Array[Vector3] = []
+		for index in range(current_index, current_route.size()):
+			remaining_path.push_back(current_route[index])
+		print("OpenOB AI route: %s keeps package=%s from=%s destination=%s remaining_path=%s" % [
+			str(actor.get("reference_name", actor.get("name", "NPC"))),
+			str(package.get("editor_id", "")),
+			str((root as Node3D).global_position),
+			_package_location_label(int(package.get("location_form_id", 0))),
+			str(remaining_path),
+		])
 		return
+	# A new package starts a new activation: its OnPackageDone may run once when its route ends.
+	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
+		actor["package_done"] = false
 	actor["package"] = package
 	var waypoints: Array[Dictionary] = []
+	var route_path := PackedVector3Array()
+	var final_arrival_distance := 0.08
 	# A package without a location (for example waiting at the actor's editor location) keeps the actor in place.
 	if not package.is_empty() and int(package.get("location_form_id", 0)) != 0:
 		var position = _location_position(int(package.get("location_form_id", 0)))
 		if position == null:
 			print("OpenOB package %s for %s: its location is not in this cell" % [str(package.get("editor_id", "")), str(actor.get("name", ""))])
 		else:
+			final_arrival_distance = _package_arrival_radius(package, root as Node3D)
+			if int(package.get("location_form_id", 0)) == 0x14:
+				actor["route_target"] = position
+			else:
+				actor.erase("route_target")
 			var flags := int(package.get("flags", 0))
 			var speed := 3.4 if (flags & 0x2000) != 0 else 1.3
-			for point: Vector3 in _navigation_path((root as Node3D).global_position, position):
+			route_path = _navigation_path((root as Node3D).global_position, position, _actor_collision_radius(root as Node3D))
+			for point: Vector3 in route_path:
 				waypoints.push_back({"position": point, "speed_mps": speed})
-	root.call("configure_route", waypoints, false, 0.0)
+	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance)
+	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
+		str(actor.get("reference_name", actor.get("name", "NPC"))),
+		str(package.get("editor_id", "<none>")),
+		_package_location_label(int(package.get("location_form_id", 0))),
+		str(_location_position(int(package.get("location_form_id", 0)))),
+		str((root as Node3D).global_position),
+		str(route_path),
+	])
 	if not root.has_meta("route_finished_connected"):
 		root.set_meta("route_finished_connected", true)
 		root.route_finished.connect(_on_actor_route_finished.bind(str(actor.get("name", ""))))
@@ -708,8 +863,37 @@ func _on_actor_route_finished(actor_name: String) -> void:
 		if str(actor.get("name", "")) != actor_name or quest_world == null or route_quest_editor_id.is_empty():
 			continue
 		var package: Dictionary = actor.get("package", {})
-		if package.is_empty():
+		if package.is_empty() or bool(actor.get("package_done", false)):
 			return
+		var root := actor.get("root") as Node3D
+		if not is_instance_valid(root):
+			return
+		var location = _location_position(int(package.get("location_form_id", 0)))
+		if location != null:
+			var destination: Vector3 = location
+			var horizontal_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
+			var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
+			var arrival_radius := _package_arrival_radius(package, root)
+			if horizontal_distance > arrival_radius:
+				# A partial NavigationServer path is not package completion. Replan from the
+				# actor's current position, and leave OnPackageDone for actual arrival.
+				var retry_path := _navigation_path(root.global_position, destination, _actor_collision_radius(root))
+				if not retry_path.is_empty():
+					var retry_end: Vector3 = retry_path[retry_path.size() - 1]
+					var retry_distance := Vector2(root.global_position.x - retry_end.x, root.global_position.z - retry_end.z).length()
+					if retry_distance > actor_arrival_distance:
+						var flags := int(package.get("flags", 0))
+						var speed := 3.4 if (flags & 0x2000) != 0 else 1.3
+						var waypoints: Array[Dictionary] = []
+						for point: Vector3 in retry_path:
+							waypoints.push_back({"position": point, "speed_mps": speed})
+						root.call("configure_route", waypoints, false, 0.0, arrival_radius)
+					else:
+						push_warning("OpenOB package %s for %s stopped %.2fm from its destination; no reachable route remains" % [
+							str(package.get("editor_id", "")), actor_name, horizontal_distance
+						])
+				return
+		actor["package_done"] = true
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
@@ -721,11 +905,27 @@ func _on_actor_route_finished(actor_name: String) -> void:
 func _location_position(form_id: int) -> Variant:
 	if form_id == 0:
 		return null
+	# Form 0x14 is the player's reference: a package near the player walks to the player.
+	if form_id == 0x14:
+		return player.global_position
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
 		if int(reference.get("form_id", 0)) == form_id:
 			return _reference_transform(reference).origin
 	return null
+
+func _package_location_label(form_id: int) -> String:
+	if form_id == 0:
+		return "none"
+	if form_id == 0x14:
+		return "Player"
+	var editor_id := str(data_reader.find_editor_id(form_id)) if data_reader != null else ""
+	return "%s (0x%08X)" % [editor_id, form_id] if not editor_id.is_empty() else "0x%08X" % form_id
+
+func _package_arrival_radius(package: Dictionary, root: Node3D) -> float:
+	var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
+	var package_radius := float(package.get("radius", 0)) * game_units_to_meters
+	return package_radius + _actor_collision_radius(root) + actor_arrival_distance
 
 ## Runs one stage of a quest against the loaded cell and returns the report lines.
 ## The executable comes from OBLIVION_EXE, or from the usual install layout next to Data.
@@ -907,6 +1107,7 @@ func _load_cell_geometry(
 			continue
 		var base_form_id := int(reference.get("base_form_id", 0))
 		var base_type := str(data_reader.find_record_type(base_form_id))
+		var is_door := base_type == "DOOR"
 		var is_pickup_item := base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]
 		reference_count += 1
 		var meshes: Array = await _meshes_for_model(model_path)
@@ -916,7 +1117,7 @@ func _load_cell_geometry(
 		var physics_metadata: Dictionary = _nif_metadata_cache.get(nif_key, {})
 		if _supports_imported_nif_physics(physics_metadata, meshes):
 			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
-				reference_transform, model_path, meshes, physics_metadata
+				int(reference.get("form_id", 0)), reference_transform, model_path, meshes, physics_metadata
 			)
 			if generation != _cell_load_generation:
 				return false
@@ -934,6 +1135,14 @@ func _load_cell_geometry(
 		if should_collide:
 			_exterior_collision_attempted_ids[int(reference.get("form_id", 0))] = true
 			_ensure_collision_shape(model_path)
+		var door_animation_root: Node3D = null
+		var door_node_hosts: Dictionary = {}
+		if is_door:
+			door_animation_root = Node3D.new()
+			door_animation_root.name = "Door_%08X" % int(reference.get("form_id", 0))
+			door_animation_root.set_meta("reference_id", int(reference.get("form_id", 0)))
+			door_animation_root.transform = reference_transform
+			cell_visual_root.add_child(door_animation_root)
 		var item_mesh_instances: Array[MeshInstance3D] = []
 		for mesh_index in range(meshes.size()):
 			var mesh_entry: Dictionary = meshes[mesh_index]
@@ -941,6 +1150,7 @@ func _load_cell_geometry(
 			var can_batch := (
 				is_exterior
 				and not is_pickup_item
+				and not is_door
 				and not _is_debug_service_model(model_path)
 				and not bool(mesh_entry.get("alpha_blend", false))
 			)
@@ -984,6 +1194,9 @@ func _load_cell_geometry(
 				var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
 				instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
 				instance.mesh = mesh_entry.mesh
+				instance.set_meta("reference_id", int(reference.get("form_id", 0)))
+				instance.set_meta("source_mesh_name", mesh_name)
+				instance.set_meta("model_path", model_path)
 				instance.material_override = await _material_for_reference(
 					model_path,
 					str(mesh_entry.diffuse_texture_path),
@@ -993,11 +1206,26 @@ func _load_cell_geometry(
 				)
 				if generation != _cell_load_generation:
 					return false
-				instance.transform = reference_transform
-				cell_visual_root.add_child(instance)
+				if is_door:
+					var parent_node_name := str(mesh_entry.get("parent_node_name", ""))
+					var node_host := door_node_hosts.get(parent_node_name) as Node3D
+					if node_host == null:
+						node_host = Node3D.new()
+						node_host.name = "NifNode_%d" % door_node_hosts.size()
+						node_host.set_meta("nif_node_name", parent_node_name)
+						node_host.set_meta("reference_id", int(reference.get("form_id", 0)))
+						door_animation_root.add_child(node_host)
+						door_node_hosts[parent_node_name] = node_host
+					instance.transform = Transform3D.IDENTITY
+					node_host.add_child(instance)
+				else:
+					instance.transform = reference_transform
+					cell_visual_root.add_child(instance)
 				if is_pickup_item:
 					item_mesh_instances.push_back(instance)
 				instance_count += 1
+		if door_animation_root != null and not door_node_hosts.is_empty():
+			_install_door_nif_animations(door_animation_root, physics_metadata, door_node_hosts)
 		if is_pickup_item and not item_mesh_instances.is_empty():
 			var reference_id := int(reference.get("form_id", 0))
 			_placed_items[reference_id] = {
@@ -1491,6 +1719,7 @@ func _create_imported_havok_shapes(shape_data: Dictionary) -> Array[CollisionSha
 	return collisions
 
 func _instantiate_imported_nif_physics(
+	reference_id: int,
 	reference_transform: Transform3D,
 	model_path: String,
 	meshes: Array,
@@ -1501,6 +1730,7 @@ func _instantiate_imported_nif_physics(
 	var body_nodes: Dictionary = {}
 	var physics_root := Node3D.new()
 	physics_root.name = "ImportedHavokPhysics"
+	physics_root.set_meta("reference_id", reference_id)
 	cell_visual_root.add_child(physics_root)
 	var body_count := 0
 	var dynamic_count := 0
@@ -1536,6 +1766,7 @@ func _instantiate_imported_nif_physics(
 			static_body.collision_layer = 2
 			static_body.collision_mask = 0
 			physics_body = static_body
+		physics_body.set_meta("reference_id", reference_id)
 		var node_transform := _godot_node_rest({
 			"translation": body_data.get("node_global_translation", Vector3.ZERO),
 			"rotation_rows": body_data.get("node_global_rotation_rows", PackedFloat32Array()),
@@ -1563,6 +1794,9 @@ func _instantiate_imported_nif_physics(
 			var static_mesh := MeshInstance3D.new()
 			static_mesh.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
 			static_mesh.mesh = mesh_entry.get("mesh") as ArrayMesh
+			static_mesh.set_meta("reference_id", reference_id)
+			static_mesh.set_meta("source_mesh_name", str(mesh_entry.get("mesh_name", "")))
+			static_mesh.set_meta("model_path", model_path)
 			static_mesh.material_override = await _material_for_reference(
 				model_path,
 				str(mesh_entry.get("diffuse_texture_path", "")),
@@ -1583,6 +1817,9 @@ func _instantiate_imported_nif_physics(
 		var visual := MeshInstance3D.new()
 		visual.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
 		visual.mesh = physical_mesh
+		visual.set_meta("reference_id", reference_id)
+		visual.set_meta("source_mesh_name", str(mesh_entry.get("mesh_name", "")))
+		visual.set_meta("model_path", model_path)
 		visual.scale = Vector3.ONE * game_units_to_meters
 		visual.material_override = await _material_for_reference(
 			model_path,
@@ -2448,6 +2685,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			actor_name = str(npc.get("editor_id", "")).strip_edges()
 		if actor_name.is_empty():
 			actor_name = "NPC_%08X" % int(reference.get("form_id", 0))
+		var actor_reference_name := str(reference.get("reference_name", "")).strip_edges()
+		if actor_reference_name.is_empty():
+			actor_reference_name = actor_name
 		actor_root.name = actor_name
 		actor_root.collision_layer = 4
 		actor_root.collision_mask = 7
@@ -2461,10 +2701,13 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		# Keep the blocker close to the actor's actual occupied space. Spawn
 		# separation uses this radius only when two actors actually overlap.
 		actor_capsule.radius = 0.18
-		actor_capsule.height = 1.8
+		var player_collision := player.get_node_or_null("CollisionShape3D") as CollisionShape3D
+		var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
+		if player_capsule != null:
+			actor_capsule.height = player_capsule.height
 		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
-		actor_collision.position.y = 0.9
+		actor_collision.position.y = actor_capsule.height * 0.5
 		actor_root.add_child(actor_collision)
 		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id)
 		if spawn_adjustment > 0.001:
@@ -2626,6 +2869,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var initial_expression := ""
 		var actor_state := {
 			"name": actor_name,
+			"reference_name": actor_reference_name,
+			"base_form_id": int(reference.get("base_form_id", 0)),
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"root": actor_root,
 			"skeleton": skeleton,
@@ -2645,21 +2890,16 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"animation_blend_elapsed": ANIMATION_BLEND_DURATION,
 		}
 		_npc_actors.push_back(actor_state)
+		_register_quest_actor(actor_state)
 		_npc_pending_roots.erase(actor_root)
 		_npc_loaded_reference_ids[reference_id] = true
 		_apply_face_expression(actor_state)
 		actor_count += 1
-	# TEMPORARY: placed NPCs pass through each other, so a narrow passage does not stop them. Revert by deleting this block.
-	for first_actor: Dictionary in _npc_actors:
-		for second_actor: Dictionary in _npc_actors:
-			var first_root = first_actor.get("root")
-			var second_root = second_actor.get("root")
-			if first_root != second_root and first_root is CharacterBody3D and second_root is CharacterBody3D:
-				(first_root as CharacterBody3D).add_collision_exception_with(second_root)
-	_let_actors_pass_doors()
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
 	if _trigger_zones.is_empty():
 		await _find_trigger_zones()
+	if _door_boxes.is_empty():
+		await _find_door_boxes()
 	# The routes follow the navigation tiles of the cell, so they are baked before the quest starts.
 	if _navigation_tiles == null:
 		await _build_navigation_tiles()
@@ -2687,8 +2927,18 @@ func _build_navigation_tiles() -> void:
 				continue
 			var faces: PackedVector3Array = (shape_node.shape as ConcavePolygonShape3D).get_faces()
 			var transform: Transform3D = body.global_transform * shape_node.transform
-			for vertex: Vector3 in faces:
-				triangles.push_back(transform * vertex)
+			for index in range(0, faces.size(), 3):
+				var a := transform * faces[index]
+				var b := transform * faces[index + 1]
+				var c := transform * faces[index + 2]
+				# Let route planning continue through the doorway. The physical door body remains active until the NPC route
+				# reaches it and opens the reference, while the floor under the doorway stays in the walkable mesh.
+				var normal := (b - a).cross(c - a).normalized()
+				if absf(normal.y) < 0.7 and _in_door_box((a + b + c) / 3.0):
+					continue
+				triangles.push_back(a)
+				triangles.push_back(b)
+				triangles.push_back(c)
 	if triangles.is_empty():
 		return
 	var lowest := triangles[0]
@@ -2728,7 +2978,10 @@ func _build_navigation_tiles() -> void:
 			geometry.add_faces(tile, Transform3D.IDENTITY)
 			var nav_mesh := NavigationMesh.new()
 			nav_mesh.agent_radius = 0.18
-			nav_mesh.agent_height = 1.8
+			var player_collision := player.get_node_or_null("CollisionShape3D") as CollisionShape3D
+			var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
+			if player_capsule != null:
+				nav_mesh.agent_height = player_capsule.height
 			nav_mesh.agent_max_climb = 0.4
 			nav_mesh.agent_max_slope = 55.0
 			nav_mesh.cell_size = 0.2
@@ -2754,12 +3007,111 @@ func _collect_static_bodies(node: Node, bodies: Array) -> void:
 	for child: Node in node.get_children():
 		_collect_static_bodies(child, bodies)
 
-## The path from `from` to `to` over the navigation tiles, or just the target when the tiles do not connect them.
-func _navigation_path(from: Vector3, to: Vector3) -> PackedVector3Array:
-	var path := NavigationServer3D.map_get_path(get_world_3d().navigation_map, from, to, true)
+## Finds a path over the navigation tiles. If a closed door split the baked mesh,
+## join reachable paths on both sides through that door's actual opening.
+func _navigation_path(from: Vector3, to: Vector3, actor_radius: float = 0.18) -> PackedVector3Array:
+	var navigation_map := get_world_3d().navigation_map
+	var path := NavigationServer3D.map_get_path(navigation_map, from, to, true)
 	if path.is_empty():
 		return PackedVector3Array([to])
-	return path
+	var goal_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, to)
+	if _path_reaches(path, goal_on_mesh):
+		return path
+	var best_path := PackedVector3Array()
+	var best_length := INF
+	for door: Dictionary in _door_references:
+		var portal := _door_portal_points(door, from, to, actor_radius)
+		if portal.is_empty():
+			continue
+		var near_point: Vector3 = portal.get("near", Vector3.ZERO)
+		var far_point: Vector3 = portal.get("far", Vector3.ZERO)
+		var near_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, near_point)
+		var far_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, far_point)
+		var approach := NavigationServer3D.map_get_path(navigation_map, from, near_point, true)
+		if approach.is_empty() or not _path_reaches(approach, near_on_mesh):
+			continue
+		var departure := NavigationServer3D.map_get_path(navigation_map, far_point, to, true)
+		if departure.is_empty() or not _path_reaches(departure, goal_on_mesh):
+			continue
+		var candidate := PackedVector3Array()
+		for point: Vector3 in approach:
+			_append_path_point(candidate, point)
+		_append_path_point(candidate, near_on_mesh)
+		# The navmesh may be disconnected by the closed door collision. This leg
+		# crosses the threshold; _open_doors_on_npc_routes opens this door as the
+		# actor approaches it, before the collision body blocks the crossing.
+		_append_path_point(candidate, far_on_mesh)
+		for index in range(1, departure.size()):
+			_append_path_point(candidate, departure[index])
+		var candidate_length := _path_length(candidate)
+		if candidate_length < best_length:
+			best_length = candidate_length
+			best_path = candidate
+	return best_path if not best_path.is_empty() else path
+
+func _door_portal_points(door: Dictionary, from: Vector3, to: Vector3, actor_radius: float) -> Dictionary:
+	var local_box: AABB = door.get("local_box", AABB())
+	var reference_transform: Transform3D = door.get("transform", Transform3D.IDENTITY)
+	if local_box.size.x <= 0.0 or local_box.size.z <= 0.0:
+		return {}
+	var normal_axis := 0 if local_box.size.x <= local_box.size.z else 2
+	var lateral_axis := 2 if normal_axis == 0 else 0
+	var normal_basis: Vector3 = reference_transform.basis.x if normal_axis == 0 else reference_transform.basis.z
+	var lateral_basis: Vector3 = reference_transform.basis.z if lateral_axis == 2 else reference_transform.basis.x
+	var normal_scale := normal_basis.length()
+	var lateral_scale := lateral_basis.length()
+	if normal_scale <= 0.0001 or lateral_scale <= 0.0001:
+		return {}
+	var inverse := reference_transform.affine_inverse()
+	var local_from := inverse * from
+	var local_to := inverse * to
+	var center_axis := local_box.position[normal_axis] + local_box.size[normal_axis] * 0.5
+	var from_delta := local_from[normal_axis] - center_axis
+	var to_delta := local_to[normal_axis] - center_axis
+	if from_delta * to_delta >= 0.0:
+		return {}
+	var axis_delta := local_to[normal_axis] - local_from[normal_axis]
+	if absf(axis_delta) <= 0.0001:
+		return {}
+	var crossing_fraction := (center_axis - local_from[normal_axis]) / axis_delta
+	if crossing_fraction <= 0.0 or crossing_fraction >= 1.0:
+		return {}
+	var crossing := local_from.lerp(local_to, crossing_fraction)
+	var lateral_clearance := (actor_radius + 0.04) / lateral_scale
+	var lateral_min := local_box.position[lateral_axis] + lateral_clearance
+	var lateral_max := local_box.end[lateral_axis] - lateral_clearance
+	if lateral_min > lateral_max:
+		return {}
+	var lateral_position := clampf(crossing[lateral_axis], lateral_min, lateral_max)
+	var half_thickness := local_box.size[normal_axis] * 0.5
+	var normal_clearance := half_thickness + (actor_radius + 0.12) / normal_scale
+	var from_side := signf(from_delta)
+	var near_local := crossing
+	var far_local := crossing
+	near_local[normal_axis] = center_axis + from_side * normal_clearance
+	far_local[normal_axis] = center_axis - from_side * normal_clearance
+	near_local[lateral_axis] = lateral_position
+	far_local[lateral_axis] = lateral_position
+	return {
+		"near": reference_transform * near_local,
+		"far": reference_transform * far_local,
+	}
+
+func _path_reaches(path: PackedVector3Array, destination: Vector3) -> bool:
+	if path.is_empty():
+		return false
+	var end := path[path.size() - 1]
+	return Vector2(end.x - destination.x, end.z - destination.z).length() <= 0.35
+
+func _append_path_point(path: PackedVector3Array, point: Vector3) -> void:
+	if path.is_empty() or path[path.size() - 1].distance_squared_to(point) > 0.0025:
+		path.push_back(point)
+
+func _path_length(path: PackedVector3Array) -> float:
+	var length := 0.0
+	for index in range(1, path.size()):
+		length += path[index - 1].distance_to(path[index])
+	return length
 
 func _update_npc_streaming() -> void:
 	if not _npc_stream_enabled or _npc_stream_busy or _exterior_collision_stream_busy or _world_loading or data_reader == null:
@@ -2810,7 +3162,11 @@ func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generat
 
 func _clear_cell_actors() -> void:
 	_clear_navigation_tiles()
+	if quest_world != null:
+		quest_world.clear_actors()
 	_trigger_zones.clear()
+	_door_boxes.clear()
+	_door_references.clear()
 	_npc_stream_generation += 1
 	_npc_stream_busy = false
 	_npc_loaded_reference_ids.clear()
@@ -3564,6 +3920,137 @@ func _godot_node_rest(node: Dictionary) -> Transform3D:
 	var godot_basis := source_to_godot * source_rotation * source_to_godot.inverse()
 	godot_basis = godot_basis.scaled(Vector3.ONE * float(node.get("scale", 1.0)))
 	return Transform3D(godot_basis, node.get("translation", Vector3.ZERO))
+
+## Rebuilds door animation tracks from the NIF's own NiControllerSequence data.
+## Static mesh vertices are already in model-root space, so each animated NiNode
+## receives the delta from its rest global transform to its sampled global transform.
+func _install_door_nif_animations(door_root: Node3D, metadata: Dictionary, node_hosts: Dictionary) -> void:
+	var sequences: Array = metadata.get("animations", [])
+	var nodes: Array = metadata.get("nodes", [])
+	if sequences.is_empty() or nodes.is_empty():
+		return
+	var node_map: Dictionary = {}
+	for node_value: Variant in nodes:
+		var node: Dictionary = node_value
+		var node_name := str(node.get("name", ""))
+		if not node_name.is_empty():
+			node_map[node_name] = node
+	var animation_player := AnimationPlayer.new()
+	animation_player.name = "NifDoorAnimationPlayer"
+	animation_player.root_node = NodePath("..")
+	animation_player.set_meta("reference_id", int(door_root.get_meta("reference_id", 0)))
+	var library := AnimationLibrary.new()
+	var animation_count := 0
+	for sequence_value: Variant in sequences:
+		var sequence: Dictionary = sequence_value
+		var sequence_name := str(sequence.get("name", ""))
+		if sequence_name.is_empty() or library.has_animation(sequence_name):
+			continue
+		var start_time := float(sequence.get("start_time", 0.0))
+		var stop_time := float(sequence.get("stop_time", start_time))
+		if stop_time <= start_time:
+			continue
+		var sequence_tracks: Array = sequence.get("tracks", [])
+		var tracks_by_node: Dictionary = {}
+		var sample_times: Array[float] = [start_time, stop_time]
+		for track_value: Variant in sequence_tracks:
+			var track: Dictionary = track_value
+			var node_name := str(track.get("node_name", ""))
+			tracks_by_node[node_name] = track
+			for key_spec: Array in [
+				["translations", 4], ["rotations", 5], ["scales", 2]
+			]:
+				var keys: PackedFloat32Array = track.get(str(key_spec[0]), PackedFloat32Array())
+				var stride := int(key_spec[1])
+				for key_offset in range(0, keys.size(), stride):
+					var key_time := float(keys[key_offset])
+					if key_time >= start_time and key_time <= stop_time and not sample_times.has(key_time):
+						sample_times.push_back(key_time)
+		sample_times.sort()
+		var animation := Animation.new()
+		animation.length = stop_time - start_time
+		var animated_host_count := 0
+		for host_value: Variant in node_hosts.values():
+			var host := host_value as Node3D
+			if not is_instance_valid(host):
+				continue
+			var node_name := str(host.get_meta("nif_node_name", ""))
+			var rest_cache: Dictionary = {}
+			var rest_global := _nif_node_global_rest(node_name, node_map, rest_cache)
+			var rest_inverse := rest_global.affine_inverse()
+			var track_index := animation.add_track(Animation.TYPE_VALUE)
+			animation.track_set_path(track_index, NodePath("%s:transform" % host.name))
+			animation.track_set_interpolation_type(track_index, Animation.INTERPOLATION_LINEAR)
+			var global_cache: Dictionary = {}
+			for sample_time in sample_times:
+				global_cache.clear()
+				var animated_global := _nif_node_global_at_time(
+					node_name, node_map, tracks_by_node, sample_time, global_cache
+				)
+				var model_delta := animated_global * rest_inverse
+				animation.track_insert_key(track_index, sample_time - start_time, model_delta)
+			animated_host_count += 1
+		if animated_host_count == 0:
+			continue
+		if library.add_animation(sequence_name, animation) == OK:
+			animation_count += 1
+	if animation_count == 0:
+		return
+	door_root.add_child(animation_player)
+	animation_player.add_animation_library("", library)
+
+func _nif_node_global_rest(node_name: String, node_map: Dictionary, cache: Dictionary) -> Transform3D:
+	if cache.has(node_name):
+		return cache[node_name]
+	if not node_map.has(node_name):
+		return Transform3D.IDENTITY
+	var node: Dictionary = node_map[node_name]
+	var parent_name := str(node.get("parent_name", ""))
+	var local_transform := _godot_node_rest(node)
+	var global_transform := local_transform
+	if not parent_name.is_empty() and node_map.has(parent_name):
+		global_transform = _nif_node_global_rest(parent_name, node_map, cache) * local_transform
+	cache[node_name] = global_transform
+	return global_transform
+
+func _nif_node_global_at_time(
+	node_name: String,
+	node_map: Dictionary,
+	tracks_by_node: Dictionary,
+	time: float,
+	cache: Dictionary
+) -> Transform3D:
+	if cache.has(node_name):
+		return cache[node_name]
+	if not node_map.has(node_name):
+		return Transform3D.IDENTITY
+	var node: Dictionary = node_map[node_name]
+	var rest_transform := _godot_node_rest(node)
+	var translation := rest_transform.origin
+	var rotation := rest_transform.basis.orthonormalized().get_rotation_quaternion()
+	var scale := float(node.get("scale", 1.0))
+	var track: Dictionary = tracks_by_node.get(node_name, {})
+	var translations: PackedFloat32Array = track.get("translations", PackedFloat32Array())
+	if translations.size() >= 4:
+		translation = _sample_vector_keys(translations, 4, time)
+	var rotations: PackedFloat32Array = track.get("rotations", PackedFloat32Array())
+	if rotations.size() >= 5:
+		rotation = _sample_quaternion_keys(rotations, time)
+	var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
+	if scales.size() >= 2:
+		scale = _sample_scalar_keys(scales, time)
+	var local_transform := Transform3D(
+		Basis(rotation).scaled(Vector3.ONE * scale),
+		translation
+	)
+	var parent_name := str(node.get("parent_name", ""))
+	var global_transform := local_transform
+	if not parent_name.is_empty() and node_map.has(parent_name):
+		global_transform = _nif_node_global_at_time(
+			parent_name, node_map, tracks_by_node, time, cache
+		) * local_transform
+	cache[node_name] = global_transform
+	return global_transform
 
 func _skin_for_mesh(bone_names: Array, skeleton: Skeleton3D) -> Skin:
 	var skin := Skin.new()
