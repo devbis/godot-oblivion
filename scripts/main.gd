@@ -255,13 +255,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			print("OpenOB quest: " + line)
 	elif event.keycode == KEY_F:
 		_cycle_nearest_npc_face_expression()
-	elif event.keycode == KEY_C:
+	elif event.keycode == KEY_N:
 		_cycle_player_face_profile()
 	elif event.keycode == KEY_G:
 		_cycle_player_face_expression()
 	elif event.keycode == KEY_I:
 		_toggle_inventory()
-	elif event.keycode == KEY_T:
+	elif event.keycode == KEY_U:
 		_toggle_face_view()
 	elif event.keycode == KEY_Y:
 		_toggle_fly_mode()
@@ -1250,7 +1250,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · Space jump · mouse look/zoom\nE interact · Y fly · I inventory · V camera · C face · G/F expression · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nSpace interact · Y fly · I inventory · R camera · N face · U face view · G/F expression · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 

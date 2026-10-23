@@ -37,7 +37,7 @@ move_right={
 }
 jump={
 "deadzone": 0.2,
-"events": [Object(InputEventKey,"physical_keycode":32)]
+"events": [Object(InputEventKey,"physical_keycode":69)]
 }
 run={
 "deadzone": 0.2,
@@ -45,7 +45,11 @@ run={
 }
 interact={
 "deadzone": 0.2,
-"events": [Object(InputEventKey,"physical_keycode":69)]
+"events": [Object(InputEventKey,"physical_keycode":32)]
+}
+crouch={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194326)]
 }
 
 [physics]

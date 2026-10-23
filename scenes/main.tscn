@@ -166,7 +166,7 @@ offset_top = 130.0
 offset_right = -16.0
 offset_bottom = 164.0
 text = "Y · Fly: Off"
-tooltip_text = "Toggle free flight: WASD to move, mouse to look, Space to rise, Ctrl to descend, Shift to fly faster. Press Y to toggle."
+tooltip_text = "Toggle free flight: WASD to move, mouse to look, E to rise, Ctrl to descend, Shift to fly faster. Press Y to toggle."
 
 [node name="InteractionHint" type="Label" parent="StatusLayer"]
 anchor_top = 1.0

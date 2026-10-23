@@ -21,6 +21,12 @@ extends CharacterBody3D
 @export var fly_speed_mps := 5.0
 @export var fly_fast_speed_mps := 15.0
 @export var chain_push_force_newtons := 20.0
+## Crouch values are prototype defaults, not measured from the original game. There is no crouch animation yet, so only the
+## collision capsule, movement speed, and camera height change.
+@export var crouch_speed_scale := 0.5
+@export var crouch_capsule_height_m := 1.0
+@export var crouch_camera_drop_m := 0.5
+@export var crouch_blend_speed := 10.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
 @onready var camera: Camera3D = $CameraPivot/Camera3D
@@ -47,6 +53,10 @@ var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
 var _footstep_distance_m := 0.0
+var is_crouching := false
+var _crouch_blend := 0.0
+var _standing_capsule_height := 1.6
+@onready var _collision_shape: CollisionShape3D = $CollisionShape3D
 
 var is_first_person: bool:
 	get:
@@ -54,6 +64,9 @@ var is_first_person: bool:
 
 func _ready() -> void:
 	_normal_camera_pivot_position = camera_pivot.position
+	var capsule := _collision_shape.shape as CapsuleShape3D
+	if capsule != null:
+		_standing_capsule_height = capsule.height
 	_first_person_eye_anchor = _normal_camera_pivot_position
 	_camera_yaw = rotation.y
 	_target_camera_distance = camera_distance
@@ -176,7 +189,7 @@ func handle_camera_input(event: InputEvent) -> void:
 		elif Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			capture_mouse()
 			get_viewport().set_input_as_handled()
-	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_V:
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R:
 		_third_person = not _third_person
 		_set_camera_distance(camera_distance if _third_person else camera_zoom_min)
 		get_viewport().set_input_as_handled()
@@ -206,7 +219,7 @@ func _set_camera_distance(distance: float) -> void:
 func _physics_process(delta: float) -> void:
 	if is_flying:
 		var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
-		var vertical := (1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0) - (1.0 if Input.is_key_pressed(KEY_CTRL) else 0.0)
+		var vertical := Input.get_action_strength("jump") - Input.get_action_strength("crouch")
 		var view_yaw := _camera_yaw + (PI if face_preview_enabled else 0.0)
 		var view_basis := Basis(Vector3.UP, view_yaw) * Basis(Vector3.RIGHT, _camera_pitch)
 		var direction := view_basis * Vector3(input.x, 0.0, input.y) + Vector3.UP * vertical
@@ -218,6 +231,7 @@ func _physics_process(delta: float) -> void:
 		return
 
 	_update_camera_clearance(delta)
+	_update_crouch(delta)
 
 	# While a step is in progress the capsule rolls over a tread's rounded nose,
 	# where it is not on the floor yet. Gravity is held off so it can finish the step,
@@ -233,7 +247,7 @@ func _physics_process(delta: float) -> void:
 	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var camera_basis := Basis(Vector3.UP, rotation.y)
 	var direction := (camera_basis * Vector3(input.x, 0.0, input.y)).normalized()
-	var speed := run_speed_mps if Input.is_action_pressed("run") else walk_speed_mps
+	var speed := (run_speed_mps if Input.is_action_pressed("run") else walk_speed_mps) * (crouch_speed_scale if is_crouching else 1.0)
 	if direction:
 		velocity.x = direction.x * speed
 		velocity.z = direction.z * speed
@@ -257,6 +271,35 @@ func _physics_process(delta: float) -> void:
 	if (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
 		_stepper.try_step_down(self, max_step_height_m)
 	_update_footstep_audio(previous_position)
+
+## Crouch while the key is held. Standing back up waits until the full-height capsule fits.
+func _update_crouch(delta: float) -> void:
+	var capsule := _collision_shape.shape as CapsuleShape3D
+	var wants_crouch := Input.is_action_pressed("crouch")
+	if wants_crouch and not is_crouching:
+		is_crouching = true
+	elif not wants_crouch and is_crouching and _can_stand_up():
+		is_crouching = false
+	if capsule != null:
+		var height := crouch_capsule_height_m if is_crouching else _standing_capsule_height
+		capsule.height = height
+		_collision_shape.position.y = height * 0.5
+	_crouch_blend = move_toward(_crouch_blend, 1.0 if is_crouching else 0.0, crouch_blend_speed * delta)
+	if not face_preview_enabled:
+		var base := _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
+		camera_pivot.position = base - Vector3(0.0, crouch_camera_drop_m * _crouch_blend, 0.0)
+
+func _can_stand_up() -> bool:
+	var standing := CapsuleShape3D.new()
+	var capsule := _collision_shape.shape as CapsuleShape3D
+	standing.radius = capsule.radius if capsule != null else 0.32
+	standing.height = _standing_capsule_height
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = standing
+	query.transform = Transform3D(Basis.IDENTITY, global_position + Vector3.UP * (_standing_capsule_height * 0.5 + 0.02))
+	query.collision_mask = collision_mask
+	query.exclude = [get_rid()]
+	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
 
 func _update_footstep_audio(previous_position: Vector3) -> void:
 	if not (is_on_floor() or _stepper.is_stepping()):
