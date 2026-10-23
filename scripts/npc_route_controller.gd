@@ -25,6 +25,8 @@ var grounding_enabled := false
 ## Whether the walk checks the floor ahead for a drop. A route of several points comes from the navigation tiles, which
 ## already keep to walkable floor, so the check is only kept for a single straight target.
 var check_floor_ahead := true
+## A killed or disabled actor: its route is never run again and physics stays off.
+var inactive := false
 var _pause_remaining := 0.0
 var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
@@ -54,11 +56,13 @@ func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause:
 	if grounding_enabled:
 		_last_grounded_position = global_position
 		_has_last_grounded_position = true
-	set_physics_process(grounding_enabled or not waypoints.is_empty())
+	set_physics_process(not inactive and (grounding_enabled or not waypoints.is_empty()))
 
 ## A routed actor can ask a stationary NPC to clear a collision in a narrow passage.
 ## The yielding actor takes a short navmesh route away from the approaching actor.
 func request_yield(away_direction: Vector3, distance_m: float) -> bool:
+	if inactive:
+		return false
 	if not _yield_path.is_empty() or (not waypoints.is_empty() and waypoint_index < waypoints.size()):
 		return false
 	away_direction.y = 0.0
@@ -94,6 +98,9 @@ func get_collision_radius() -> float:
 	return 0.18
 
 func _physics_process(delta: float) -> void:
+	if inactive:
+		set_physics_process(false)
+		return
 	var desired_horizontal_velocity := Vector3.ZERO
 	if _pause_remaining > 0.0:
 		_pause_remaining = maxf(0.0, _pause_remaining - delta)

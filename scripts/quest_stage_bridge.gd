@@ -6,7 +6,25 @@ extends RefCounted
 
 ## Stats and flags set by stage scripts, keyed by reference name ("" for global).
 var actor_state: Dictionary = {}
+## Names of actors a script killed or disabled. They stay so for the session: the scene does not build them again when
+## their cell is loaded again.
 var dead_actors: Dictionary = {}
+var disabled_actors: Dictionary = {}
+
+
+## Reference ids of the removed actors; the name is not unique (guards share a base editor id).
+var removed_reference_ids: Dictionary = {}
+
+
+func is_actor_removed(reference_id: int) -> bool:
+	return removed_reference_ids.has(reference_id)
+
+
+## Forgets door and actor state of the previous cell. Doors are rebuilt closed when a cell loads, so their open marks go.
+func reset_cell_state(world: Node) -> void:
+	for meta_name: StringName in world.get_meta_list():
+		if str(meta_name).begins_with("door_open_"):
+			world.remove_meta(meta_name)
 
 
 ## `runs` is the array from OblivionData.run_quest_stage. `transform_of` maps a
@@ -90,8 +108,14 @@ func _deactivate(target: String, command: String, world: Node3D, label: String) 
 		actor.collision_layer = 0
 		actor.collision_mask = 0
 	actor.set_physics_process(false)
+	# A route controller keeps physics off when a later route is configured for it.
+	if "inactive" in actor:
+		actor.set("inactive", true)
+	removed_reference_ids[int(actor.get_meta("reference_id", 0))] = true
 	if command == "kill":
 		dead_actors[target] = true
+	else:
+		disabled_actors[target] = true
 	return "applied: %s" % label
 
 

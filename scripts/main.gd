@@ -42,6 +42,7 @@ const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const ITEM_AIM_RANGE_M := 1.8
 const ACTOR_AIM_RANGE_M := 2.5
 const DOOR_AIM_RANGE_M := 2.5
+const AIM_REACH_ORIGIN_HEIGHT_M := 0.9
 const AIM_TARGET_COLLISION_MASK := 2 | 4 | 8 | 16
 const PICKUP_TARGET_COLLISION_LAYER := 8
 const HUD_RETICLE_TEXTURE_PATH := "Textures/Menus/Misc/hud_reticle.dds"
@@ -296,11 +297,11 @@ func _process(_delta: float) -> void:
 		if player.face_preview_enabled:
 			player.update_face_preview_anchor(_player_face_camera_anchor())
 
-func _input(event: InputEvent) -> void:
+## Camera input runs after the interface had its turn: a click on the inventory or on the Face and Fly buttons is theirs,
+## and only an event no control took (a click on the world, the mouse motion that looks around) reaches the camera.
+func _unhandled_input(event: InputEvent) -> void:
 	if is_instance_valid(player):
 		player.handle_camera_input(event)
-
-func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 	if event.keycode == KEY_F9:
@@ -533,9 +534,10 @@ func _physics_process(delta: float) -> void:
 ## Trigger zones of the cell: a reference whose base has an object script with an OnTrigger block. The zone's OnTrigger
 ## runs each time the player enters its box, until the script disables the zone.
 var _trigger_zones: Array[Dictionary] = []
+var _cell_setup_done := false
 
-func _find_trigger_zones() -> void:
-	_trigger_zones.clear()
+func _find_trigger_zones(generation: int) -> void:
+	var zones: Array[Dictionary] = []
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
 		var script_form_id := int(reference.get("script_form_id", 0))
@@ -552,8 +554,10 @@ func _find_trigger_zones() -> void:
 		if not has_box:
 			continue
 		var world_box := _reference_transform(reference) * box
-		_trigger_zones.push_back({"script_form_id": script_form_id, "box": world_box, "inside": false, "disabled": false})
+		zones.push_back({"script_form_id": script_form_id, "box": world_box, "inside": false, "disabled": false})
 		print("OpenOB scripted trigger %08X: box %s" % [script_form_id, str(world_box)])
+	if generation == _npc_stream_generation:
+		_trigger_zones = zones
 
 ## Door bounds let navigation plan a route through a doorway. The door itself stays
 ## solid until an NPC route reaches it and asks the door controller to open it.
@@ -561,32 +565,42 @@ var _door_boxes: Array[AABB] = []
 var _door_references: Array[Dictionary] = []
 var _door_reference_lookup_cache: Dictionary = {}
 
-func _find_door_boxes() -> void:
+var _door_registered_ids: Dictionary = {}
+
+func _clear_door_references() -> void:
 	_door_boxes.clear()
 	_door_references.clear()
 	_door_reference_lookup_cache.clear()
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if str(data_reader.find_record_type(int(reference.get("base_form_id", 0)))) != "DOOR":
+	_door_registered_ids.clear()
+
+## Records one placed DOOR reference once its meshes are known (called while the cell geometry loads, so doors exist
+## whether or not an NPC is near).
+func _register_door_reference(reference: Dictionary, meshes: Array) -> void:
+	var reference_id := int(reference.get("form_id", 0))
+	if _door_registered_ids.has(reference_id):
+		return
+	var box := AABB()
+	var has_box := false
+	for mesh_entry: Dictionary in meshes:
+		var mesh := mesh_entry.get("mesh") as Mesh
+		if mesh == null:
 			continue
-		var box := AABB()
-		var has_box := false
-		for mesh_entry: Dictionary in await _meshes_for_model(str(reference.get("model_path", ""))):
-			var mesh := mesh_entry.get("mesh") as Mesh
-			if mesh == null:
-				continue
-			box = mesh.get_aabb() if not has_box else box.merge(mesh.get_aabb())
-			has_box = true
-		if has_box:
-			var reference_transform := _reference_transform(reference)
-			var world_box := reference_transform * box
-			_door_boxes.push_back(world_box)
-			_door_references.push_back({
-				"reference": reference,
-				"box": world_box,
-				"local_box": box,
-				"transform": reference_transform,
-			})
+		box = mesh.get_aabb() if not has_box else box.merge(mesh.get_aabb())
+		has_box = true
+	if not has_box:
+		return
+	var reference_transform := _reference_transform(reference)
+	var world_box := reference_transform * box
+	_door_registered_ids[reference_id] = true
+	_door_boxes.push_back(world_box)
+	var door := {
+		"reference": reference,
+		"box": world_box,
+		"local_box": box,
+		"transform": reference_transform,
+	}
+	_door_references.push_back(door)
+	_door_reference_lookup_cache[reference_id] = door
 
 func _in_door_box(point: Vector3) -> bool:
 	for box: AABB in _door_boxes:
@@ -605,7 +619,7 @@ func _open_doors_on_npc_routes() -> void:
 		if package.is_empty():
 			continue
 		var root := actor.get("root") as Node3D
-		if not is_instance_valid(root):
+		if not is_instance_valid(root) or bool(root.get("inactive")):
 			continue
 		var route_value: Variant = root.get("waypoints")
 		if not route_value is Array:
@@ -698,7 +712,7 @@ func _follow_player_routes() -> void:
 		if int(package.get("location_form_id", 0)) != 0x14:
 			continue
 		var root := actor.get("root") as Node3D
-		if not is_instance_valid(root):
+		if not is_instance_valid(root) or bool(root.get("inactive")):
 			continue
 		var target: Vector3 = actor.get("route_target", Vector3.INF)
 		if target.distance_to(player.global_position) <= 1.0:
@@ -745,7 +759,7 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 	var executable_path := _game_executable_path()
 	if not FileAccess.file_exists(executable_path):
 		return PackedStringArray(["Oblivion.exe not found at %s (set OBLIVION_EXE)" % executable_path])
-	var cache_dir := ProjectSettings.globalize_path("res://.godot/openob/cache")
+	var cache_dir := DerivedResourceCache.cache_dir()
 	if quest_world == null:
 		quest_world = data_reader.create_quest_world(executable_path, cache_dir)
 		if quest_world == null:
@@ -821,17 +835,35 @@ func _quest_distance(from: String, to: String) -> Variant:
 		return null
 	return (from_position as Vector3).distance_to(to_position as Vector3) / game_units_to_meters
 
+## Origins of the loaded cell's references by name and by form id, built once per cell: a quest asks for a distance on
+## every physics tick, and scanning every reference each time is wasteful.
+var _reference_index_cell: Dictionary = {}
+var _reference_index: Dictionary = {}
+
+func _reference_origin_index() -> Dictionary:
+	if is_same(_reference_index_cell, current_cell) and not _reference_index.is_empty():
+		return _reference_index
+	var by_name: Dictionary = {}
+	var by_id: Dictionary = {}
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		var origin := _reference_origin(reference)
+		var reference_name := str(reference.get("reference_name", ""))
+		if not reference_name.is_empty() and not by_name.has(reference_name):
+			by_name[reference_name] = origin
+		by_id[int(reference.get("form_id", 0))] = origin
+	_reference_index = {"by_name": by_name, "by_id": by_id}
+	_reference_index_cell = current_cell
+	return _reference_index
+
 func _quest_position(name: String) -> Variant:
 	if name.to_lower() == "player":
 		return player.global_position
 	var node := get_node_or_null(NodePath(name)) as Node3D
 	if node != null:
 		return node.global_position
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if str(reference.get("reference_name", "")) == name:
-			return _reference_transform(reference).origin
-	return null
+	var origins: Dictionary = _reference_origin_index().get("by_name", {})
+	return origins.get(name)
 
 ## Gives every placed NPC the route of the package it starts at the quest's current stage.
 func _refresh_npc_routes() -> void:
@@ -840,7 +872,7 @@ func _refresh_npc_routes() -> void:
 
 func _refresh_actor_route(actor: Dictionary) -> void:
 	var root: Node = actor.get("root")
-	if not is_instance_valid(root):
+	if not is_instance_valid(root) or bool(root.get("inactive")):
 		return
 	var package: Dictionary = {}
 	var npc_id := str(actor.get("npc_editor_id", ""))
@@ -896,12 +928,12 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	])
 	if not root.has_meta("route_finished_connected"):
 		root.set_meta("route_finished_connected", true)
-		root.route_finished.connect(_on_actor_route_finished.bind(str(actor.get("name", ""))))
+		root.route_finished.connect(_on_actor_route_finished.bind(int(actor.get("reference_id", 0))))
 
 ## The NPC reached the end of its package's route: run OnPackageDone on its script.
-func _on_actor_route_finished(actor_name: String) -> void:
+func _on_actor_route_finished(actor_reference_id: int) -> void:
 	for actor: Dictionary in _npc_actors:
-		if str(actor.get("name", "")) != actor_name or quest_world == null or route_quest_editor_id.is_empty():
+		if int(actor.get("reference_id", 0)) != actor_reference_id or quest_world == null or route_quest_editor_id.is_empty():
 			continue
 		var package: Dictionary = actor.get("package", {})
 		if package.is_empty() or bool(actor.get("package_done", false)):
@@ -931,7 +963,7 @@ func _on_actor_route_finished(actor_name: String) -> void:
 						root.call("configure_route", waypoints, false, 0.0, arrival_radius)
 					else:
 						push_warning("OpenOB package %s for %s stopped %.2fm from its destination; no reachable route remains" % [
-							str(package.get("editor_id", "")), actor_name, horizontal_distance
+							str(package.get("editor_id", "")), str(actor.get("name", "")), horizontal_distance
 						])
 				return
 		actor["package_done"] = true
@@ -949,11 +981,8 @@ func _location_position(form_id: int) -> Variant:
 	# Form 0x14 is the player's reference: a package near the player walks to the player.
 	if form_id == 0x14:
 		return player.global_position
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if int(reference.get("form_id", 0)) == form_id:
-			return _reference_transform(reference).origin
-	return null
+	var origins: Dictionary = _reference_origin_index().get("by_id", {})
+	return origins.get(form_id)
 
 func _package_location_label(form_id: int) -> String:
 	if form_id == 0:
@@ -976,7 +1005,7 @@ func run_quest_stage(quest_editor_id: String, stage: int) -> PackedStringArray:
 	var executable_path := _game_executable_path()
 	if not FileAccess.file_exists(executable_path):
 		return PackedStringArray(["Oblivion.exe not found at %s (set OBLIVION_EXE)" % executable_path])
-	var cache_dir := ProjectSettings.globalize_path("res://.godot/openob/cache")
+	var cache_dir := DerivedResourceCache.cache_dir()
 	var result: Dictionary = data_reader.run_quest_stage(quest_editor_id, stage, executable_path, cache_dir)
 	var error := str(result.get("error", ""))
 	if not error.is_empty():
@@ -1027,6 +1056,9 @@ func _load_cell_geometry(
 		_exterior_terrain_collision_bodies.clear()
 		_exterior_terrain_collision_attempted_ids.clear()
 		_placed_items.clear()
+		_clear_door_references()
+		# Doors are rebuilt closed, so the open marks of the previous cell go.
+		quest_bridge.reset_cell_state(self)
 		if has_node("TestFloor/MeshInstance3D"):
 			$TestFloor/MeshInstance3D.visible = true
 			$TestFloor/CollisionShape3D.disabled = false
@@ -1136,10 +1168,15 @@ func _load_cell_geometry(
 		var base_type := str(data_reader.find_record_type(base_form_id))
 		var is_door := base_type == "DOOR"
 		var is_pickup_item := base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]
+		# An item the player took stays gone when its cell is loaded again.
+		if is_pickup_item and _picked_up_reference_ids.has(int(reference.get("form_id", 0))):
+			continue
 		reference_count += 1
 		var meshes: Array = await _meshes_for_model(model_path)
 		if generation != _cell_load_generation:
 			return false
+		if is_door:
+			_register_door_reference(reference, meshes)
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = _nif_metadata_cache.get(nif_key, {})
 		if _supports_imported_nif_physics(physics_metadata, meshes):
@@ -1565,6 +1602,8 @@ func _is_early_oblivion_gate(reference: Dictionary, model_path: String) -> bool:
 	]).to_lower().replace("_", "").replace(" ", "")
 	return (identifiers.contains("oblivion") and identifiers.contains("gate")) or identifiers.contains("obgate")
 
+var _exterior_stream_empty_grid := Vector2i(1 << 30, 1 << 30)
+
 func _stream_exterior_if_needed() -> void:
 	var worldspace_form_id := int(current_cell.get("worldspace_form_id", 0))
 	var cell_size_meters := EXTERIOR_CELL_SIZE * game_units_to_meters
@@ -1574,11 +1613,15 @@ func _stream_exterior_if_needed() -> void:
 	var loaded_grid_y := int(current_cell.get("grid_y", 0))
 	if abs(grid_x - loaded_grid_x) < EXTERIOR_RELOAD_GRID_DISTANCE and abs(grid_y - loaded_grid_y) < EXTERIOR_RELOAD_GRID_DISTANCE:
 		return
+	# A grid square with no region is asked about once, not on every frame.
+	if _exterior_stream_empty_grid == Vector2i(grid_x, grid_y):
+		return
 	var exterior_region: Dictionary = data_reader.find_exterior_region(
 		grid_x, grid_y, worldspace_form_id, EXTERIOR_STREAM_RADIUS,
 		EXTERIOR_STATIC_REFERENCE_RADIUS, EXTERIOR_TREE_REFERENCE_RADIUS
 	)
 	if exterior_region.is_empty():
+		_exterior_stream_empty_grid = Vector2i(grid_x, grid_y)
 		return
 	_deferred_world_generation += 1
 	_npc_stream_enabled = false
@@ -1592,6 +1635,23 @@ func _stream_exterior_if_needed() -> void:
 	_world_loading = false
 	_start_deferred_cell_loading()
 
+var _nif_reader_busy := false
+
+## Reads one NIF through the native reader. Only called while _nif_reader_busy is held by the caller.
+func _read_nif_asset(model_path: String) -> Dictionary:
+	var attempts := 0
+	while not data_reader.request_nif_meshes(model_path):
+		attempts += 1
+		if attempts > 600 or data_reader == null:
+			return {"requested": false}
+		await get_tree().process_frame
+	while data_reader.is_asset_loading():
+		await get_tree().process_frame
+	var parse_error := str(data_reader.get_asset_error())
+	if not parse_error.is_empty():
+		return {"requested": true, "error": parse_error}
+	return {"requested": true, "error": "", "result": data_reader.take_nif_meshes()}
+
 func _meshes_for_model(model_path: String) -> Array:
 	var key := model_path.to_lower().replace("\\", "/")
 	if _model_cache.has(key):
@@ -1600,17 +1660,27 @@ func _meshes_for_model(model_path: String) -> Array:
 	if key.get_file() in UNSUPPORTED_PARTICLE_MODEL_FILENAMES:
 		_model_cache[key] = []
 		return []
-	if data_reader == null or not data_reader.request_nif_meshes(model_path):
+	if data_reader == null or key.is_empty():
 		return []
-	while data_reader.is_asset_loading():
+	# The native reader holds one asset at a time. Callers queue here, in order of arrival, so no request is dropped and
+	# a finished result is always taken by the coroutine that asked for it.
+	while _nif_reader_busy:
 		await get_tree().process_frame
-	var parse_error := str(data_reader.get_asset_error())
+		if _model_cache.has(key):
+			return _model_cache[key]
+	_nif_reader_busy = true
+	var read_result: Dictionary = await _read_nif_asset(model_path)
+	_nif_reader_busy = false
+	if not bool(read_result.get("requested", false)):
+		# The reader never accepted the request (game data still loading): nothing is cached, so a later call retries.
+		return []
+	var parse_error := str(read_result.get("error", ""))
 	if not parse_error.is_empty():
 		push_warning("Could not parse NIF %s: %s" % [model_path, parse_error])
 		_model_cache[key] = []
 		return []
 
-	var result: Dictionary = data_reader.take_nif_meshes()
+	var result: Dictionary = read_result.get("result", {})
 	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
 	var physics_bodies: Array = result.get("physics_bodies", [])
 	var metadata := {
@@ -1623,12 +1693,14 @@ func _meshes_for_model(model_path: String) -> Array:
 		metadata["source_bytes"] = source_bytes
 	_nif_metadata_cache[key] = metadata
 	var raw_meshes: Array = result.get("meshes", [])
+	# The NIF is hashed once; each mesh index derives its cache key from the digest.
+	var source_digest := DerivedResourceCache.digest_of(source_bytes) if not raw_meshes.is_empty() else ""
 	var godot_meshes: Array[Dictionary] = []
 	for index in range(raw_meshes.size()):
 		var mesh_data: Dictionary = raw_meshes[index]
 		var builder := Callable(self, "_build_godot_mesh").bind(mesh_data)
-		var resource := DerivedResourceCache.load_or_build(
-			source_bytes, "nif-arraymesh-normal-orientation-v2-%d" % index, builder
+		var resource := DerivedResourceCache.load_or_build_digest(
+			source_digest, "nif-arraymesh-normal-orientation-v2-%d" % index, builder
 		) as ArrayMesh
 		if resource != null:
 			godot_meshes.push_back({
@@ -1705,8 +1777,10 @@ func _physics_mesh_for_entry(model_path: String, mesh_index: int, mesh_entry: Di
 	var resource: ArrayMesh = null
 	if not source_bytes.is_empty():
 		var builder := Callable(self, "_build_godot_mesh").bind(local_data)
-		resource = DerivedResourceCache.load_or_build(
-			source_bytes, "nif-havok-node-local-v1-%d" % mesh_index, builder
+		if not metadata.has("source_digest"):
+			metadata["source_digest"] = DerivedResourceCache.digest_of(source_bytes)
+		resource = DerivedResourceCache.load_or_build_digest(
+			str(metadata["source_digest"]), "nif-havok-node-local-v1-%d" % mesh_index, builder
 		) as ArrayMesh
 	if resource != null:
 		_physics_mesh_cache[cache_key] = resource
@@ -1937,7 +2011,10 @@ func _ensure_collision_shape(model_path: String) -> void:
 		var mesh := mesh_entry.get("mesh") as ArrayMesh
 		if mesh != null:
 			collision_faces.append_array(mesh.get_faces())
-	_collision_cache[collision_key] = _build_concave_shape(collision_faces)
+	var built_shape := _build_concave_shape(collision_faces)
+	# A model that is not loaded yet, or that produced no faces, is not cached: it is retried once the meshes exist.
+	if built_shape != null:
+		_collision_cache[collision_key] = built_shape
 
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
 	var model_key := model_path.to_lower().replace("\\", "/")
@@ -2043,7 +2120,7 @@ func _update_exterior_collision_streaming() -> void:
 		var reference_id := int(reference.get("form_id", 0))
 		if _exterior_collision_attempted_ids.has(reference_id):
 			continue
-		var distance_to_player := _reference_transform(reference).origin.distance_to(player.global_position)
+		var distance_to_player := _reference_origin(reference).distance_to(player.global_position)
 		if distance_to_player > selected_distance:
 			continue
 		if bool(reference.get("is_tree", false)):
@@ -2074,12 +2151,18 @@ func _load_exterior_reference_collider(reference: Dictionary, generation: int) -
 	if not _model_cache.has(model_key):
 		await _meshes_for_model(model_path)
 	if generation != _cell_load_generation or not _exterior_collision_stream_enabled:
+		if generation == _cell_load_generation:
+			_exterior_collision_attempted_ids.erase(reference_id)
 		if _exterior_collision_busy_generation == generation:
 			_exterior_collision_stream_busy = false
 			_exterior_collision_busy_generation = -1
 		return
 	if reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_UNLOAD_DISTANCE:
 		_add_reference_collider(reference_id, reference_transform, model_path, true)
+	else:
+		# The player left before the model finished loading: no collider was made, so the reference may be tried again
+		# when the player is back in range.
+		_exterior_collision_attempted_ids.erase(reference_id)
 	if _exterior_collision_busy_generation == generation:
 		_exterior_collision_stream_busy = false
 		_exterior_collision_busy_generation = -1
@@ -2418,12 +2501,11 @@ func _apply_player_face_profile() -> void:
 		var facegen_data: Dictionary = _player_facegen_mesh_data[index]
 		if facegen_data.is_empty():
 			continue
-		var morphed_mesh := FaceGenData.build_head_mesh(
+		var morphed_mesh := _build_facegen_mesh(
 			_player_face_source_meshes[index],
 			profile.get("face_symmetric", PackedFloat32Array()),
 			profile.get("face_asymmetric", PackedFloat32Array()),
-			facegen_data.egm,
-			facegen_data.tri
+			facegen_data
 		)
 		if morphed_mesh != null:
 			instance.mesh = morphed_mesh
@@ -2562,9 +2644,13 @@ func _acquire_aimed_target() -> Dictionary:
 	var screen_center := get_viewport().get_visible_rect().get_center()
 	var ray_origin := camera.project_ray_origin(screen_center)
 	var ray_direction := camera.project_ray_normal(screen_center)
+	# The ray starts at the camera, but reach is the player's: the ranges are measured from the player's body, and the ray is
+	# long enough to cover the camera's distance behind (or in front of) the player.
+	var reach_origin := player.global_position + Vector3.UP * AIM_REACH_ORIGIN_HEIGHT_M
+	var max_reach := maxf(ITEM_AIM_RANGE_M, maxf(DOOR_AIM_RANGE_M, ACTOR_AIM_RANGE_M))
 	var query := PhysicsRayQueryParameters3D.create(
 		ray_origin,
-		ray_origin + ray_direction * maxf(ITEM_AIM_RANGE_M, maxf(DOOR_AIM_RANGE_M, ACTOR_AIM_RANGE_M)),
+		ray_origin + ray_direction * (max_reach + ray_origin.distance_to(reach_origin)),
 		AIM_TARGET_COLLISION_MASK,
 		[player.get_rid()]
 	)
@@ -2577,7 +2663,10 @@ func _acquire_aimed_target() -> Dictionary:
 	if collider == null:
 		return {}
 	var hit_position: Vector3 = hit.get("position", ray_origin)
-	var hit_distance := ray_origin.distance_to(hit_position)
+	# A hit behind the player (the third-person camera looks past the player) is not reachable.
+	if ray_direction.dot(hit_position - reach_origin) <= 0.0:
+		return {}
+	var hit_distance := reach_origin.distance_to(hit_position)
 	var reference_id := int(collider.get_meta("reference_id", 0))
 	var item: Dictionary = _placed_items.get(reference_id, {})
 	if not item.is_empty():
@@ -2678,8 +2767,11 @@ func _show_interaction_toast(message: String) -> void:
 	_interaction_toast_text = message
 	_interaction_toast_remaining = 1.5
 
+var _picked_up_reference_ids: Dictionary = {}
+
 func _pick_up_placed_item(item: Dictionary) -> void:
 	var reference_id := int(item.get("reference_id", 0))
+	_picked_up_reference_ids[reference_id] = true
 	_placed_items.erase(reference_id)
 	var target_area := item.get("target_area") as Area3D
 	if is_instance_valid(target_area):
@@ -2902,6 +2994,10 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var npc: Dictionary = data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
 		if npc.is_empty():
 			continue
+		# An actor a script killed or disabled stays that way when its cell is loaded again.
+		if quest_bridge.is_actor_removed(reference_id):
+			_npc_loaded_reference_ids[reference_id] = true
+			continue
 		var actor_root := CharacterBody3D.new()
 		actor_root.set_script(NpcRouteController)
 		var actor_name := str(reference.get("reference_name", "")).strip_edges()
@@ -2912,6 +3008,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_reference_name := str(reference.get("reference_name", "")).strip_edges()
 		if actor_reference_name.is_empty():
 			actor_reference_name = actor_name
+		# Node names are unique: guards share a base editor id, and a quest or the bridge finds an actor by its node name.
+		if has_node(NodePath(actor_name)):
+			actor_name = "%s_%08X" % [actor_name, reference_id]
 		actor_root.name = actor_name
 		actor_root.set_meta("reference_id", reference_id)
 		actor_root.set_meta("reference_name", actor_reference_name)
@@ -3098,6 +3197,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			npc_display_name = actor_name
 		var actor_state := {
 			"name": actor_name,
+			"reference_id": reference_id,
 			"display_name": npc_display_name,
 			"reference_name": actor_reference_name,
 			"base_form_id": int(reference.get("base_form_id", 0)),
@@ -3126,13 +3226,19 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
-	if _trigger_zones.is_empty():
-		await _find_trigger_zones()
-	if _door_boxes.is_empty():
-		await _find_door_boxes()
+	# The cell's zones, navigation and quest are set up once per cell, not after every streamed NPC, and only by the load
+	# that still belongs to the current cell.
+	if _cell_setup_done or stream_generation != _npc_stream_generation:
+		return
+	_cell_setup_done = true
+	await _find_trigger_zones(stream_generation)
+	if stream_generation != _npc_stream_generation:
+		return
 	# The routes follow the navigation tiles of the cell, so they are baked before the quest starts.
 	if _navigation_tiles == null:
 		await _build_navigation_tiles()
+		if stream_generation != _npc_stream_generation:
+			return
 	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
 	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):
@@ -3395,9 +3501,8 @@ func _clear_cell_actors() -> void:
 	if quest_world != null:
 		quest_world.clear_actors()
 	_trigger_zones.clear()
-	_door_boxes.clear()
-	_door_references.clear()
-	_door_reference_lookup_cache.clear()
+	_cell_setup_done = false
+	_clear_door_references()
 	_npc_stream_generation += 1
 	_npc_stream_busy = false
 	_npc_loaded_reference_ids.clear()
@@ -3600,6 +3705,28 @@ func _npc_race_texture_path(texture_path: String, race_texture_key: String) -> S
 	_race_texture_path_cache[candidate] = found
 	return candidate if found else texture_path
 
+const FACEGEN_MESH_CACHE_LIMIT := 192
+var _facegen_mesh_cache: Dictionary = {}
+
+## FaceGen morphing runs in GDScript on the main thread, so a finished mesh is kept by source mesh and coefficients: the
+## same NPC face (or a profile cycled back to) is not rebuilt.
+func _build_facegen_mesh(
+	source_mesh: ArrayMesh,
+	symmetric: PackedFloat32Array,
+	asymmetric: PackedFloat32Array,
+	facegen_data: Dictionary
+) -> ArrayMesh:
+	var cache_key := "%d|%d|%d" % [source_mesh.get_instance_id(), hash(symmetric), hash(asymmetric)]
+	var cached := _facegen_mesh_cache.get(cache_key) as ArrayMesh
+	if cached != null:
+		return cached
+	var built := FaceGenData.build_head_mesh(source_mesh, symmetric, asymmetric, facegen_data.egm, facegen_data.tri)
+	if built != null:
+		if _facegen_mesh_cache.size() >= FACEGEN_MESH_CACHE_LIMIT:
+			_facegen_mesh_cache.clear()
+		_facegen_mesh_cache[cache_key] = built
+	return built
+
 func _ensure_facegen_data(head_model_path: String) -> Dictionary:
 	var cache_key := head_model_path.to_lower().replace("\\", "/")
 	if _facegen_cache.has(cache_key):
@@ -3759,12 +3886,11 @@ func _add_actor_model(
 		if not npc_face_data.is_empty():
 			facegen_data = _ensure_facegen_data(model_path)
 			if not facegen_data.is_empty():
-				var face_mesh := FaceGenData.build_head_mesh(
+				var face_mesh := _build_facegen_mesh(
 					source_mesh,
 					npc_face_data.get("face_symmetric", PackedFloat32Array()),
 					npc_face_data.get("face_asymmetric", PackedFloat32Array()),
-					facegen_data.egm,
-					facegen_data.tri
+					facegen_data
 				)
 				if face_mesh != null:
 					source_mesh = face_mesh
@@ -4053,11 +4179,26 @@ func _update_face_blink(actor: Dictionary, delta: float) -> void:
 	_set_actor_face_shape(actor, "BlinkLeft", blink_weight)
 	_set_actor_face_shape(actor, "BlinkRight", blink_weight)
 
+const NPC_ANIMATION_DISTANCE_M := 60.0
+const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
+
 func _update_npc_actors(delta: float) -> void:
+	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	for actor: Dictionary in _npc_actors:
 		var actor_root := actor.get("root") as Node3D
 		var skeleton := actor.get("skeleton") as Skeleton3D
-		if not is_instance_valid(actor_root) or not is_instance_valid(skeleton):
+		if not is_instance_valid(actor_root) or not is_instance_valid(skeleton) or not actor_root.visible:
+			continue
+		# Animating a skeleton and morphing a face costs the main thread every frame: an NPC that is far away, or out of
+		# view and not close, keeps its last pose until it is seen again.
+		var distance_to_player := actor_root.global_position.distance_to(player.global_position)
+		if distance_to_player > NPC_ANIMATION_DISTANCE_M:
+			continue
+		if (
+			distance_to_player > NPC_ANIMATION_ALWAYS_NEAR_M
+			and camera != null
+			and not camera.is_position_in_frustum(actor_root.global_position + Vector3.UP)
+		):
 			continue
 		_update_face_blink(actor, delta)
 		_update_face_expression(actor, delta)
@@ -4683,6 +4824,13 @@ func _reference_transform(reference: Dictionary) -> Transform3D:
 	var godot_rotation := _reference_rotation(rotation)
 	var godot_position := Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 	return Transform3D(godot_rotation.scaled(Vector3.ONE * game_units_to_meters), godot_position)
+
+func _reference_origin(reference: Dictionary) -> Vector3:
+	var position: PackedFloat32Array = reference.get("position", PackedFloat32Array())
+	var rotation: PackedFloat32Array = reference.get("rotation", PackedFloat32Array())
+	if position.size() < 3 or rotation.size() < 3:
+		return Vector3.ZERO
+	return Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 
 func _reference_rotation(rotation: PackedFloat32Array) -> Basis:
 	if rotation.size() < 3:
