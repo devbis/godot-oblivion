@@ -596,7 +596,7 @@ func _actor_collision_radius(actor: Node3D) -> float:
 ## Length in seconds of a spoken reply, from its voice file. The voice folder is the speaker's voice type, which is not read
 ## yet, so each race and sex folder is tried; a reply's form ID names one file. Null when no folder has it, so the quest
 ## estimates the length from the text.
-const VOICE_FOLDERS := ["imperial", "nord", "breton", "redguard", "altmer", "bosmer", "dunmer", "khajiit", "argonian", "orc"]
+const VOICE_FOLDERS := ["argonian", "breton", "dark seducer", "dremora", "golden saint", "high elf", "imperial", "nord", "redguard", "sheogorath"]
 var _speech_length_cache: Dictionary = {}
 
 func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, _text: String) -> Variant:

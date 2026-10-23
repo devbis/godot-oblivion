@@ -7,6 +7,10 @@ config/name="OpenOB"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
+[autoload]
+
+AudioManager="*res://scripts/game_audio.gd"
+
 [display]
 
 window/size/viewport_width=1280

@@ -46,6 +46,7 @@ var _stepper := CharacterStepper.new()
 var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
+var _footstep_distance_m := 0.0
 
 var is_first_person: bool:
 	get:
@@ -242,10 +243,12 @@ func _physics_process(delta: float) -> void:
 
 	var requested_velocity := velocity
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
+	var previous_position := global_position
 	if (
 		(is_on_floor() or _stepper.is_stepping())
 		and _stepper.try_step_up(self, horizontal_motion, max_step_height_m, floor_max_angle)
 	):
+		_update_footstep_audio(previous_position)
 		return
 	_stepper.tick()
 	var was_on_floor := is_on_floor()
@@ -253,6 +256,23 @@ func _physics_process(delta: float) -> void:
 	_push_contacted_chains(requested_velocity)
 	if (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
 		_stepper.try_step_down(self, max_step_height_m)
+	_update_footstep_audio(previous_position)
+
+func _update_footstep_audio(previous_position: Vector3) -> void:
+	if not (is_on_floor() or _stepper.is_stepping()):
+		return
+	var planar_distance := Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length()
+	if planar_distance <= 0.001:
+		return
+	_footstep_distance_m += planar_distance
+	var running := Input.is_action_pressed("run")
+	var stride_length := 0.62 if running else 0.86
+	if _footstep_distance_m < stride_length:
+		return
+	_footstep_distance_m = fmod(_footstep_distance_m, stride_length)
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager != null:
+		audio_manager.call("play_footstep", self, running)
 
 ## True while a step is in progress, so the actor is still treated as grounded.
 func is_stepping() -> bool:

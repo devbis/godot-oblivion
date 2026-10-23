@@ -33,6 +33,7 @@ var _has_last_grounded_position := false
 var _yield_path := PackedVector3Array()
 var _yield_waypoint_index := 0
 var _stepper := CharacterStepper.new()
+var _footstep_distance_m := 0.0
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
@@ -170,6 +171,13 @@ func _physics_process(delta: float) -> void:
 		desired_horizontal_velocity.length_squared() > 0.0001
 		and Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length_squared() > 0.0001
 	)
+	if is_walking:
+		_footstep_distance_m += Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length()
+		if _footstep_distance_m >= 0.78:
+			_footstep_distance_m = fmod(_footstep_distance_m, 0.78)
+			var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+			if audio_manager != null:
+				audio_manager.call("play_footstep", self, desired_horizontal_velocity.length() > 1.8)
 
 func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> void:
 	if desired_horizontal_velocity.length_squared() <= 0.0001 or waypoints.is_empty() or waypoint_index >= waypoints.size():

@@ -76,11 +76,35 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			# A SayTo line: the topic's reply, printed as the subtitle would show it.
 			var line := str(arguments[0]) if not arguments.is_empty() else ""
 			var who := str(arguments[1]) if arguments.size() > 1 else ""
+			_play_dialogue_audio(action, arguments, who, world)
 			return "says (%s): %s" % [who, line]
 		"evp":
 			# The NPC re-evaluates its packages; the scene refreshes the routes after the result (see main.gd).
 			return "re-evaluates packages: %s" % label
 	return "not implemented: %s" % label
+
+
+func _play_dialogue_audio(action: Dictionary, arguments: Array, speaker_editor_id: String, world: Node3D) -> void:
+	if arguments.size() < 4 or speaker_editor_id.is_empty():
+		return
+	var reader_value: Variant = world.get("data_reader")
+	if reader_value == null or not reader_value.has_method("find_form_id_by_editor_id"):
+		return
+	var speaker_form_id := int(reader_value.call("find_form_id_by_editor_id", speaker_editor_id))
+	if speaker_form_id == 0:
+		return
+	var audio_manager := world.get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		return
+	audio_manager.call(
+		"play_dialogue",
+		reader_value,
+		world,
+		speaker_form_id,
+		str(arguments[3]),
+		str(action.get("target", "")),
+		int(arguments[2])
+	)
 
 
 func _move_to(target: String, arguments: Array, references: Dictionary, world: Node3D, transform_of: Callable, label: String) -> String:
@@ -151,12 +175,20 @@ func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D,
 			_finish_door_animation.bind(reference_id, is_open, world), CONNECT_ONE_SHOT
 		)
 		animation_player.play(sequence_name)
+		_play_door_audio(reference, is_open, world)
 		return "applied: %s (%s, NIF %s animation)" % [label, "open" if is_open else "closed", sequence_name]
 	if body_count == 0:
 		return "not applied: %s has no door collision or original NIF animation in this cell" % label
 	world.set_meta(state_key, is_open)
 	_set_door_collision(reference_id, is_open, world)
+	_play_door_audio(reference, is_open, world)
 	return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
+
+
+func _play_door_audio(reference: Dictionary, is_open: bool, world: Node3D) -> void:
+	var audio_manager := world.get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager != null:
+		audio_manager.call("play_door_state", reference, is_open, world)
 
 
 func _door_animation_player(reference_id: int, world: Node3D) -> AnimationPlayer:
