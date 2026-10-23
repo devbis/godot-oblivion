@@ -396,6 +396,59 @@ void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap&
     }
 }
 
+// Uniform cubic B-spline with clamped (open) knots, as Gamebryo's NiBSplineBasis evaluates it: `x` runs over [0, n - 3]
+// and the curve passes through the first and last control point.
+std::array<float, 4> bspline_sample(const std::vector<std::array<float, 4>>& points, float x) {
+    constexpr int degree = 3;
+    const int count = static_cast<int>(points.size());
+    const auto knot = [count](int index) { return static_cast<float>(std::clamp(index - degree, 0, count - degree)); };
+    x = std::clamp(x, 0.0f, static_cast<float>(count - degree));
+    const int span = std::min(static_cast<int>(std::floor(x)) + degree, count - 1);
+    float basis[degree + 1];
+    float left[degree + 1];
+    float right[degree + 1];
+    basis[0] = 1.0f;
+    for (int j = 1; j <= degree; ++j) {
+        left[j] = x - knot(span + 1 - j);
+        right[j] = knot(span + j) - x;
+        float saved = 0.0f;
+        for (int r = 0; r < j; ++r) {
+            const float denominator = right[r + 1] + left[j - r];
+            const float temp = denominator != 0.0f ? basis[r] / denominator : 0.0f;
+            basis[r] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        basis[j] = saved;
+    }
+    std::array<float, 4> result{};
+    for (int k = 0; k <= degree; ++k)
+        for (std::size_t component = 0; component < 4; ++component)
+            result[component] += basis[k] * points[static_cast<std::size_t>(span - degree + k)][component];
+    return result;
+}
+
+// Decodes one channel of a NiBSplineTransformInterpolator into control points. `components` is 3 (translation),
+// 4 (rotation, stored w,x,y,z) or 1 (scale). Compressed interpolators keep int16 control points that map to
+// bias + value / 32767 * multiplier. Returns false when the channel has no spline data.
+bool bspline_control_points(nifly::NiBSplineData& data,
+                            std::uint32_t control_count, std::uint32_t offset, std::size_t components, float bias,
+                            float multiplier, bool compressed, std::vector<std::array<float, 4>>& out) {
+    constexpr std::uint32_t kNoOffset = 0xFFFFFFFFu;
+    if (offset == kNoOffset || control_count < 4) return false;
+    const std::size_t available = compressed ? data.shortControlPoints.size() : data.floatControlPoints.size();
+    if (static_cast<std::size_t>(offset) + static_cast<std::size_t>(control_count) * components > available) return false;
+    out.assign(control_count, {});
+    for (std::uint32_t point = 0; point < control_count; ++point) {
+        for (std::size_t component = 0; component < components; ++component) {
+            const std::size_t index = static_cast<std::size_t>(offset) + point * components + component;
+            out[point][component] = compressed
+                ? bias + static_cast<float>(data.shortControlPoints[index]) / 32767.0f * multiplier
+                : data.floatControlPoints[index];
+        }
+    }
+    return true;
+}
+
 NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_only) {
     nifly::NifFile file;
     load_nif_file(bytes, file);
@@ -435,6 +488,79 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         animation.stop_time = sequence->stopTime;
         animation.cycle_type = static_cast<std::uint32_t>(sequence->cycleType);
         for (const auto& link : sequence->controlledBlocks) {
+            if (auto* spline = file.GetHeader().GetBlock<nifly::NiBSplineTransformInterpolator>(link.interpolatorRef)) {
+                NifAnimationTrackData track;
+                track.node_name = link.nodeName.get();
+                if (track.node_name.empty())
+                    track.node_name = nif_string_palette_entry(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
+                if (track.node_name.empty())
+                    track.node_name = nif_string_palette_entry(file.GetHeader(), sequence->stringPaletteRef, link.nodeNameOffset);
+                if (track.node_name.empty()) track.node_name = link.targetName.get();
+                auto* spline_data = file.GetHeader().GetBlock<nifly::NiBSplineData>(spline->splineDataRef);
+                const auto* basis_data = file.GetHeader().GetBlock<nifly::NiBSplineBasisData>(spline->basisDataRef);
+                if (track.node_name.empty() || !spline_data || !basis_data) continue;
+                const auto* compressed = dynamic_cast<const nifly::NiBSplineCompTransformInterpolator*>(spline);
+                const bool is_compressed = compressed != nullptr;
+                const std::uint32_t control_count = basis_data->numControlPoints;
+                const float start = spline->startTime;
+                const float stop = spline->stopTime > spline->startTime ? spline->stopTime : sequence->stopTime;
+                const float duration = std::max(stop - start, 0.0f);
+                const std::size_t key_count = std::max<std::size_t>(2, static_cast<std::size_t>(std::ceil(duration * 30.0f)) + 1);
+                const auto key_time = [&](std::size_t index) {
+                    return start + duration * static_cast<float>(index) / static_cast<float>(key_count - 1);
+                };
+                const auto curve_x = [&](std::size_t index) {
+                    return static_cast<float>(index) / static_cast<float>(key_count - 1) * static_cast<float>(control_count - 3);
+                };
+                std::vector<std::array<float, 4>> points;
+                if (bspline_control_points(*spline_data, control_count, spline->translationOffset, 3,
+                                           compressed ? compressed->translationBias : 0.0f,
+                                           compressed ? compressed->translationMultiplier : 0.0f, is_compressed, points)) {
+                    for (std::size_t index = 0; index < key_count; ++index) {
+                        const auto value = bspline_sample(points, curve_x(index));
+                        const auto converted = to_godot(nifly::Vector3(value[0], value[1], value[2]));
+                        track.translations.push_back({key_time(index), converted[0], converted[1], converted[2]});
+                    }
+                } else if (std::abs(spline->translation.x) < 1.0e30f && std::abs(spline->translation.y) < 1.0e30f &&
+                           std::abs(spline->translation.z) < 1.0e30f) {
+                    const auto converted = to_godot(spline->translation);
+                    track.translations.push_back({start, converted[0], converted[1], converted[2]});
+                    if (stop > start) track.translations.push_back({stop, converted[0], converted[1], converted[2]});
+                }
+                if (bspline_control_points(*spline_data, control_count, spline->rotationOffset, 4,
+                                           compressed ? compressed->rotationBias : 0.0f,
+                                           compressed ? compressed->rotationMultiplier : 0.0f, is_compressed, points)) {
+                    for (std::size_t index = 0; index < key_count; ++index) {
+                        auto value = bspline_sample(points, curve_x(index));
+                        const float length = std::sqrt(value[0] * value[0] + value[1] * value[1] + value[2] * value[2] + value[3] * value[3]);
+                        if (length > 0.0f)
+                            for (auto& component : value) component /= length;
+                        // Stored as w,x,y,z.
+                        const auto converted = to_godot(nifly::Quaternion(value[0], value[1], value[2], value[3]));
+                        track.rotations.push_back({key_time(index), converted[0], converted[1], converted[2], converted[3]});
+                    }
+                } else {
+                    const auto& value = spline->rotation;
+                    if (std::abs(value.w) < 1.0e30f && std::abs(value.x) < 1.0e30f && std::abs(value.y) < 1.0e30f &&
+                        std::abs(value.z) < 1.0e30f) {
+                        const auto converted = to_godot(value);
+                        track.rotations.push_back({start, converted[0], converted[1], converted[2], converted[3]});
+                        if (stop > start) track.rotations.push_back({stop, converted[0], converted[1], converted[2], converted[3]});
+                    }
+                }
+                if (bspline_control_points(*spline_data, control_count, spline->scaleOffset, 1,
+                                           compressed ? compressed->scaleBias : 0.0f,
+                                           compressed ? compressed->scaleMultiplier : 0.0f, is_compressed, points)) {
+                    for (std::size_t index = 0; index < key_count; ++index)
+                        track.scales.push_back({key_time(index), bspline_sample(points, curve_x(index))[0]});
+                } else if (std::abs(spline->scale) < 1.0e30f && spline->scale > 0.0f) {
+                    track.scales.push_back({start, spline->scale});
+                    if (stop > start) track.scales.push_back({stop, spline->scale});
+                }
+                if (!track.translations.empty() || !track.rotations.empty() || !track.scales.empty())
+                    animation.tracks.push_back(std::move(track));
+                continue;
+            }
             auto* interpolator = file.GetHeader().GetBlock<nifly::NiTransformInterpolator>(link.interpolatorRef);
             if (!interpolator) continue;
             auto* transform_data = file.GetHeader().GetBlock<nifly::NiTransformData>(interpolator->dataRef);
