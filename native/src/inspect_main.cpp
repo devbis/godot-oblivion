@@ -1,3 +1,5 @@
+#include <functional>
+
 #include "oblivion/game_data.hpp"
 #include "oblivion/nif_mesh.hpp"
 #include "oblivion/script_lexer.hpp"
@@ -62,7 +64,14 @@ void usage(const char* executable) {
 class TickReport {
 public:
     void add(const oblivion::QuestTick& tick, const std::string& when) {
-        for (const auto& action : tick.actions) ++commands_[action.command];
+        for (const auto& action : tick.actions) {
+            ++commands_[action.command];
+            if (action.command == "pickidle") {
+                // The idle the manager chose: reference, animation file, idle record.
+                std::cout << when << " pickidle " << (action.target.empty() ? "<none>" : action.target) << " -> "
+                          << (action.arguments.size() > 1 && !action.arguments[1].text.empty() ? action.arguments[1].text + " (" + action.arguments[0].text + ")" : std::string("<no idle: default>")) << '\n';
+            }
+        }
         for (const auto& name : tick.unanswered)
             if (std::find(unanswered_.begin(), unanswered_.end(), name) == unanswered_.end()) unanswered_.push_back(name);
         for (const auto& error : tick.parse_errors) std::cout << when << " parse " << error << '\n';
@@ -112,6 +121,7 @@ int main(int argc, char** argv) {
     const bool tick_quest = argc == 7 && mode == "--tick-quest";
     const bool tick_world = argc >= 7 && mode == "--tick-world";
     const bool show_topics = argc == 4 && mode == "--topics";
+    const bool show_idles = argc == 4 && mode == "--idles";
     const bool grep_sources = argc == 4 && mode == "--grep-sources";
     const bool show_packages = (argc == 4 || argc == 5) && mode == "--packages";
     const bool package_done = argc == 8 && mode == "--package-done";
@@ -122,7 +132,7 @@ int main(int argc, char** argv) {
     const bool parse_scripts = argc == 4 && mode == "--parse-scripts";
     // A bare cell EDID is the only form that takes a single argument without a mode flag.
     const bool valid_arity = argc == 2 || argc == 3 || extract_asset || inspect_nif || inspect_rig
-        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || tick_world || show_topics || grep_sources || show_packages || package_done || run_topic;
+        || inspect_kf || single_argument_mode || run_script || run_stage || survey_conditions || find_placed || show_quest || tick_quest || tick_world || show_topics || show_idles || grep_sources || show_packages || package_done || run_topic;
     if (argc < 2 || argc > 20 || !valid_arity) {
         usage(argv[0]);
         return 2;
@@ -434,6 +444,38 @@ int main(int argc, char** argv) {
                     for (const auto& response : topic.responses) report("reply of " + topic.editor_id, response.result_source);
                 return 0;
             }
+            if (show_idles) {
+                // The idle tree in sibling order, indented by depth. Shows only the subtrees with a node whose editor ID
+                // contains the text ("*": all), with the animation file, group flags and conditions of each node.
+                const std::string needle = lower_name(argv[3]);
+                std::size_t shown = 0;
+                const std::function<bool(std::uint32_t, int, std::ostream&, bool)> walk =
+                    [&](std::uint32_t parent, int depth, std::ostream& out, bool all) {
+                        bool any = false;
+                        for (const auto* idle : data.idle_children(parent)) {
+                            std::ostringstream line;
+                            for (int i = 0; i < depth; ++i) line << "  ";
+                            line << idle->editor_id << " form=" << std::hex << idle->form_id << std::dec
+                                 << " file=" << idle->animation_file << " group=0x" << std::hex << int(idle->group_flags) << std::dec;
+                            for (const auto& condition : idle->conditions)
+                                line << "\n" << std::string(static_cast<std::size_t>(depth) * 2 + 4, ' ') << "if op=" << unsigned(condition.operator_code)
+                                     << ' ' << condition.comparison << " function=" << condition.function_index << " param=" << std::hex
+                                     << condition.parameter1 << std::dec << " param2=" << condition.parameter2;
+                            const bool match = all || lower_name(idle->editor_id).find(needle) != std::string::npos;
+                            std::ostringstream below;
+                            const bool child_match = walk(idle->form_id, depth + 1, below, all || match);
+                            if (match || child_match || all) {
+                                out << line.str() << '\n' << below.str();
+                                ++shown;
+                                any = true;
+                            }
+                        }
+                        return any;
+                    };
+                walk(0, 0, std::cout, needle == "*");
+                std::cout << "shown=" << shown << '\n';
+                return 0;
+            }
             if (show_topics) {
                 // Dialogue topics of a quest with their replies, conditions and result scripts.
                 // `*` shows the replies of every quest; otherwise only the named quest's replies.
@@ -503,6 +545,17 @@ int main(int argc, char** argv) {
                 oblivion::QuestWorld world(lookup);
                 world.set_answer(oblivion::answer_fresh_player);
                 world.set_topic_finder([&data](std::string_view editor_id) { return data.find_topic_by_editor_id(editor_id); });
+                world.set_idle_tree([&data](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& { return data.idle_children(parent); });
+                world.set_actor_traits([&data](std::uint32_t base) -> std::optional<std::pair<std::uint32_t, bool>> {
+                    const auto* npc = data.find_npc_base(base);
+                    if (!npc) return std::nullopt;
+                    return std::make_pair(npc->race_form_id, (npc->flags & 1u) != 0);
+                });
+                // Named references of NPCs, so that Ref.PickIdle finds the actor's base (the scene does this for its cell).
+                for (const auto& cell : data.cells())
+                    for (const auto& reference : cell.references)
+                        if (!reference.reference_name.empty() && data.find_npc_base(reference.base_form_id))
+                            world.set_reference_base(reference.reference_name, reference.base_form_id);
                 // The player is an Argonian man here; the game's character creation decides the real one.
                 world.set_listener(data.find_form_id_by_editor_id("Argonian"), false);
                 for (const auto& [form_id, quest] : data.quests())

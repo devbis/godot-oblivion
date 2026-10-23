@@ -79,6 +79,7 @@ public:
           sync_quest_variables_(sync_quest_variables) {}
 
     ScriptInterpreter* interpreter = nullptr;  // set by the driver; its variables are flushed before nested stages
+    std::uint32_t self_base = 0;               // the actor an unqualified PickIdle is for (speaker, or the script's NPC)
 
     std::optional<ScriptValue> call_command(std::string_view name, const ScriptValue* target,
                                             const std::vector<ScriptValue>& arguments) override {
@@ -119,6 +120,12 @@ public:
             return ScriptValue::from_number(0.0);
         }
         if (command == "getsecondspassed") return ScriptValue::from_number(seconds_);
+        if (command == "pickidle" && driver_.world_) {
+            // The idle depends on the quest variables the script has just set (characterGen.uniqueIdle).
+            flush_variables();
+            driver_.world_->pick_idle(target && target->is_text ? std::string_view(target->text) : std::string_view(), self_base, tick_);
+            return ScriptValue::from_number(0.0);
+        }
         if (command == "getdistance") {
             const auto from = target && target->is_text ? target->text : std::string("player");
             const auto to = !arguments.empty() && arguments[0].is_text ? arguments[0].text : std::string();
@@ -263,7 +270,7 @@ namespace {
 // Answers the conditions of a package or topic from the quest's state and from the other quests of its world.
 class DriverConditionHost final : public ScriptHost {
 public:
-    DriverConditionHost(const QuestDriver& self, QuestWorld* world, const DialogueContext* dialogue = nullptr)
+    DriverConditionHost(const QuestDriver* self, QuestWorld* world, const DialogueContext* dialogue = nullptr)
         : self_(self), world_(world), dialogue_(dialogue) {}
 
     std::optional<ScriptValue> call_command(std::string_view, const ScriptValue*, const std::vector<ScriptValue>&) override {
@@ -282,6 +289,17 @@ public:
             return quest->variable_at(parameter2);
         }
         if (dialogue_) {
+            constexpr std::uint16_t kMenuMode = 36;
+            constexpr std::uint16_t kGetQuestRunning = 56;
+            constexpr std::uint16_t kGetIsCurrentPackage = 161;
+            if (dialogue_->for_idle) {
+                if (function_index == kMenuMode) return 0.0;
+                if (function_index == kGetIsCurrentPackage) return parameter1 == dialogue_->current_package ? 1.0 : 0.0;
+                if (function_index == kGetQuestRunning) {
+                    const auto* quest = find_quest(parameter1);
+                    return quest && world_ && world_->is_started(quest) ? 1.0 : 0.0;
+                }
+            }
             constexpr std::uint16_t kGetIsID = 72;
             constexpr std::uint16_t kGetIsRace = 69;
             constexpr std::uint16_t kGetIsSex = 70;  // param 0 male, 1 female
@@ -301,11 +319,11 @@ public:
 private:
     // This quest, or a quest of the same world with that form ID.
     const QuestDriver* find_quest(std::uint32_t form_id) const {
-        if (self_.quest().form_id == form_id) return &self_;
+        if (self_ && self_->quest().form_id == form_id) return self_;
         return world_ ? world_->find_form(form_id) : nullptr;
     }
 
-    const QuestDriver& self_;
+    const QuestDriver* self_;
     QuestWorld* world_;
     const DialogueContext* dialogue_;
 };
@@ -313,7 +331,7 @@ private:
 } // namespace
 
 const AiPackageRecord* QuestDriver::select_package(const std::vector<const AiPackageRecord*>& packages) const {
-    DriverConditionHost host(*this, world_);
+    DriverConditionHost host(this, world_);
     return oblivion::select_package(packages, host);
 }
 
@@ -341,7 +359,7 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
     TopicRun run;
     std::optional<QuestWorld::RunGuard> guard;
     if (world_) guard.emplace(*world_);
-    DriverConditionHost conditions(*this, world_, &context);
+    DriverConditionHost conditions(this, world_, &context);
     for (const auto& reply : topic.responses) {
         // A DIAL may contain replies contributed by several quests. A SayTo
         // must evaluate only this quest's INFO records; otherwise an earlier
@@ -362,6 +380,7 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
     ScriptInterpreter interpreter(no_script);
     interpreter.set_trace(false);
     QuestTickHost host(*this, run.tick, 0.0, distance, depth);
+    host.self_base = context.speaker_base;
     host.interpreter = &interpreter;
     host.load_variables();
     interpreter.run_body(fragment.statements, host);
@@ -371,7 +390,7 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
 }
 
 QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
-                                       const DistanceFunction& distance) {
+                                       const DistanceFunction& distance, std::uint32_t actor_base) {
     QuestTick tick;
     std::optional<QuestWorld::RunGuard> guard;
     if (world_) guard.emplace(*world_);
@@ -383,6 +402,7 @@ QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::st
     interpreter.set_trace(false);
     for (const auto& [key, value] : cached.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
     QuestTickHost host(*this, tick, 0.0, distance, 0, false);
+    host.self_base = actor_base;
     host.interpreter = &interpreter;
     const auto result = interpreter.run_event(event, detail, host);
     host.flush_variables();
@@ -445,7 +465,20 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
         const auto* other = world_ ? world_->find(quest) : nullptr;
         return other ? other->variable(variable) : std::nullopt;
     };
-    for (const auto& run : run_quest_stage(quest_, stage, lookup_, &script_, state_, read_foreign)) {
+    // PickIdle in a result is answered when it runs, so it sees the variables set before it (uniqueIdle) and not the
+    // ones set after it (reset to 0).
+    PickIdleHook pick_idle;
+    if (world_) {
+        pick_idle = [this, &tick](const std::string& reference) {
+            QuestTick picked;
+            world_->pick_idle(reference, 0, picked);
+            for (const auto& name : picked.unanswered)
+                if (std::find(tick.unanswered.begin(), tick.unanswered.end(), name) == tick.unanswered.end())
+                    tick.unanswered.push_back(name);
+            return picked.actions.front();
+        };
+    }
+    for (const auto& run : run_quest_stage(quest_, stage, lookup_, &script_, state_, read_foreign, pick_idle)) {
         for (const auto& error : run.parse_errors) tick.parse_errors.push_back(error);
         for (const auto& [key, value] : run.foreign_writes) write_foreign_variable(world_, key, value);
         for (const auto& action : run.actions) {
@@ -469,6 +502,10 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
                 const auto listener = lower(action.arguments[0].text) == "player" ? kPlayerReference
                     : world_->reference_base(action.arguments[0].text).value_or(0);
                 world_->say(action.arguments[1].text, speaker, listener, tick, distance, depth + 1);
+            } else if (command == "say" && world_ && !action.target.empty()) {
+                // `Ref.Say topic`: the reference speaks to the player, whose subtitles the scene shows (as in an actor's script).
+                const auto speaker = world_->reference_base(action.target).value_or(0);
+                world_->say(action.arguments[0].text, speaker, kPlayerReference, tick, distance, depth + 1);
             }
         }
     }
@@ -569,6 +606,7 @@ void QuestWorld::clear_actors() {
     run_or_defer([this] {
         actors_.clear();
         reference_bases_.clear();
+        package_by_reference_.clear();
     });
 }
 
@@ -691,6 +729,10 @@ public:
             take_writes_();
             return ScriptValue::from_number(0.0);
         }
+        if (command == "pickidle") {
+            world_.pick_idle(target && target->is_text ? std::string_view(target->text) : std::string_view(), speaker_, tick_);
+            return ScriptValue::from_number(0.0);
+        }
         if (command == "sayto" && arguments.size() >= 2 && arguments[1].is_text) {
             const auto seconds = world_.say(arguments[1].text, speaker_, listener_of(arguments[0]), tick_, distance_);
             take_writes_();
@@ -735,6 +777,62 @@ private:
 };
 
 } // namespace
+
+void QuestWorld::set_actor_package(std::string_view reference, std::uint32_t package_form_id) {
+    if (package_form_id == 0) package_by_reference_.erase(lower(reference));
+    else package_by_reference_[lower(reference)] = package_form_id;
+}
+
+const IdleRecord* QuestWorld::pick_idle(std::string_view reference, std::uint32_t speaker_base, QuestTick& tick) {
+    // The reference's base, or the actor that is speaking / running the script when no reference is named.
+    std::uint32_t base = speaker_base;
+    std::string name(reference);
+    if (!reference.empty()) {
+        if (const auto known = reference_base(reference)) base = *known;
+        else if (lower(reference) != "player") base = 0;
+    } else {
+        for (const auto& [reference_name, reference_base_id] : reference_bases_)
+            if (reference_base_id == speaker_base && speaker_base != 0) {
+                name = reference_name;
+                break;
+            }
+        for (const auto& actor : actors_)
+            if (actor->form_id == speaker_base && !actor->reference_name.empty()) {
+                name = actor->reference_name;
+                break;
+            }
+    }
+    const IdleRecord* chosen = nullptr;
+    if (idle_children_) {
+        DialogueContext context;
+        context.speaker_base = base;
+        context.listener_base = base;
+        context.for_idle = true;
+        if (const auto package = package_by_reference_.find(lower(name)); package != package_by_reference_.end())
+            context.current_package = package->second;
+        if (actor_traits_ && base != 0) {
+            if (const auto traits = actor_traits_(base)) {
+                context.listener_race = traits->first;
+                context.listener_female = traits->second;
+            }
+        }
+        DriverConditionHost host(nullptr, this, &context);
+        // The tree is large and most of its nodes ask about things the scene cannot answer yet (combat, weapons, furniture,
+        // random numbers). Those nodes count as not matching; they are not reported one by one.
+        chosen = select_idle(idle_children_, host, nullptr);
+    } else {
+        tick.unanswered.push_back("pickidle");
+    }
+    ScriptAction action;
+    action.command = "pickidle";
+    action.target = name;
+    action.arguments.push_back(ScriptValue::from_text(chosen ? chosen->animation_file : std::string()));
+    action.arguments.push_back(ScriptValue::from_text(chosen ? chosen->editor_id : std::string()));
+    action.arguments.push_back(ScriptValue::from_number(chosen ? static_cast<double>(chosen->form_id) : 0.0));
+    action.arguments.push_back(ScriptValue::from_number(chosen ? static_cast<double>(chosen->group_flags) : 0.0));
+    tick.actions.push_back(std::move(action));
+    return chosen;
+}
 
 void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double seconds_passed, const DistanceFunction& distance) {
     ScriptInterpreter interpreter(actor.ast);

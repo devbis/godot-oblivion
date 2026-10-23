@@ -198,6 +198,14 @@ const AiPackageRecord* GameData::find_ai_package(std::uint32_t form_id) const {
     return esm_.find_ai_package(form_id);
 }
 
+const IdleRecord* GameData::find_idle(std::uint32_t form_id) const {
+    return esm_.find_idle(form_id);
+}
+
+const std::vector<const IdleRecord*>& GameData::idle_children(std::uint32_t parent_form_id) const {
+    return esm_.idle_children(parent_form_id);
+}
+
 const std::string* GameData::find_item_model_path(std::uint32_t form_id, bool female) const {
     return esm_.find_item_model_path(form_id, female);
 }

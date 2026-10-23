@@ -976,6 +976,11 @@ public:
         return true;
     }
 
+    // The package a placed NPC runs now (form ID, 0: none), for idle conditions such as GetIsCurrentPackage.
+    void set_actor_package(const String& reference_name, int64_t package_form_id) {
+        if (world_) world_->set_actor_package(utf8_value(reference_name), static_cast<std::uint32_t>(package_form_id));
+    }
+
     void clear_actors() {
         if (world_) world_->clear_actors();
     }
@@ -1023,6 +1028,7 @@ public:
         const auto* chosen = driver->select_package(packages);
         if (!chosen) return result;
         result["editor_id"] = utf8_text(chosen->editor_id);
+        result["form_id"] = static_cast<int64_t>(chosen->form_id);
         result["package_type"] = static_cast<int64_t>(chosen->package_type);
         result["location_type"] = static_cast<int64_t>(chosen->location_type);
         result["location_form_id"] = static_cast<int64_t>(chosen->location_form_id);
@@ -1039,7 +1045,7 @@ public:
         const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
         const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
         if (!driver || !script) return Dictionary();
-        return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
+        return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance), npc->form_id));
     }
 
     void attach(const Ref<OblivionData>& owner, std::shared_ptr<const oblivion::GameData> game,
@@ -1054,6 +1060,7 @@ public:
         ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestWorld::tick);
         ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
         ClassDB::bind_method(D_METHOD("add_actor", "npc_form_id", "reference_name"), &OblivionQuestWorld::add_actor);
+        ClassDB::bind_method(D_METHOD("set_actor_package", "reference_name", "package_form_id"), &OblivionQuestWorld::set_actor_package);
         ClassDB::bind_method(D_METHOD("clear_actors"), &OblivionQuestWorld::clear_actors);
         ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
@@ -1119,6 +1126,15 @@ Ref<OblivionQuestWorld> OblivionData::create_quest_world(const String& executabl
         world->set_global_value([shared_game](std::uint32_t form_id) -> std::optional<double> {
             if (const auto value = shared_game->find_global_value(form_id)) return static_cast<double>(*value);
             return std::nullopt;
+        });
+        // The idle manager: PickIdle walks the IDLE tree, and idle conditions may ask for the actor's race and sex.
+        world->set_idle_tree([shared_game](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& {
+            return shared_game->idle_children(parent);
+        });
+        world->set_actor_traits([shared_game](std::uint32_t base) -> std::optional<std::pair<std::uint32_t, bool>> {
+            const auto* npc = shared_game->find_npc_base(base);
+            if (!npc) return std::nullopt;
+            return std::make_pair(npc->race_form_id, (npc->flags & 0x1u) != 0);
         });
         world->set_topic_finder([shared_game](std::string_view editor_id) { return shared_game->find_topic_by_editor_id(editor_id); });
         for (const auto& [form_id, quest] : game->quests())

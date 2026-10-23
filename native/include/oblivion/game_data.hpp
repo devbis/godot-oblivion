@@ -26,6 +26,8 @@ public:
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
+    [[nodiscard]] const IdleRecord* find_idle(std::uint32_t form_id) const;
+    [[nodiscard]] const std::vector<const IdleRecord*>& idle_children(std::uint32_t parent_form_id) const;
     [[nodiscard]] const std::string* find_item_model_path(std::uint32_t form_id, bool female) const;
     [[nodiscard]] const std::string* find_world_item_model_path(std::uint32_t form_id, bool female) const;
     [[nodiscard]] std::uint16_t find_item_biped_slots(std::uint32_t form_id) const;

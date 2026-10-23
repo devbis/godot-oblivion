@@ -30,6 +30,10 @@ struct QuestState {
 // The value of a variable of another quest (by quest and variable name), or nullopt when that quest or variable is unknown.
 using ForeignVariableReader = std::function<std::optional<double>(std::string_view quest, std::string_view variable)>;
 
+// PickIdle in a stage result: called at the moment the command runs (the quest variables the result has set so far
+// are already in `state`), with the reference the command was called on (empty: none). Returns the action to record.
+using PickIdleHook = std::function<ScriptAction(const std::string& reference)>;
+
 struct StageEntryRun {
     bool conditions_hold = false;
     bool completes = false;
@@ -51,6 +55,7 @@ struct StageEntryRun {
 // each run's foreign_writes for the caller to apply, since the other quests' state is not known here.
 std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned stage_index,
                                            const ScriptCommandLookup& lookup, const ScriptRecord* quest_script,
-                                           QuestState& state, const ForeignVariableReader& read_foreign = {});
+                                           QuestState& state, const ForeignVariableReader& read_foreign = {},
+                                           const PickIdleHook& pick_idle = {});
 
 } // namespace oblivion

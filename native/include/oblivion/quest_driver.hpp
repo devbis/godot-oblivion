@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "oblivion/esm4_database.hpp"
+#include "oblivion/quest_runtime.hpp"
 #include "oblivion/quest_stage.hpp"
 #include "oblivion/script_parser.hpp"
 #include "oblivion/script_records.hpp"
@@ -25,6 +26,10 @@ struct DialogueContext {
     std::uint32_t listener_base = 0;
     std::uint32_t listener_race = 0;
     bool listener_female = false;
+    // The idle manager asks about one actor: its base is both speaker and listener. `current_package` is the package
+    // the actor runs now (GetIsCurrentPackage); `for_idle` makes MenuMode answer 0, as the game is not in a menu.
+    bool for_idle = false;
+    std::uint32_t current_package = 0;
 };
 
 // Distance between two named references, or nullopt when the world cannot answer.
@@ -88,8 +93,9 @@ public:
 
     // Runs an event block of an actor's script (for example OnPackageDone with the package's name).
     // The actor's script may set this quest's stage, and the results of the new stage run.
+    // `actor_base` is the NPC base the script belongs to: a PickIdle without a reference is for that actor.
     QuestTick run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
-                              const DistanceFunction& distance = {});
+                              const DistanceFunction& distance = {}, std::uint32_t actor_base = 0);
 
     // The package an actor starts now: the first of its packages whose conditions hold, judged with this
     // quest in its current stage and state. Null when none holds.
@@ -209,6 +215,24 @@ public:
     // The value of a GLOB record, for conditions compared against a global (CTDA "use global"). Nullopt: unknown,
     // and the condition counts as false.
     using GlobalValue = std::function<std::optional<double>(std::uint32_t form_id)>;
+    // The idle manager: the idle tree PickIdle walks, and the race and sex of an NPC base (for GetIsRace and
+    // GetIsSex in idle conditions). Without a tree PickIdle only records the command.
+    using ActorTraits = std::function<std::optional<std::pair<std::uint32_t, bool>>(std::uint32_t base)>;
+    void set_idle_tree(IdleChildren children) { idle_children_ = std::move(children); }
+    void set_actor_traits(ActorTraits traits) { actor_traits_ = std::move(traits); }
+
+    // The package a placed actor runs now, by reference name, for idle conditions (GetIsCurrentPackage).
+    void set_actor_package(std::string_view reference, std::uint32_t package_form_id);
+
+    // True once the quest has been started (StartQuest, SetStage or start()).
+    bool is_started(const QuestDriver* driver) const { return started_.count(const_cast<QuestDriver*>(driver)) != 0; }
+
+    // PickIdle for a reference (empty: the actor `speaker_base` stands for). Picks the first idle of the tree whose
+    // conditions hold for that actor and the current quest state (see select_idle) and records the action
+    // "pickidle": target is the reference, arguments are the .kf path, the IDLE editor ID, its form ID and its
+    // group flags. When nothing matches the paths are empty and the form ID is 0: the actor returns to its default idle.
+    const IdleRecord* pick_idle(std::string_view reference, std::uint32_t speaker_base, QuestTick& tick);
+
     void set_global_value(GlobalValue value) { global_value_ = std::move(value); }
     const GlobalValue& global_value() const { return global_value_; }
 
@@ -251,6 +275,9 @@ private:
     ScriptCommandLookup lookup_;
     WorldAnswer answer_;
     GlobalValue global_value_;
+    std::map<std::string, std::uint32_t> package_by_reference_;  // lowercase reference name -> package form ID
+    IdleChildren idle_children_;
+    ActorTraits actor_traits_;
     TopicFinder find_topic_;
     SpeechLength speech_length_;
     std::map<std::string, std::uint32_t> reference_bases_;  // lowercase reference name -> NPC base

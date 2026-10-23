@@ -30,6 +30,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 #include "inflate_bounded.hpp"
@@ -140,7 +141,7 @@ bool is_runtime_visual_record(std::string_view type) {
     static constexpr std::array relevant_types = {
         std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
         std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"),
-        std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"),
+        std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
@@ -168,6 +169,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
+    idle_by_id_.clear();
+    idle_children_by_parent_.clear();
     tree_by_id_.clear();
     item_model_by_id_.clear();
     female_item_model_by_id_.clear();
@@ -195,6 +198,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     unplaced_references_.clear();
     const auto bytes = read_file(path);
     parse_file(bytes, runtime_visuals_only);
+    build_idle_tree();
     for (std::size_t index = 0; index < cells_.size(); ++index)
         if (!cells_[index].editor_id.empty())
             cell_by_editor_id_.try_emplace(lower_ascii(cells_[index].editor_id), index);
@@ -473,6 +477,57 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
     attach_references();
 }
 
+bool IdleRecord::is_folder() const {
+    const auto size = animation_file.size();
+    if (size < 3) return true;
+    std::string tail = animation_file.substr(size - 3);
+    for (auto& c : tail) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return tail != ".kf";
+}
+
+const IdleRecord* Esm4Database::find_idle(std::uint32_t form_id) const {
+    const auto found = idle_by_id_.find(form_id);
+    return found == idle_by_id_.end() ? nullptr : &found->second;
+}
+
+const std::vector<const IdleRecord*>& Esm4Database::idle_children(std::uint32_t parent_form_id) const {
+    static const std::vector<const IdleRecord*> none;
+    const auto found = idle_children_by_parent_.find(parent_form_id);
+    return found == idle_children_by_parent_.end() ? none : found->second;
+}
+
+// Orders the children of every node by the previous-sibling links: the child with no previous sibling (or
+// whose previous sibling is not one of its siblings) first, then the one that names it, and so on. Links that
+// do not lead anywhere (broken, cyclic) leave the rest in form ID order, so the order is always complete.
+void Esm4Database::build_idle_tree() {
+    idle_children_by_parent_.clear();
+    std::map<std::uint32_t, std::vector<const IdleRecord*>> unordered;
+    for (const auto& [form_id, idle] : idle_by_id_) unordered[idle.parent_form_id].push_back(&idle);
+    for (auto& [parent, siblings] : unordered) {
+        std::set<std::uint32_t> ids;
+        for (const auto* idle : siblings) ids.insert(idle->form_id);
+        std::vector<const IdleRecord*> ordered;
+        std::set<std::uint32_t> placed;
+        const auto place_chain = [&](const IdleRecord* head) {
+            const IdleRecord* current = head;
+            while (current && placed.insert(current->form_id).second) {
+                ordered.push_back(current);
+                const IdleRecord* next = nullptr;
+                for (const auto* candidate : siblings)
+                    if (candidate->previous_sibling_form_id == current->form_id && !placed.count(candidate->form_id)) {
+                        next = candidate;
+                        break;
+                    }
+                current = next;
+            }
+        };
+        for (const auto* idle : siblings)
+            if (idle->previous_sibling_form_id == 0 || !ids.count(idle->previous_sibling_form_id)) place_chain(idle);
+        for (const auto* idle : siblings) place_chain(idle);
+        idle_children_by_parent_[parent] = std::move(ordered);
+    }
+}
+
 void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t,
                                 std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
                                 bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size) {
@@ -484,6 +539,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_race = type == "RACE";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
+    const bool is_idle = type == "IDLE";
+    IdleRecord idle;
+    idle.form_id = form_id;
     bool is_tree = type == "TREE";
     bool is_land = type == "LAND";
     bool is_land_texture = type == "LTEX";
@@ -564,6 +622,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             if (is_quest) quest.editor_id = text;
             if (is_outfit) outfit.editor_id = text;
             if (is_ai_package) ai_package.editor_id = text;
+            if (is_idle) idle.editor_id = text;
         } else if (tag == "FULL" && is_cell) {
             cell.display_name = read_zstring(value, subrecord_size);
         } else if (tag == "FULL" && is_npc_base) {
@@ -709,6 +768,16 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {
             QuestCondition condition = parse_condition(value);
             ai_package.conditions.push_back(condition);
+        } else if ((tag == "CTDA" || tag == "CTDT") && is_idle && subrecord_size >= 20) {
+            // CTDT is the 20-byte form of CTDA that the master also uses; parse_condition reads only the first 20 bytes.
+            idle.conditions.push_back(parse_condition(value));
+        } else if (tag == "MODL" && is_idle) {
+            idle.animation_file = read_zstring(value, subrecord_size);
+        } else if (tag == "ANAM" && is_idle && subrecord_size >= 1) {
+            idle.group_flags = value[0];
+        } else if (tag == "DATA" && is_idle && subrecord_size >= 8) {
+            idle.parent_form_id = u32(value);
+            idle.previous_sibling_form_id = u32(value + 4);
         } else if (tag == "PKDT" && is_ai_package) {
             if (subrecord_size >= 8) {
                 ai_package.flags = u32(value);
@@ -859,6 +928,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         outfit_by_id_[form_id] = std::move(outfit);
     if (is_ai_package)
         ai_package_by_id_[form_id] = std::move(ai_package);
+    if (is_idle)
+        idle_by_id_[form_id] = std::move(idle);
     if (is_tree) {
         if (!tree.model_path.empty()) base_model_by_id_[form_id] = tree.model_path;
         tree_by_id_[form_id] = std::move(tree);

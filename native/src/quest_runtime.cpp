@@ -69,4 +69,27 @@ const AiPackageRecord* select_package(const std::vector<const AiPackageRecord*>&
     return nullptr;
 }
 
+namespace {
+
+constexpr int kMaxIdleDepth = 16;  // a folder cycle in broken data must end
+
+const IdleRecord* walk_idles(const IdleChildren& children, std::uint32_t parent, ScriptHost& host,
+                             std::vector<std::string>* unanswered, int depth) {
+    if (depth > kMaxIdleDepth) return nullptr;
+    for (const auto* idle : children(parent)) {
+        if (!idle || idle->form_id == parent) continue;
+        if (!evaluate_conditions(idle->conditions, host, unanswered)) continue;
+        if (!idle->is_folder()) return idle;
+        if (const auto* found = walk_idles(children, idle->form_id, host, unanswered, depth + 1)) return found;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+const IdleRecord* select_idle(const IdleChildren& children, ScriptHost& host, std::vector<std::string>* unanswered) {
+    if (!children) return nullptr;
+    return walk_idles(children, 0, host, unanswered, 0);
+}
+
 } // namespace oblivion

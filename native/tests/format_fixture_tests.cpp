@@ -1097,6 +1097,185 @@ void test_quest_world() {
     CHECK(!unknown.parse_errors.empty());
 }
 
+// An IDLE record: MODL file (or folder), ANAM group, DATA parent and previous sibling, and conditions. `old_style`
+// writes the 20-byte CTDT form of the conditions that the master also uses.
+struct FixtureCondition {
+    std::uint8_t op = 0;
+    float comparison = 0.0f;
+    std::uint32_t function = 0;
+    std::uint32_t parameter1 = 0;
+    std::uint32_t parameter2 = 0;
+};
+Bytes idle_record(std::uint32_t form_id, std::string_view editor_id, std::string_view file, std::uint8_t group_flags,
+                  std::uint32_t parent, std::uint32_t previous, const std::vector<FixtureCondition>& conditions,
+                  bool old_style = false) {
+    Bytes data;
+    append(data, string_subrecord("EDID", editor_id));
+    append(data, string_subrecord("MODL", file));
+    Bytes model_bounds;
+    u32(model_bounds, 0);
+    subrecord(data, "MODB", model_bounds);
+    for (const auto& condition : conditions) {
+        Bytes ctda;
+        u8(ctda, condition.op); u8(ctda, 0); u8(ctda, 0); u8(ctda, 0);
+        f32(ctda, condition.comparison);
+        u32(ctda, condition.function);
+        u32(ctda, condition.parameter1);
+        u32(ctda, condition.parameter2);
+        if (!old_style) u32(ctda, 0);
+        subrecord(data, old_style ? "CTDT" : "CTDA", ctda);
+    }
+    Bytes flags;
+    u8(flags, group_flags);
+    subrecord(data, "ANAM", flags);
+    Bytes links;
+    u32(links, parent);
+    u32(links, previous);
+    subrecord(data, "DATA", links);
+    return record("IDLE", form_id, data);
+}
+
+// Roots: Gestures (needs stage 1 of the quest) and Ambient. The records are written out of order: the tree is
+// ordered by the previous-sibling links, not by file order.
+Bytes idle_fixture() {
+    constexpr std::uint32_t kQuest = 0x700;
+    Bytes header;
+    raw(header, "TES4");
+    u32(header, 0); u32(header, 0); u32(header, 0); u32(header, 0);
+    Bytes records;
+    append(records, idle_record(0x901, "Ambient", "Characters\\_Male\\IdleAnims", 4, 0, 0x900, {}));
+    append(records, idle_record(0x921, "Fallback", "Characters\\_Male\\IdleAnims\\Fallback.kf", 5, 0x901, 0x920, {}));
+    append(records, idle_record(0x911, "Point", "Characters\\_Male\\IdleAnims\\Point.kf", 4, 0x900, 0x910,
+                                {{0, 3.0f, 79, kQuest, 1}}, true));
+    append(records, idle_record(0x900, "Gestures", "Characters\\_Male\\IdleAnims", 4, 0, 0, {{0, 1.0f, 58, kQuest, 0}}));
+    append(records, idle_record(0x920, "Own", "Characters\\_Male\\IdleAnims\\Own.kf", 4, 0x901, 0x91f,
+                                {{0, 1.0f, 72, 0xB0, 0}}));
+    append(records, idle_record(0x910, "Wave", "Characters\\_Male\\IdleAnims\\Wave.kf", 4, 0x900, 0,
+                                {{0, 1.0f, 79, kQuest, 1}}));
+    // Asks about combat, which the scene cannot answer: never chosen, never fatal.
+    append(records, idle_record(0x91f, "Combat", "Characters\\_Male\\IdleAnims\\Combat.kf", 4, 0x901, 0,
+                                {{0, 1.0f, 289, 0, 0}}));
+    append(header, group(0x454c4449, 0, records));  // "IDLE"
+    return header;
+}
+
+constexpr std::uint32_t kIdleQuest = 0x700;
+
+void test_idle_manager(const std::filesystem::path& directory) {
+    const auto path = directory / "idles.esm";
+    write_bytes(path, idle_fixture());
+    oblivion::Esm4Database database;
+    database.open(path);
+
+    const auto ids = [&](std::uint32_t parent) {
+        std::vector<std::uint32_t> result;
+        for (const auto* idle : database.idle_children(parent)) result.push_back(idle->form_id);
+        return result;
+    };
+    CHECK(ids(0) == std::vector<std::uint32_t>({0x900, 0x901}));
+    CHECK(ids(0x900) == std::vector<std::uint32_t>({0x910, 0x911}));
+    CHECK(ids(0x901) == std::vector<std::uint32_t>({0x91f, 0x920, 0x921}));
+    CHECK(database.idle_children(0x910).empty() && database.idle_children(0xdead).empty());
+    const auto* wave = database.find_idle(0x910);
+    CHECK(wave != nullptr && wave->editor_id == "Wave" && !wave->is_folder());
+    CHECK(wave->animation_file == "Characters\\_Male\\IdleAnims\\Wave.kf" && wave->group_flags == 4);
+    CHECK(wave->parent_form_id == 0x900 && wave->previous_sibling_form_id == 0);
+    CHECK(wave->conditions.size() == 1 && wave->conditions[0].function_index == 79 && wave->conditions[0].parameter2 == 1);
+    const auto* point = database.find_idle(0x911);
+    CHECK(point != nullptr && point->previous_sibling_form_id == 0x910);
+    CHECK(point->conditions.size() == 1 && point->conditions[0].comparison == 3.0f && point->conditions[0].parameter1 == kIdleQuest);
+    CHECK(database.find_idle(0x900)->is_folder() && database.find_idle(0x901)->conditions.empty());
+    CHECK(database.find_idle(0x999) == nullptr);
+
+    // The quest: stage 1 picks an idle with uniqueIdle at 3 and again after it was reset, for three actors.
+    oblivion::QuestRecord quest;
+    quest.form_id = kIdleQuest;
+    quest.editor_id = "IdleQuest";
+    oblivion::QuestStage stage;
+    stage.index = 1;
+    oblivion::QuestStageEntry entry;
+    entry.result_source =
+        "set IdleQuest.uniqueIdle to 3\n"
+        "GlenRef.pickidle\n"
+        "set IdleQuest.uniqueIdle to 1\n"
+        "GlenRef.pickidle\n"
+        "set IdleQuest.uniqueIdle to 0\n"
+        "GlenRef.pickidle\n"
+        "OtherRef.pickidle\n"
+        "NobodyRef.pickidle\n";
+    stage.entries.push_back(entry);
+    quest.stages.push_back(stage);
+    oblivion::QuestStage later;
+    later.index = 2;
+    oblivion::QuestStageEntry later_entry;
+    later_entry.result_source = "set IdleQuest.uniqueIdle to 3\nGlenRef.pickidle\n";
+    later.entries.push_back(later_entry);
+    quest.stages.push_back(later);
+    oblivion::ScriptRecord script;
+    script.editor_id = "IdleQuestScript";
+    script.source = "scn IdleQuest\nshort uniqueIdle\n";
+    script.variables = {{1, 1, "uniqueIdle"}};
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "pickidle") return oblivion::ScriptCommandSignature{0, 0};
+        return std::nullopt;
+    };
+    oblivion::QuestWorld world(commands);
+    world.add(quest, script);
+    world.set_idle_tree([&database](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& {
+        return database.idle_children(parent);
+    });
+    world.set_reference_base("GlenRef", 0xB0);
+    world.set_reference_base("OtherRef", 0xB1);
+
+    const auto picks = [](const oblivion::QuestTick& tick) {
+        std::vector<std::string> result;
+        for (const auto& action : tick.actions)
+            if (action.command == "pickidle")
+                result.push_back(action.target + ":" + action.arguments.at(1).text + ":" + action.arguments.at(0).text);
+        return result;
+    };
+    const auto first = world.start("IdleQuest", 1);
+    const std::string base = "Characters\\_Male\\IdleAnims\\";
+    // uniqueIdle 3 reaches Point under the Gestures folder; 1 reaches Wave; with 0 the Gestures folder offers nothing, and
+    // the Ambient folder gives Glen the idle that asks for his base, and the others its unconditioned last sibling.
+    // The Combat idle in front of them asks something unanswered and is skipped.
+    CHECK(picks(first) == std::vector<std::string>({
+        "GlenRef:Point:" + base + "Point.kf", "GlenRef:Wave:" + base + "Wave.kf", "GlenRef:Own:" + base + "Own.kf",
+        "OtherRef:Fallback:" + base + "Fallback.kf", "NobodyRef:Fallback:" + base + "Fallback.kf"}));
+    // The group flags and form ID travel in the action.
+    CHECK(first.actions.at(0).arguments.at(2).number == 0x911 && first.actions.at(0).arguments.at(3).number == 4);
+
+    // A reply that sets uniqueIdle, calls PickIdle without a reference and resets it: the idle is for the speaker, and the
+    // value that was set when the command ran counts, not the reset after it.
+    oblivion::DialogTopic topic;
+    topic.editor_id = "Greet";
+    oblivion::DialogResponse reply;
+    reply.form_id = 0xC00;
+    reply.quest = kIdleQuest;
+    reply.text = "Hello";
+    reply.result_source = "set IdleQuest.uniqueIdle to 1\npickidle\nset IdleQuest.uniqueIdle to 0\n";
+    topic.responses.push_back(reply);
+    world.set_topic_finder([&topic](std::string_view id) { return id == "Greet" ? &topic : nullptr; });
+    oblivion::QuestTick said;
+    world.say("Greet", 0xB0, 0x14, said, {});
+    CHECK(picks(said) == std::vector<std::string>({"glenref:Wave:" + base + "Wave.kf"}));
+    CHECK(world.find("IdleQuest")->variable("uniqueIdle") == 0.0);
+
+    // Deterministic: the same state gives the same idle again. In stage 2 the Gestures folder no longer holds (GetStage != 1).
+    const auto second = world.start("IdleQuest", 2);
+    CHECK(picks(second) == std::vector<std::string>({"GlenRef:Own:" + base + "Own.kf"}));
+
+    // An unqualified PickIdle is for the speaker or the script's actor, found by its base; without an idle tree it is only recorded.
+    oblivion::QuestTick direct;
+    const auto* chosen = world.pick_idle("", 0xB1, direct);
+    CHECK(chosen != nullptr && chosen->editor_id == "Fallback" && direct.actions.size() == 1);
+    CHECK(direct.actions[0].target == "otherref");
+    oblivion::QuestWorld bare(commands);
+    oblivion::QuestTick nothing;
+    CHECK(bare.pick_idle("GlenRef", 0, nothing) == nullptr);
+    CHECK(nothing.actions.size() == 1 && nothing.actions[0].arguments.at(0).text.empty() && !nothing.unanswered.empty());
+}
+
 void test_world_answers() {
     // A low-health check reads GetAV of the player. Unanswered it reads 0, which is low; answered with full health it does not fire.
     oblivion::QuestRecord quest;
@@ -1741,6 +1920,7 @@ int main() {
         test_bsa(directory);
         test_bsa_rejects_implausible_output_size(directory);
         test_esm4(directory);
+        test_idle_manager(directory);
         test_loose_assets(directory);
         test_loose_file_index_edge_cases(directory);
         test_script_lexer();

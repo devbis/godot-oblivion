@@ -16,10 +16,10 @@ std::string lower_text(std::string text) {
 // Records every command as an action and answers it with 0.
 class RecordingStageHost final : public ScriptHost {
 public:
-    RecordingStageHost(const QuestRecord& quest, unsigned stage, const ScriptRecord* quest_script, const QuestState& state,
-                       const ForeignVariableReader& read_foreign)
+    RecordingStageHost(const QuestRecord& quest, unsigned stage, const ScriptRecord* quest_script, QuestState& state,
+                       const ForeignVariableReader& read_foreign, const PickIdleHook& pick_idle)
         : quest_(quest.form_id), stage_(stage), quest_script_(quest_script), state_(state), quest_key_(lower(quest.editor_id)),
-          read_foreign_(read_foreign) {}
+          read_foreign_(read_foreign), pick_idle_(pick_idle) {}
 
     std::vector<ScriptAction> actions;
     ScriptInterpreter* interpreter = nullptr;  // set by the runner; bare quest variables are kept in step through it
@@ -37,6 +37,16 @@ public:
             } else if (read_foreign_) {
                 if (const auto value = read_foreign_(target->text, name)) return ScriptValue::from_number(*value);
             }
+        }
+        if (pick_idle_ && lower(std::string(name)) == "pickidle") {
+            // The idle depends on the quest variables set so far (characterGen.uniqueIdle): bring them into the state first.
+            if (interpreter) {
+                const auto prefix = quest_key_ + ".";
+                for (const auto& [key, value] : interpreter->variables())
+                    if (!value.is_text && key.compare(0, prefix.size(), prefix) == 0) state_.variables[key] = value.number;
+            }
+            actions.push_back(pick_idle_(target && target->is_text ? target->text : std::string()));
+            return ScriptValue::from_number(0.0);
         }
         ScriptAction action;
         action.command = std::string(name);
@@ -93,16 +103,18 @@ private:
     std::uint32_t quest_;
     unsigned stage_;
     const ScriptRecord* quest_script_;
-    const QuestState& state_;
+    QuestState& state_;
     std::string quest_key_;
     const ForeignVariableReader& read_foreign_;
+    const PickIdleHook& pick_idle_;
 };
 
 } // namespace
 
 std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned stage_index,
                                            const ScriptCommandLookup& lookup, const ScriptRecord* quest_script,
-                                           QuestState& state, const ForeignVariableReader& read_foreign) {
+                                           QuestState& state, const ForeignVariableReader& read_foreign,
+                                           const PickIdleHook& pick_idle) {
     std::vector<StageEntryRun> runs;
     const QuestStage* stage = nullptr;
     for (const auto& candidate : quest.stages)
@@ -121,7 +133,7 @@ std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned st
         StageEntryRun run;
         run.completes = entry.completes;
         run.log_text = entry.log_text;
-        RecordingStageHost host(quest, stage_index, quest_script, state, read_foreign);
+        RecordingStageHost host(quest, stage_index, quest_script, state, read_foreign, pick_idle);
         run.conditions_hold = evaluate_conditions(entry.conditions, host, &run.missing_conditions);
         if (run.conditions_hold) {
             // Fragments run with no script of their own; the interpreter only needs a script to outlive it.

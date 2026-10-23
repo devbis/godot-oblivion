@@ -103,6 +103,20 @@ struct AiPackageRecord {
     std::vector<QuestCondition> conditions;  // CTDA: the package starts only when these hold
 };
 
+// An IDLE record: a node of the idle animation tree. MODL is the .kf file of an animation, or a folder
+// (no ".kf") that only groups its children; ANAM is the animation group (4 special idle, 5 whole body, ...,
+// 0x80 no return file); DATA is the parent and the previous sibling (both 0 when there is none).
+struct IdleRecord {
+    std::uint32_t form_id = 0;
+    std::string editor_id;
+    std::string animation_file;
+    std::uint8_t group_flags = 0;
+    std::uint32_t parent_form_id = 0;
+    std::uint32_t previous_sibling_form_id = 0;
+    std::vector<QuestCondition> conditions;  // CTDA (and the older 20-byte CTDT)
+    [[nodiscard]] bool is_folder() const;    // no .kf file: the node only groups its children
+};
+
 struct CellRecord {
     std::uint32_t form_id = 0;
     std::uint32_t worldspace_form_id = 0;
@@ -132,6 +146,10 @@ public:
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
+    [[nodiscard]] const IdleRecord* find_idle(std::uint32_t form_id) const;
+    // The children of an idle node (0: the roots), in sibling order (each follows its previous sibling).
+    [[nodiscard]] const std::vector<const IdleRecord*>& idle_children(std::uint32_t parent_form_id) const;
+    [[nodiscard]] std::size_t idle_count() const noexcept { return idle_by_id_.size(); }
     [[nodiscard]] const std::string* find_item_model_path(std::uint32_t form_id, bool female) const;
     [[nodiscard]] const std::string* find_world_item_model_path(std::uint32_t form_id, bool female) const;
     [[nodiscard]] std::uint16_t find_item_biped_slots(std::uint32_t form_id) const;
@@ -171,6 +189,8 @@ private:
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;
+    std::map<std::uint32_t, IdleRecord> idle_by_id_;
+    std::map<std::uint32_t, std::vector<const IdleRecord*>> idle_children_by_parent_;
     std::map<std::uint32_t, TreeBaseRecord> tree_by_id_;
     std::map<std::uint32_t, std::string> item_model_by_id_;
     std::map<std::uint32_t, std::string> female_item_model_by_id_;
@@ -200,6 +220,7 @@ private:
 
     void parse_file(const std::vector<std::uint8_t>& bytes, bool runtime_visuals_only);
     void attach_references();
+    void build_idle_tree();
     void parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t flags,
                       std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
                       bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size);
