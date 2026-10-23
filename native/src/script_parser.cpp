@@ -32,6 +32,10 @@ ScriptExpr make_binary(std::string op, ScriptExpr lhs, ScriptExpr rhs) {
     return expr;
 }
 
+// How deeply statements (nested `if`) and expressions (parentheses, unary operators) may nest. A script that goes
+// deeper is reported and skipped, rather than overflowing the stack of the thread that parses it.
+constexpr int kMaxNesting = 64;
+
 class Parser {
 public:
     Parser(std::vector<ScriptToken> tokens, const ScriptCommandLookup& lookup)
@@ -85,6 +89,19 @@ private:
     const ScriptCommandLookup& lookup_;
     std::size_t position_ = 0;
     std::vector<ScriptDiagnostic> diagnostics_;
+    int depth_ = 0;
+
+    // Counts one level of nesting for as long as it lives.
+    struct DepthGuard {
+        Parser& parser;
+        explicit DepthGuard(Parser& owner, std::size_t line) : parser(owner) {
+            if (++parser.depth_ > kMaxNesting) {
+                --parser.depth_;
+                throw SyntaxError{line, "nested more than " + std::to_string(kMaxNesting) + " levels deep"};
+            }
+        }
+        ~DepthGuard() { --parser.depth_; }
+    };
 
     static bool is_declaration_type(const std::string& word) {
         return word == "short" || word == "long" || word == "int" || word == "float" || word == "ref";
@@ -158,7 +175,7 @@ private:
             advance();
         }
         end_statement();
-        block.body = parse_statements({"end"});
+        block.body = parse_statements({"end", "begin"});
         if (is_keyword(peek(), "end")) {
             advance();
             end_statement();
@@ -217,10 +234,12 @@ private:
         if (word == "if") {
             advance();
             statement.kind = ScriptStmtKind::If;
+            const DepthGuard guard(*this, token.line);
+            // `end` and `begin` end a body too: with an `endif` missing, the block's own `end` is not a stray token.
             ScriptBranch arm;
             arm.condition = parse_expression();
             end_statement();
-            arm.body = parse_statements({"elseif", "else", "endif"});
+            arm.body = parse_statements({"elseif", "else", "endif", "end", "begin"});
             statement.branches.push_back(std::move(arm));
             while (true) {
                 // `else if` is written in some scripts instead of `elseif`.
@@ -231,16 +250,21 @@ private:
                     ScriptBranch next;
                     next.condition = parse_expression();
                     end_statement();
-                    next.body = parse_statements({"elseif", "else", "endif"});
+                    next.body = parse_statements({"elseif", "else", "endif", "end", "begin"});
                     statement.branches.push_back(std::move(next));
                     continue;
                 }
                 if (is_keyword(peek(), "else")) {
                     advance();
                     end_statement();
-                    statement.else_body = parse_statements({"endif"});
+                    statement.else_body = parse_statements({"endif", "end", "begin"});
                 }
                 break;
+            }
+            if (!is_keyword(peek(), "endif") && (is_keyword(peek(), "end") || is_keyword(peek(), "begin") ||
+                                                 peek().kind == ScriptTokenKind::EndOfFile)) {
+                diagnostics_.push_back({statement.line, "'if' has no 'endif'"});
+                return statement;
             }
             expect_keyword("endif");
             end_statement();
@@ -311,6 +335,7 @@ private:
     }
 
     ScriptExpr parse_unary() {
+        const DepthGuard guard(*this, peek().line);
         if (is_operator(peek(), "-") || is_operator(peek(), "!")) {
             ScriptExpr expr;
             expr.kind = ScriptExprKind::Unary;
@@ -374,6 +399,7 @@ private:
         }
         case ScriptTokenKind::Operator:
             if (token.text == "(") {
+                const DepthGuard guard(*this, token.line);
                 advance();
                 auto inner = parse_expression();
                 if (!is_operator(peek(), ")")) throw SyntaxError{peek().line, "expected ')', " + describe(peek())};

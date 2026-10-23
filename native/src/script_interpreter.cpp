@@ -1,6 +1,7 @@
 #include "oblivion/script_interpreter.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 
@@ -18,6 +19,26 @@ double number_of(const std::string& literal) {
     return std::strtod(literal.c_str(), nullptr);
 }
 
+// A short or long holds a 32-bit integer: the fraction is dropped, and what cannot be represented becomes 0 or the limit.
+double truncate_integer(double value) {
+    if (std::isnan(value)) return 0.0;
+    constexpr double kLimit = 2147483647.0;
+    if (value > kLimit) return kLimit;
+    if (value < -kLimit) return -kLimit;
+    return std::trunc(value);
+}
+
+// `a % b` on integers. A divisor that truncates to 0 or -1, and values that are not finite or do not fit, give 0:
+// the hardware division would trap on them.
+double integer_modulo(double a, double b) {
+    if (!std::isfinite(a) || !std::isfinite(b)) return 0.0;
+    constexpr double kLimit = 9.0e18;  // below the range of long long
+    if (std::fabs(a) > kLimit || std::fabs(b) > kLimit) return 0.0;
+    const auto divisor = static_cast<long long>(b);
+    if (divisor == 0 || divisor == -1) return 0.0;
+    return static_cast<double>(static_cast<long long>(a) % divisor);
+}
+
 } // namespace
 
 std::string ScriptInterpreter::lower(std::string_view text) {
@@ -28,6 +49,8 @@ std::string ScriptInterpreter::lower(std::string_view text) {
 
 ScriptInterpreter::ScriptInterpreter(const ScriptAst& script) : script_(script) {
     for (const auto& declaration : script.declarations) {
+        if (declaration.type == "short" || declaration.type == "long" || declaration.type == "int")
+            integers_.insert(lower(declaration.name));
         // A `ref` holds a name (empty until set); the numeric types start at zero.
         if (declaration.type == "ref") variables_[lower(declaration.name)] = ScriptValue::from_text("");
         else variables_[lower(declaration.name)] = ScriptValue::from_number(0.0);
@@ -83,16 +106,18 @@ void ScriptInterpreter::run_statement(const ScriptStmt& statement, RunState& sta
     }
     switch (statement.kind) {
     case ScriptStmtKind::Set: {
-        const auto value = evaluate(statement.children[0], state);
-        variables_[lower(statement.name)] = value;
+        auto value = evaluate(statement.children[0], state);
+        const auto key = lower(statement.name);
+        if (!value.is_text && integers_.count(key) != 0) value.number = truncate_integer(value.number);
+        variables_[key] = value;
         state.host->variable_written(statement.name, value);
-        state.result->trace.push_back("line " + std::to_string(statement.line) + ": set " + statement.name + " = " + describe(value));
+        if (trace_enabled_) state.result->trace.push_back("line " + std::to_string(statement.line) + ": set " + statement.name + " = " + describe(value));
         return;
     }
     case ScriptStmtKind::If: {
         for (const auto& branch : statement.branches) {
             const auto condition = evaluate(branch.condition, state);
-            if (!state.stop) state.result->trace.push_back("line " + std::to_string(branch.condition.line) + ": if " + (truthy(condition) ? "true" : "false"));
+            if (trace_enabled_ && !state.stop) state.result->trace.push_back("line " + std::to_string(branch.condition.line) + ": if " + (truthy(condition) ? "true" : "false"));
             if (truthy(condition)) {
                 run_statements(branch.body, state);
                 return;
@@ -102,7 +127,7 @@ void ScriptInterpreter::run_statement(const ScriptStmt& statement, RunState& sta
         return;
     }
     case ScriptStmtKind::Return:
-        state.result->trace.push_back("line " + std::to_string(statement.line) + ": return");
+        if (trace_enabled_) state.result->trace.push_back("line " + std::to_string(statement.line) + ": return");
         state.result->returned = true;
         state.stop = true;
         return;
@@ -167,7 +192,7 @@ ScriptValue ScriptInterpreter::evaluate(const ScriptExpr& expr, RunState& state)
         if (op == "-") return ScriptValue::from_number(a - b);
         if (op == "*") return ScriptValue::from_number(a * b);
         if (op == "/") return ScriptValue::from_number(b == 0.0 ? 0.0 : a / b);
-        if (op == "%") return ScriptValue::from_number(b == 0.0 ? 0.0 : static_cast<double>(static_cast<long long>(a) % static_cast<long long>(b)));
+        if (op == "%") return ScriptValue::from_number(integer_modulo(a, b));
         return ScriptValue::from_number(0.0);
     }
     }
@@ -179,16 +204,18 @@ ScriptValue ScriptInterpreter::call(const ScriptExpr& call_expr, const ScriptVal
     arguments.reserve(call_expr.children.size());
     for (const auto& argument : call_expr.children) arguments.push_back(evaluate(argument, state));
 
-    std::ostringstream line;
-    line << "line " << call_expr.line << ": ";
-    if (target) line << describe(*target) << '.';
-    line << call_expr.text << '(';
-    for (std::size_t index = 0; index < arguments.size(); ++index) {
-        if (index) line << ", ";
-        line << describe(arguments[index]);
+    if (trace_enabled_) {
+        std::ostringstream line;
+        line << "line " << call_expr.line << ": ";
+        if (target) line << describe(*target) << '.';
+        line << call_expr.text << '(';
+        for (std::size_t index = 0; index < arguments.size(); ++index) {
+            if (index) line << ", ";
+            line << describe(arguments[index]);
+        }
+        line << ')';
+        state.result->trace.push_back(line.str());
     }
-    line << ')';
-    state.result->trace.push_back(line.str());
 
     const auto value = state.host->call_command(call_expr.text, target, arguments);
     if (value) return *value;
@@ -201,7 +228,9 @@ ScriptValue ScriptInterpreter::lookup_name(const std::string& name) const {
     const auto it = variables_.find(lower(name));
     if (it != variables_.end()) return it->second;
     // Anything that is not a variable is a name the host resolves (a reference, quest or stage).
-    return ScriptValue::from_text(name);
+    auto value = ScriptValue::from_text(name);
+    value.unresolved = true;
+    return value;
 }
 
 } // namespace oblivion

@@ -32,17 +32,22 @@ bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHo
             const auto& condition = conditions[index];
             const auto value = host.call_condition(condition.function_index, condition.parameter1, condition.parameter2);
             bool holds = false;
-            if (value) {
+            // "Use global": the comparison value is a GLOB record, which the host has to know.
+            std::optional<double> comparison = static_cast<double>(condition.comparison);
+            if (condition.comparison_is_global) comparison = host.global_value(condition.comparison_global_form_id);
+            if (value && comparison) {
+                const double right = *comparison;
                 switch (condition_operator(condition.operator_code)) {
-                case ConditionOperator::Equal: holds = *value == condition.comparison; break;
-                case ConditionOperator::NotEqual: holds = *value != condition.comparison; break;
-                case ConditionOperator::Greater: holds = *value > condition.comparison; break;
-                case ConditionOperator::GreaterEqual: holds = *value >= condition.comparison; break;
-                case ConditionOperator::Less: holds = *value < condition.comparison; break;
-                case ConditionOperator::LessEqual: holds = *value <= condition.comparison; break;
+                case ConditionOperator::Equal: holds = *value == right; break;
+                case ConditionOperator::NotEqual: holds = *value != right; break;
+                case ConditionOperator::Greater: holds = *value > right; break;
+                case ConditionOperator::GreaterEqual: holds = *value >= right; break;
+                case ConditionOperator::Less: holds = *value < right; break;
+                case ConditionOperator::LessEqual: holds = *value <= right; break;
                 }
             } else if (unimplemented) {
-                const auto name = "condition " + std::to_string(condition.function_index);
+                const auto name = value ? "global " + std::to_string(condition.comparison_global_form_id)
+                                        : "condition " + std::to_string(condition.function_index);
                 if (std::find(unimplemented->begin(), unimplemented->end(), name) == unimplemented->end())
                     unimplemented->push_back(name);
             }

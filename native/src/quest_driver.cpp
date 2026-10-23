@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
 
 #include "oblivion/quest_runtime.hpp"
 #include "oblivion/script_interpreter.hpp"
@@ -29,6 +31,14 @@ constexpr std::uint32_t kPlayerReference = 0x14;
 // A rough length of a spoken line, until the voice files' durations are read: about 14 characters a second.
 double speech_seconds(const std::string& text) {
     return std::max(1.0, static_cast<double>(text.size()) / 14.0);
+}
+
+// A script number as a stage index. A number that is no stage (negative, not finite, too large) is refused, rather
+// than converted with undefined behavior.
+bool stage_number(double value, unsigned& stage) {
+    if (!(value >= 0.0) || value > static_cast<double>(std::numeric_limits<unsigned>::max())) return false;
+    stage = static_cast<unsigned>(value);
+    return true;
 }
 
 // Writes "name.variable" into another quest of the world, or into the actor a reference stands for. Ignored otherwise.
@@ -72,13 +82,19 @@ public:
             if (const auto* quest = find_quest(arguments[0].text)) return ScriptValue::from_number(quest->stage());
         }
         if (command == "getstagedone" && arguments.size() >= 2 && arguments[0].is_text) {
-            if (const auto* quest = find_quest(arguments[0].text))
-                return ScriptValue::from_number(quest->has_entered(static_cast<unsigned>(arguments[1].number)) ? 1.0 : 0.0);
+            if (const auto* quest = find_quest(arguments[0].text)) {
+                unsigned stage = 0;
+                return ScriptValue::from_number(stage_number(arguments[1].number, stage) && quest->has_entered(stage) ? 1.0 : 0.0);
+            }
         }
         if (command == "setstage" && arguments.size() >= 2 && arguments[0].is_text && find_quest(arguments[0].text)) {
+            unsigned stage = 0;
+            if (!stage_number(arguments[1].number, stage)) {
+                tick_.parse_errors.push_back("SetStage with a stage that is not a valid number");
+                return ScriptValue::from_number(0.0);
+            }
             flush_variables();
-            const auto stage = static_cast<unsigned>(arguments[1].number);
-            if (lower(arguments[0].text) == lower(driver_.quest_.editor_id)) driver_.enter_stage(stage, tick_, distance_, depth_ + 1);
+            if (lower(arguments[0].text) == driver_.lower_editor_id_) driver_.enter_stage(stage, tick_, distance_, depth_ + 1);
             else driver_.world_->set_stage(arguments[0].text, stage, tick_, distance_, depth_ + 1);
             reload_variables();
             return ScriptValue::from_number(0.0);
@@ -108,9 +124,11 @@ public:
     }
 
     void variable_written(std::string_view name, const ScriptValue& value) override {
-        if (!sync_quest_variables_ || !interpreter || value.is_text) return;
+        if (value.is_text) return;
         const auto key = lower(name);
-        const auto prefix = lower(driver_.quest_.editor_id) + ".";
+        written_.insert(key);
+        if (!sync_quest_variables_ || !interpreter) return;
+        const auto& prefix = driver_.prefix_;
         if (key.compare(0, prefix.size(), prefix) == 0) {
             const auto alias = key.substr(prefix.size());
             if (is_declared_variable(alias))
@@ -120,38 +138,72 @@ public:
         }
     }
 
-    // Writes the GameMode variables into the quest's state (and other quests' variables into theirs), so a stage run sees them.
-    void flush_variables() {
+    // Loads the quest's variables into the interpreter, by bare name and as "quest.name", and marks the script's
+    // short and long variables as integers. Used before a run, so that a bare `bDone` reads the quest's value.
+    void load_variables() {
         if (!interpreter) return;
-        const auto prefix = lower(driver_.quest_.editor_id) + ".";
-        for (const auto& [key, value] : interpreter->variables()) {
-            if (value.is_text) continue;
-            if (key.find('.') == std::string::npos) driver_.state_.variables[prefix + key] = value.number;
-            else if (key.compare(0, prefix.size(), prefix) == 0) driver_.state_.variables[key] = value.number;
-            else write_foreign_variable(driver_.world_, key, value.number);
+        for (const auto& declaration : driver_.ast_.declarations) {
+            if (declaration.type != "short" && declaration.type != "long" && declaration.type != "int") continue;
+            const auto key = lower(declaration.name);
+            interpreter->declare_integer(key);
+            interpreter->declare_integer(driver_.prefix_ + key);
         }
+        reload_variables();
+        for (const auto& [key, value] : driver_.state_.variables)
+            if (key.compare(0, driver_.prefix_.size(), driver_.prefix_) == 0) interpreter->set_variable(key, ScriptValue::from_number(value));
     }
 
-    // Reads this quest's variables back into the interpreter after a nested stage ran: the stage may have set them,
-    // and the GameMode that continues must see the new values rather than the ones it had before the stage.
+    // Writes the variables the run has set since the last flush into the quest's state (and other quests'
+    // variables into theirs), so a stage run sees them. A variable the run only read is not written back, so a
+    // stale copy cannot overwrite a change another script made meanwhile. An actor's bare variables are its own
+    // and stay out of the quest; only `quest.name` writes leave an actor's script.
+    void flush_variables() {
+        if (!interpreter) return;
+        const auto& prefix = driver_.prefix_;
+        const auto& variables = interpreter->variables();
+        for (const auto& key : written_) {
+            const auto found = variables.find(key);
+            if (found == variables.end() || found->second.is_text) continue;
+            const auto value = found->second.number;
+            if (key.find('.') == std::string::npos) {
+                if (sync_quest_variables_) driver_.state_.variables[prefix + key] = value;
+            } else if (key.compare(0, prefix.size(), prefix) == 0) {
+                driver_.state_.variables[key] = value;
+            } else {
+                write_foreign_variable(driver_.world_, key, value);
+            }
+        }
+        written_.clear();
+    }
+
+    // Reads the variables back into the interpreter after a nested stage ran: the stage may have set this quest's
+    // variables or those of other quests, and the script that continues must see the new values rather than the
+    // ones it held before the stage.
     void reload_variables() {
         if (!interpreter) return;
-        const auto prefix = lower(driver_.quest_.editor_id) + ".";
+        const auto& prefix = driver_.prefix_;
         for (const auto& declaration : driver_.script_.variables) {
             const auto key = lower(declaration.name);
             const auto found = driver_.state_.variables.find(prefix + key);
-            if (found != driver_.state_.variables.end()) {
-                const auto value = ScriptValue::from_number(found->second);
-                interpreter->set_variable(key, value);
-                interpreter->set_variable(prefix + key, value);
-            }
+            const auto value = ScriptValue::from_number(found == driver_.state_.variables.end() ? 0.0 : found->second);
+            if (sync_quest_variables_) interpreter->set_variable(key, value);
+            interpreter->set_variable(prefix + key, value);
+        }
+        // Another quest's variable the script has set holds a copy: take the current value.
+        if (!driver_.world_) return;
+        for (const auto& [key, held] : interpreter->variables()) {
+            const auto dot = key.find('.');
+            if (held.is_text || dot == std::string::npos || key.compare(0, prefix.size(), prefix) == 0) continue;
+            if (const auto* other = driver_.world_->find(key.substr(0, dot)))
+                if (const auto current = other->variable(key.substr(dot + 1)))
+                    interpreter->set_variable(key, ScriptValue::from_number(*current));
         }
     }
 
 private:
     // The quest a name refers to: this quest, or another quest of the same world.
     QuestDriver* find_quest(std::string_view editor_id) {
-        if (lower(editor_id) == lower(driver_.quest_.editor_id)) return &driver_;
+        if (lower(editor_id) == driver_.lower_editor_id_) return &driver_;
         return driver_.world_ ? driver_.world_->find(editor_id) : nullptr;
     }
 
@@ -161,6 +213,7 @@ private:
     const DistanceFunction& distance_;
     int depth_;
     bool sync_quest_variables_;
+    std::set<std::string> written_;  // lowercase names `set` has assigned since the last flush
 
     bool is_declared_variable(std::string_view name) const {
         return std::any_of(driver_.script_.variables.begin(), driver_.script_.variables.end(),
@@ -169,7 +222,21 @@ private:
 };
 
 QuestDriver::QuestDriver(const QuestRecord& quest, const ScriptRecord& script, ScriptCommandLookup lookup)
-    : quest_(quest), script_(script), lookup_(std::move(lookup)), ast_(parse_script(script.source, lookup_)) {}
+    : quest_(quest), script_(script), lookup_(std::move(lookup)), ast_(parse_script(script.source, lookup_)),
+      lower_editor_id_(lower(quest.editor_id)), prefix_(lower_editor_id_ + ".") {}
+
+CachedScript& ScriptCache::get(const ScriptRecord& script, const ScriptCommandLookup& lookup) {
+    const auto key = std::to_string(script.form_id) + ":" + script.editor_id;
+    auto& entry = entries_[key];
+    if (!entry || entry->source != script.source) {
+        entry = std::make_unique<CachedScript>();
+        entry->source = script.source;
+        entry->ast = parse_script(script.source, lookup);
+    }
+    return *entry;
+}
+
+ScriptCache& QuestDriver::script_cache() { return world_ ? world_->script_cache() : own_scripts_; }
 
 QuestTick QuestDriver::start(unsigned stage, const DistanceFunction& distance) {
     QuestTick tick;
@@ -236,7 +303,7 @@ std::optional<double> QuestDriver::variable(std::string_view name) const {
     const auto wanted = lower(name);
     for (const auto& declaration : script_.variables) {
         if (lower(declaration.name) != wanted) continue;
-        const auto found = state_.variables.find(lower(quest_.editor_id) + "." + wanted);
+        const auto found = state_.variables.find(prefix_ + wanted);
         return found == state_.variables.end() ? 0.0 : found->second;
     }
     return std::nullopt;
@@ -245,14 +312,17 @@ std::optional<double> QuestDriver::variable(std::string_view name) const {
 double QuestDriver::variable_at(std::uint32_t index) const {
     for (const auto& variable : script_.variables) {
         if (variable.index != index) continue;
-        const auto found = state_.variables.find(lower(quest_.editor_id) + "." + lower(variable.name));
+        const auto found = state_.variables.find(prefix_ + lower(variable.name));
         return found == state_.variables.end() ? 0.0 : found->second;
     }
     return 0.0;
 }
 
-TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance) {
+TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance,
+                                int depth) {
     TopicRun run;
+    std::optional<QuestWorld::RunGuard> guard;
+    if (world_) guard.emplace(*world_);
     DriverConditionHost conditions(*this, world_, &context);
     for (const auto& reply : topic.responses) {
         // A DIAL may contain replies contributed by several quests. A SayTo
@@ -272,8 +342,10 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
         run.tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
     const ScriptAst no_script;
     ScriptInterpreter interpreter(no_script);
-    QuestTickHost host(*this, run.tick, 0.0, distance, 0);
+    interpreter.set_trace(false);
+    QuestTickHost host(*this, run.tick, 0.0, distance, depth);
     host.interpreter = &interpreter;
+    host.load_variables();
     interpreter.run_body(fragment.statements, host);
     host.flush_variables();
     run.tick.stage = stage_;
@@ -283,14 +355,21 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
 QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::string_view event, std::string_view detail,
                                        const DistanceFunction& distance) {
     QuestTick tick;
-    const auto actor_ast = parse_script(actor_script.source, lookup_);
-    for (const auto& diagnostic : actor_ast.diagnostics)
+    std::optional<QuestWorld::RunGuard> guard;
+    if (world_) guard.emplace(*world_);
+    // The script is parsed once, and its variables carry over from the events that ran before.
+    auto& cached = script_cache().get(actor_script, lookup_);
+    for (const auto& diagnostic : cached.ast.diagnostics)
         tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
-    ScriptInterpreter interpreter(actor_ast);
+    ScriptInterpreter interpreter(cached.ast);
+    interpreter.set_trace(false);
+    for (const auto& [key, value] : cached.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
     QuestTickHost host(*this, tick, 0.0, distance, 0, false);
     host.interpreter = &interpreter;
     const auto result = interpreter.run_event(event, detail, host);
     host.flush_variables();
+    for (const auto& [key, value] : interpreter.variables())
+        if (!value.is_text && key.find('.') == std::string::npos) cached.variables[key] = value.number;
     for (const auto& name : result.unimplemented) tick.unanswered.push_back(name);
     tick.stage = stage_;
     return tick;
@@ -298,18 +377,14 @@ QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::st
 
 QuestTick QuestDriver::tick(double seconds_passed, const DistanceFunction& distance) {
     QuestTick tick;
+    std::optional<QuestWorld::RunGuard> guard;
+    if (world_) guard.emplace(*world_);
     ScriptInterpreter interpreter(ast_);
-    // The script's declared variables hold the quest's values, which persist across ticks.
-    const auto prefix = lower(quest_.editor_id) + ".";
-    for (const auto& declaration : script_.variables) {
-        const auto found = state_.variables.find(prefix + lower(declaration.name));
-        if (found != state_.variables.end()) interpreter.set_variable(declaration.name, ScriptValue::from_number(found->second));
-    }
-    for (const auto& [key, value] : state_.variables)
-        if (key.compare(0, prefix.size(), prefix) == 0) interpreter.set_variable(key, ScriptValue::from_number(value));
-
+    interpreter.set_trace(false);
     QuestTickHost host(*this, tick, seconds_passed, distance, 0);
     host.interpreter = &interpreter;
+    // The script's declared variables hold the quest's values, which persist across ticks.
+    host.load_variables();
     const auto result = interpreter.run("gamemode", host);
     host.flush_variables();
     for (const auto& name : result.unimplemented) tick.unanswered.push_back(name);
@@ -325,6 +400,18 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
     // Setting the stage the quest is already in does nothing: its results do not run again, so a package whose
     // OnPackageDone sets the stage does not restart its route every time.
     if (stage == stage_ && has_entered(stage)) return;
+    // A stage whose results are running is not entered again from them (A:10 -> A:20 -> A:10): the chain ends
+    // there, and the quest stays in the stage it reached.
+    if (running_stages_.count(stage) != 0) {
+        tick.parse_errors.push_back("stage " + std::to_string(stage) + " of " + quest_.editor_id + " sets itself again through its results");
+        return;
+    }
+    struct Running {
+        std::set<unsigned>& set;
+        unsigned stage;
+        ~Running() { set.erase(stage); }
+    } running{running_stages_, stage};
+    running_stages_.insert(stage);
     stage_ = stage;
     entered_.insert(stage);
     tick.stage_changes.push_back(std::to_string(stage));
@@ -341,8 +428,12 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
             const auto command = lower(action.command);
             // A stage result that sets a stage, here or in another quest, is followed through as well.
             if (command == "setstage" && action.arguments.size() >= 2) {
-                const auto next = static_cast<unsigned>(action.arguments[1].number);
-                if (lower(action.arguments[0].text) == lower(quest_.editor_id)) enter_stage(next, tick, distance, depth + 1);
+                unsigned next = 0;
+                if (!stage_number(action.arguments[1].number, next)) {
+                    tick.parse_errors.push_back("SetStage with a stage that is not a valid number");
+                    continue;
+                }
+                if (lower(action.arguments[0].text) == lower_editor_id_) enter_stage(next, tick, distance, depth + 1);
                 else if (world_) world_->set_stage(action.arguments[0].text, next, tick, distance, depth + 1);
             } else if (command == "startquest" && world_) {
                 world_->begin(action.arguments[0].text, tick, distance, depth + 1);
@@ -351,7 +442,7 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
                 const auto speaker = world_->reference_base(action.target).value_or(0);
                 const auto listener = lower(action.arguments[0].text) == "player" ? kPlayerReference
                     : world_->reference_base(action.arguments[0].text).value_or(0);
-                world_->say(action.arguments[1].text, speaker, listener, tick, distance);
+                world_->say(action.arguments[1].text, speaker, listener, tick, distance, depth + 1);
             }
         }
     }
@@ -362,24 +453,24 @@ QuestWorld::QuestWorld(ScriptCommandLookup lookup) : lookup_(std::move(lookup)) 
 QuestDriver& QuestWorld::add(const QuestRecord& quest, const ScriptRecord& script) {
     drivers_.push_back(std::make_unique<QuestDriver>(quest, script, lookup_));
     drivers_.back()->attach(this);
+    by_editor_id_.emplace(drivers_.back()->lower_editor_id(), drivers_.back().get());
+    by_form_id_.emplace(quest.form_id, drivers_.back().get());
     return *drivers_.back();
 }
 
 QuestDriver* QuestWorld::find(std::string_view editor_id) {
-    const auto wanted = lower(editor_id);
-    for (const auto& driver : drivers_)
-        if (lower(driver->quest().editor_id) == wanted) return driver.get();
-    return nullptr;
+    const auto found = by_editor_id_.find(lower(editor_id));
+    return found == by_editor_id_.end() ? nullptr : found->second;
 }
 
 QuestDriver* QuestWorld::find_form(std::uint32_t form_id) {
-    for (const auto& driver : drivers_)
-        if (driver->quest().form_id == form_id) return driver.get();
-    return nullptr;
+    const auto found = by_form_id_.find(form_id);
+    return found == by_form_id_.end() ? nullptr : found->second;
 }
 
 QuestTick QuestWorld::start(std::string_view editor_id, unsigned stage, const DistanceFunction& distance) {
     QuestTick tick;
+    RunGuard guard(*this);
     auto* driver = find(editor_id);
     if (!driver) {
         tick.parse_errors.push_back("unknown quest " + std::string(editor_id));
@@ -404,6 +495,7 @@ void append_tick(QuestTick& into, const QuestTick& from) {
 
 QuestTick QuestWorld::tick(double seconds_passed, const DistanceFunction& distance) {
     QuestTick result;
+    RunGuard guard(*this);
     for (const auto& driver : drivers_) {
         if (started_.count(driver.get()) == 0) continue;
         append_tick(result, driver->tick(seconds_passed, distance));
@@ -412,7 +504,28 @@ QuestTick QuestWorld::tick(double seconds_passed, const DistanceFunction& distan
     return result;
 }
 
+// Changes to the actors made while the world runs wait for the end of the outermost run: a callback of the
+// scene (a distance, a speech length) may unload a cell in the middle of a tick, and the run is going through
+// the actors and holds references to them.
+void QuestWorld::run_or_defer(std::function<void()> change) {
+    if (running_ > 0) pending_.push_back(std::move(change));
+    else change();
+}
+
+void QuestWorld::apply_pending() {
+    // A change may itself be deferred again by a nested run; take the batch first.
+    auto batch = std::move(pending_);
+    pending_.clear();
+    for (auto& change : batch) change();
+}
+
 void QuestWorld::add_actor(std::uint32_t form_id, const ScriptRecord& script, std::string reference_name) {
+    if (running_ > 0) {
+        // The script record outlives the world's run, but copy what is needed to be safe.
+        auto copy = std::make_shared<ScriptRecord>(script);
+        run_or_defer([this, form_id, copy, name = std::move(reference_name)]() mutable { add_actor(form_id, *copy, std::move(name)); });
+        return;
+    }
     if (!reference_name.empty()) {
         const auto wanted = lower(reference_name);
         for (const auto& actor : actors_)
@@ -426,12 +539,14 @@ void QuestWorld::add_actor(std::uint32_t form_id, const ScriptRecord& script, st
 }
 
 void QuestWorld::clear_actors() {
-    actors_.clear();
-    reference_bases_.clear();
+    run_or_defer([this] {
+        actors_.clear();
+        reference_bases_.clear();
+    });
 }
 
 void QuestWorld::set_reference_base(std::string_view reference, std::uint32_t base) {
-    reference_bases_[lower(reference)] = base;
+    run_or_defer([this, key = lower(reference), base] { reference_bases_[key] = base; });
 }
 
 bool QuestWorld::set_actor_variable(std::string_view reference, std::string_view variable, double value) {
@@ -457,7 +572,12 @@ std::optional<std::uint32_t> QuestWorld::reference_base(std::string_view referen
 }
 
 double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
-                       const DistanceFunction& distance) {
+                       const DistanceFunction& distance, int depth) {
+    if (depth > kMaxStageDepth) {
+        tick.parse_errors.push_back("SayTo chain deeper than " + std::to_string(kMaxStageDepth));
+        return 0.0;
+    }
+    RunGuard guard(*this);
     const auto* topic = find_topic_ ? find_topic_(topic_editor_id) : nullptr;
     if (!topic) {
         tick.unanswered.push_back("sayto");
@@ -475,7 +595,7 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     for (const auto& response : topic->responses) {
         auto* quest = find_form(response.quest);
         if (!quest || started_.count(quest) == 0 || !tried.insert(quest).second) continue;
-        const auto run = quest->run_topic(*topic, context, distance);
+        const auto run = quest->run_topic(*topic, context, distance, depth);
         if (!run.reply) continue;
         append_tick(tick, run.tick);
         // The line is recorded as spoken, so the scene can show it: its text, speaker, reply form and quest.
@@ -520,10 +640,17 @@ public:
         const auto* quest = !arguments.empty() && arguments[0].is_text ? world_.find(arguments[0].text) : nullptr;
         if (command == "getsecondspassed") return ScriptValue::from_number(seconds_);
         if (command == "getstage" && quest) return ScriptValue::from_number(quest->stage());
-        if (command == "getstagedone" && quest && arguments.size() >= 2)
-            return ScriptValue::from_number(quest->has_entered(static_cast<unsigned>(arguments[1].number)) ? 1.0 : 0.0);
+        if (command == "getstagedone" && quest && arguments.size() >= 2) {
+            unsigned stage = 0;
+            return ScriptValue::from_number(stage_number(arguments[1].number, stage) && quest->has_entered(stage) ? 1.0 : 0.0);
+        }
         if (command == "setstage" && quest && arguments.size() >= 2) {
-            world_.set_stage(arguments[0].text, static_cast<unsigned>(arguments[1].number), tick_, distance_, 0);
+            unsigned stage = 0;
+            if (!stage_number(arguments[1].number, stage)) {
+                tick_.parse_errors.push_back("SetStage with a stage that is not a valid number");
+                return ScriptValue::from_number(0.0);
+            }
+            world_.set_stage(arguments[0].text, stage, tick_, distance_, 0);
             take_writes_();
             return ScriptValue::from_number(0.0);
         }
@@ -579,6 +706,7 @@ private:
 
 void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double seconds_passed, const DistanceFunction& distance) {
     ScriptInterpreter interpreter(actor.ast);
+    interpreter.set_trace(false);
     actor.pending.clear();
     for (const auto& [key, value] : actor.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
     // Writes that other scripts made during this run (a stage the actor's SayTo set) replace what the run holds.
@@ -600,16 +728,26 @@ void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double 
 QuestTick QuestWorld::run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
                                        const DistanceFunction& distance) {
     QuestTick tick;
-    const auto ast = parse_script(script.source, lookup_);
-    for (const auto& diagnostic : ast.diagnostics)
+    RunGuard guard(*this);
+    // Parsed once; the variables the script's earlier events left are the ones this event starts with.
+    auto& cached = scripts_.get(script, lookup_);
+    for (const auto& diagnostic : cached.ast.diagnostics)
         tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
-    ScriptInterpreter interpreter(ast);
+    ScriptInterpreter interpreter(cached.ast);
+    interpreter.set_trace(false);
+    for (const auto& [key, value] : cached.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
     ActorTickHost host(*this, 0, tick, 0.0, distance, [] {});
     interpreter.run_event(event, detail, host);
+    for (const auto& [key, value] : interpreter.variables()) {
+        if (value.is_text) continue;
+        if (key.find('.') != std::string::npos) write_foreign_variable(this, key, value.number);
+        else cached.variables[key] = value.number;
+    }
     return tick;
 }
 
 void QuestWorld::set_stage(std::string_view editor_id, unsigned stage, QuestTick& tick, const DistanceFunction& distance, int depth) {
+    RunGuard guard(*this);
     auto* driver = find(editor_id);
     if (!driver) return;
     started_.insert(driver);
@@ -617,6 +755,7 @@ void QuestWorld::set_stage(std::string_view editor_id, unsigned stage, QuestTick
 }
 
 void QuestWorld::begin(std::string_view editor_id, QuestTick& tick, const DistanceFunction& distance, int depth) {
+    RunGuard guard(*this);
     auto* driver = find(editor_id);
     if (!driver || !started_.insert(driver).second) return;
     driver->enter_stage(0, tick, distance, depth);

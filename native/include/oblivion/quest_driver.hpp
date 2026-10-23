@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "oblivion/esm4_database.hpp"
@@ -44,6 +45,23 @@ struct TopicRun {
 
 class QuestWorld;
 
+// A parsed script of an actor or object, and the values of its variables between the events that run it. The script
+// is parsed once; each event continues with the variables the previous one left.
+struct CachedScript {
+    std::string source;                       // what `ast` was parsed from; a changed source is parsed again
+    ScriptAst ast;
+    std::map<std::string, double> variables;  // lowercase name
+};
+
+class ScriptCache {
+public:
+    // The entry for a script record (by form ID and editor ID), parsed on first use.
+    CachedScript& get(const ScriptRecord& script, const ScriptCommandLookup& lookup);
+
+private:
+    std::map<std::string, std::unique_ptr<CachedScript>> entries_;
+};
+
 // Drives one quest: keeps its stage and variables, runs the quest script's GameMode
 // block on every tick, and runs a stage's results when the stage is set.
 // Commands are recorded as actions for the caller to perform; the only answers the
@@ -59,7 +77,9 @@ public:
     QuestTick tick(double seconds_passed, const DistanceFunction& distance = {});
 
     // Speaks a topic: the first reply, in order, whose conditions hold for this context runs its result.
-    TopicRun run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance = {});
+    // `depth` counts the SayTo and SetStage hops that led here, and bounds the chain.
+    TopicRun run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance = {},
+                       int depth = 0);
 
     // Runs an event block of an actor's script (for example OnPackageDone with the package's name).
     // The actor's script may set this quest's stage, and the results of the new stage run.
@@ -89,14 +109,21 @@ public:
 
     // The registry this quest belongs to, for stages and conditions of other quests.
     void attach(QuestWorld* world) { world_ = world; }
+    const std::string& lower_editor_id() const { return lower_editor_id_; }
 
 private:
     friend class QuestTickHost;
+
+    ScriptCache& script_cache();
 
     const QuestRecord& quest_;
     const ScriptRecord& script_;
     ScriptCommandLookup lookup_;
     ScriptAst ast_;
+    std::string lower_editor_id_;  // lowercase editor ID, and the "id." prefix of this quest's variable keys
+    std::string prefix_;
+    std::set<unsigned> running_stages_;  // stages whose results are running now: entering one again is a cycle
+    ScriptCache own_scripts_;            // used when the quest belongs to no world
     unsigned stage_ = 0;
     QuestState state_;
     std::set<unsigned> entered_;
@@ -131,7 +158,8 @@ public:
     // Registers an actor whose script's GameMode runs on every tick, with its own variables. `form_id` is the NPC's base.
     void add_actor(std::uint32_t form_id, const ScriptRecord& script, std::string reference_name = {});
 
-    // Drops actor scripts and reference mappings for the cell being unloaded.
+    // Drops actor scripts and reference mappings for the cell being unloaded. While the world runs (a callback of
+    // the scene calls this in the middle of a tick) the change waits until the run ends.
     void clear_actors();
 
     QuestDriver* find(std::string_view editor_id);
@@ -151,8 +179,9 @@ public:
 
     // SayTo: the first reply of the topic whose conditions hold for this speaker and listener runs, and the
     // seconds it takes to speak are returned (0 when nothing is said).
+    // `depth` counts the hops of the chain (SayTo, SetStage) that led here; a chain deeper than the limit stops.
     double say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
-               const DistanceFunction& distance);
+               const DistanceFunction& distance, int depth = 0);
 
     // Runs an event of an object's script (OnTrigger with the player as the detail) in the world, as an actor's would run.
     QuestTick run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
@@ -175,6 +204,23 @@ public:
     void set_answer(WorldAnswer answer) { answer_ = std::move(answer); }
     const WorldAnswer& answer() const { return answer_; }
 
+    // Parsed scripts and variables of the actor and object scripts that run events here.
+    ScriptCache& script_cache() { return scripts_; }
+
+    // Marks the world as running for its lifetime, so changes to the actors wait until the outermost run ends.
+    class RunGuard {
+    public:
+        explicit RunGuard(QuestWorld& world) : world_(world) { ++world_.running_; }
+        ~RunGuard() {
+            if (--world_.running_ == 0) world_.apply_pending();
+        }
+        RunGuard(const RunGuard&) = delete;
+        RunGuard& operator=(const RunGuard&) = delete;
+
+    private:
+        QuestWorld& world_;
+    };
+
     void set_topic_finder(TopicFinder finder) { find_topic_ = std::move(finder); }
     void set_speech_length(SpeechLength length) { speech_length_ = std::move(length); }
 
@@ -187,6 +233,8 @@ private:
         std::map<std::string, double> pending;    // written by other scripts during a run, not yet taken by it
     };
 
+    void apply_pending();
+    void run_or_defer(std::function<void()> change);
     void run_actor_game_mode(ActorState& actor, QuestTick& tick, double seconds_passed, const DistanceFunction& distance);
 
     ScriptCommandLookup lookup_;
@@ -199,6 +247,11 @@ private:
     std::vector<std::unique_ptr<QuestDriver>> drivers_;
     std::vector<std::unique_ptr<ActorState>> actors_;
     std::set<QuestDriver*> started_;
+    std::unordered_map<std::string, QuestDriver*> by_editor_id_;  // lowercase editor ID
+    std::unordered_map<std::uint32_t, QuestDriver*> by_form_id_;
+    ScriptCache scripts_;
+    int running_ = 0;
+    std::vector<std::function<void()>> pending_;
 };
 
 } // namespace oblivion

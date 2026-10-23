@@ -13,6 +13,7 @@
 #include <NifFile.hpp>
 
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -1283,6 +1284,289 @@ void test_subtraction_after_variable_parses() {
     CHECK(fragment.diagnostics.empty());
 }
 
+// Commands the review tests use, matched without regard to case.
+oblivion::ScriptCommandLookup review_commands() {
+    return [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        std::string lowered(name);
+        for (auto& c : lowered) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lowered == "getstage") return oblivion::ScriptCommandSignature{1, 1};
+        if (lowered == "setstage") return oblivion::ScriptCommandSignature{2, 2};
+        if (lowered == "sayto") return oblivion::ScriptCommandSignature{2, 3};
+        if (lowered == "activate") return oblivion::ScriptCommandSignature{1, 3};
+        if (lowered == "getdistance") return oblivion::ScriptCommandSignature{1, 1};
+        return std::nullopt;
+    };
+}
+
+oblivion::QuestRecord review_quest(std::uint32_t form_id, std::string editor_id,
+                                   std::vector<std::pair<unsigned, std::string>> results) {
+    oblivion::QuestRecord quest;
+    quest.form_id = form_id;
+    quest.editor_id = std::move(editor_id);
+    for (auto& [index, source] : results) {
+        oblivion::QuestStage stage;
+        stage.index = static_cast<std::uint16_t>(index);
+        oblivion::QuestStageEntry entry;
+        entry.result_source = std::move(source);
+        stage.entries.push_back(std::move(entry));
+        quest.stages.push_back(std::move(stage));
+    }
+    return quest;
+}
+
+oblivion::ScriptRecord review_script(std::string editor_id, std::string source, std::vector<std::string> variables = {}) {
+    oblivion::ScriptRecord script;
+    script.editor_id = std::move(editor_id);
+    script.source = std::move(source);
+    std::uint32_t index = 1;
+    for (auto& name : variables) script.variables.push_back({index++, 1, std::move(name)});
+    return script;
+}
+
+oblivion::DialogTopic review_topic(std::string editor_id, std::uint32_t quest, std::string result) {
+    oblivion::DialogTopic topic;
+    topic.editor_id = std::move(editor_id);
+    oblivion::DialogResponse reply;
+    reply.form_id = 0x9000 + quest;
+    reply.quest = quest;
+    reply.text = "line";
+    reply.result_source = std::move(result);
+    topic.responses.push_back(std::move(reply));
+    return topic;
+}
+
+bool has_error(const oblivion::QuestTick& tick, const std::string& part) {
+    for (const auto& error : tick.parse_errors)
+        if (error.find(part) != std::string::npos) return true;
+    return false;
+}
+
+void test_actor_variables_stay_out_of_quest() {
+    // The NPC's script and the quest both declare `state`. The actor's events keep their own copy: the quest's value
+    // is untouched, and the actor's variables carry over between its events (run by the driver or by the world).
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xA00, "Q", {});
+    const auto quest_script = review_script("QScript", "scn Q\nshort state\nbegin GameMode\nend\n", {"state"});
+    auto& driver = world.add(quest, quest_script);
+    driver.state().variables["q.state"] = 3.0;
+    const auto actor_script = review_script("ActorScript",
+        "scn Actor\nshort state\nshort calls\n"
+        "begin OnPackageDone WalkB\n  set state to 7\n  set calls to calls + 1\n  Activate dummy calls\nend\n"
+        "begin OnPackageDone WalkC\n  set calls to calls + 10\n  Activate dummy calls\nend\n");
+    const auto first = driver.run_actor_event(actor_script, "OnPackageDone", "WalkB");
+    CHECK(driver.state().variables.at("q.state") == 3.0);
+    CHECK(first.actions.size() == 1 && first.actions[0].arguments[1].number == 1.0);
+    const auto object = world.run_object_event(actor_script, "OnPackageDone", "WalkC");
+    CHECK(object.actions.size() == 1 && object.actions[0].arguments[1].number == 11.0);
+    const auto again = driver.run_actor_event(actor_script, "OnPackageDone", "WalkB");
+    CHECK(again.actions[0].arguments[1].number == 12.0);
+    CHECK(driver.state().variables.at("q.state") == 3.0);
+    CHECK(driver.state().variables.count("q.calls") == 0);
+}
+
+void test_say_to_cycles_stop() {
+    // A:10 -> SayTo T1 -> SetStage A 20 -> SayTo T2 -> SetStage A 10: the cycle ends instead of recursing without bound.
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xB00, "A", {{10, "Spk.SayTo player T1\n"}, {20, "Spk.SayTo player T2\n"}});
+    const auto script = review_script("AScript", "scn A\n");
+    world.add(quest, script);
+    const auto t1 = review_topic("T1", 0xB00, "setstage A 20\n");
+    const auto t2 = review_topic("T2", 0xB00, "setstage A 10\n");
+    world.set_topic_finder([&](std::string_view id) { return id == "T1" ? &t1 : id == "T2" ? &t2 : nullptr; });
+    const auto started = world.start("A", 10);
+    CHECK(started.stage == 20);  // not 10: the second entry of stage 10 was refused
+    CHECK(has_error(started, "sets itself again"));
+
+    // A chain of distinct stages is bounded by its depth.
+    std::vector<std::pair<unsigned, std::string>> results;
+    std::vector<oblivion::DialogTopic> topics;
+    for (unsigned i = 1; i <= 30; ++i) {
+        results.push_back({i, "Spk.SayTo player Chain" + std::to_string(i) + "\n"});
+        topics.push_back(review_topic("Chain" + std::to_string(i), 0xB10, "setstage B " + std::to_string(i + 1) + "\n"));
+    }
+    oblivion::QuestWorld deep(review_commands());
+    const auto deep_quest = review_quest(0xB10, "B", results);
+    const auto deep_script = review_script("BScript", "scn B\n");
+    deep.add(deep_quest, deep_script);
+    deep.set_topic_finder([&](std::string_view id) -> const oblivion::DialogTopic* {
+        for (const auto& topic : topics)
+            if (topic.editor_id == id) return &topic;
+        return nullptr;
+    });
+    const auto run = deep.start("B", 1);
+    CHECK(run.stage < 30 && run.stage >= 2);
+    CHECK(has_error(run, "deeper than"));
+}
+
+void test_stage_oscillation_is_deterministic() {
+    // A:10 -> A:20 -> A:10 through stage results alone: the quest stays in 20 and each result ran once.
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xC00, "Osc", {{10, "Activate ten\nsetstage Osc 20\n"}, {20, "Activate twenty\nsetstage Osc 10\n"}});
+    const auto script = review_script("OscScript", "scn Osc\n");
+    world.add(quest, script);
+    const auto started = world.start("Osc", 10);
+    CHECK(started.stage == 20);
+    std::size_t activations = 0;
+    for (const auto& action : started.actions)
+        if (action.command == "Activate") ++activations;
+    CHECK(activations == 2);
+}
+
+void test_bare_quest_variables_in_results() {
+    // A stage result and a topic result read and write the quest's variable by its bare name.
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xD00, "Q", {{5, "if bDone == 0\n  set bDone to 1\n  Activate first\nendif\nif bDone == 1\n  Activate second\nendif\n"}});
+    const auto script = review_script("QScript", "scn Q\nshort bDone\nshort bOther\nbegin GameMode\nend\n", {"bDone", "bOther"});
+    auto& driver = world.add(quest, script);
+    const auto started = world.start("Q", 5);
+    CHECK(driver.state().variables.at("q.bdone") == 1.0);
+    CHECK(started.actions.size() == 2 && started.actions[0].arguments[0].text == "first" && started.actions[1].arguments[0].text == "second");
+    CHECK(driver.variable("bDone") == 1.0);
+
+    const auto topic = review_topic("T", 0xD00, "if bDone == 1\n  set bOther to 5\nendif\nset Q.bDone to 2\n");
+    oblivion::DialogueContext context;
+    const auto run = driver.run_topic(topic, context);
+    CHECK(run.reply != nullptr);
+    CHECK(driver.state().variables.at("q.bother") == 5.0);
+    CHECK(driver.state().variables.at("q.bdone") == 2.0);
+}
+
+void test_stale_foreign_variable() {
+    // A's GameMode sets B.x, then B's stage sets B.x to 9. The GameMode's cached copy does not overwrite it afterwards.
+    oblivion::QuestWorld world(review_commands());
+    const auto a = review_quest(0xE00, "A", {});
+    const auto a_script = review_script("AScript", "scn A\nbegin GameMode\n  set B.x to 1\n  setstage B 5\nend\n");
+    const auto b = review_quest(0xE10, "B", {{5, "set B.x to 9\n"}});
+    const auto b_script = review_script("BScript", "scn B\nshort x\nbegin GameMode\nend\n", {"x"});
+    world.add(a, a_script);
+    world.add(b, b_script);
+    world.start("A", 0);
+    world.tick(0.1);
+    CHECK(world.find("B")->variable("x") == 9.0);
+}
+
+void test_modulo_and_stage_numbers_are_safe() {
+    const auto ast = oblivion::parse_script(
+        "scn Mod\nshort a\nshort b\nshort c\nfloat d\n"
+        "begin GameMode\n"
+        "  set a to 7 % 0.5\n"
+        "  set b to 7 % 0 - 1\n"
+        "  set c to 7 % 3\n"
+        "  set d to 5 / 2\n"
+        "end\n");
+    oblivion::ScriptInterpreter interpreter(ast);
+    RecordingHost host;
+    interpreter.run("GameMode", host);
+    CHECK(interpreter.variables().at("a").number == 0.0);
+    CHECK(interpreter.variables().at("c").number == 1.0);
+    // A divisor of -1 and one that is not finite are refused rather than trapping.
+    const auto edge = oblivion::parse_script(
+        "scn Edge\nfloat r\nfloat s\nbegin GameMode\n  set r to 0 - 9000000000000000000 * 2\n  set s to r % 0 - 1\n  set s to s % r\nend\n");
+    oblivion::ScriptInterpreter edge_interpreter(edge);
+    edge_interpreter.run("GameMode", host);
+    CHECK(edge_interpreter.variables().at("s").number == 0.0);
+
+    // SetStage with a negative stage is refused in a stage result and in a GameMode.
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xF00, "N", {{1, "setstage N -1\n"}});
+    const auto script = review_script("NScript", "scn N\nfloat neg\nbegin GameMode\n  set neg to 0 - 5\n  setstage N neg\nend\n");
+    world.add(quest, script);
+    const auto started = world.start("N", 1);
+    CHECK(started.stage == 1 && has_error(started, "valid number"));
+    const auto ticked = world.tick(0.1);
+    CHECK(ticked.stage_changes.empty() && world.find("N")->stage() == 1);
+}
+
+void test_integer_semantics_and_unresolved_names() {
+    const auto ast = oblivion::parse_script(
+        "scn Ints\nshort i\nlong l\nfloat f\nshort r\n"
+        "begin GameMode\n"
+        "  set i to 5 / 2\n"
+        "  set l to 0 - 7 / 2\n"
+        "  set f to 5 / 2\n"
+        "  if typo\n    set r to 1\n  endif\n"
+        "  if !typo\n    set r to r + 2\n  endif\n"
+        "end\n");
+    oblivion::ScriptInterpreter interpreter(ast);
+    RecordingHost host;
+    interpreter.run("GameMode", host);
+    CHECK(interpreter.variables().at("i").number == 2.0);
+    CHECK(interpreter.variables().at("l").number == -3.0);
+    CHECK(interpreter.variables().at("f").number == 2.5);
+    // A name that is no variable is not a truth value: a misspelled variable is false, and `!` of it is true.
+    CHECK(interpreter.variables().at("r").number == 2.0);
+
+    // The trace can be turned off.
+    oblivion::ScriptInterpreter quiet(ast);
+    quiet.set_trace(false);
+    CHECK(quiet.run("GameMode", host).trace.empty());
+    CHECK(!interpreter.run("GameMode", host).trace.empty());
+}
+
+void test_parser_limits() {
+    // A missing `endif` is one diagnostic: the block's `end` and the next block are still read.
+    const auto missing = oblivion::parse_script(
+        "scn Missing\nbegin GameMode\n  if 1\n    set a to 1\nend\nbegin OnX\n  set b to 2\nend\n");
+    CHECK(missing.diagnostics.size() == 1);
+    CHECK(missing.diagnostics[0].message.find("endif") != std::string::npos);
+    CHECK(missing.blocks.size() == 2 && missing.blocks[1].body.size() == 1);
+
+    // Deeply nested parentheses, unary operators and ifs are reported, not recursed into.
+    const auto parens = oblivion::parse_script("scn P\nbegin GameMode\n  set a to " + std::string(5000, '(') + "1" +
+                                               std::string(5000, ')') + "\n  set b to 1\nend\n");
+    CHECK(!parens.diagnostics.empty() && parens.blocks.size() == 1 && parens.blocks[0].body.size() == 1);
+    const auto unary = oblivion::parse_script("scn U\nbegin GameMode\n  set a to " + std::string(5000, '-') + "1\nend\n");
+    CHECK(!unary.diagnostics.empty());
+    std::string nested = "scn D\nbegin GameMode\n";
+    for (int i = 0; i < 500; ++i) nested += "if 1\n";
+    for (int i = 0; i < 500; ++i) nested += "endif\n";
+    nested += "end\n";
+    CHECK(!oblivion::parse_script(nested).diagnostics.empty());
+}
+
+void test_world_changes_during_tick() {
+    // The scene's distance callback unloads the cell in the middle of the tick. The run goes on with the actors it
+    // had; the change takes effect when it ends.
+    oblivion::QuestWorld world(review_commands());
+    const auto actor = review_script("Act", "scn Act\nshort n\nbegin GameMode\n  set n to n + 1\n  if GetDistance player > 5\n    Activate far\n  endif\nend\n");
+    world.add_actor(0x100, actor, "RefA");
+    world.add_actor(0x101, actor, "RefB");
+    int calls = 0;
+    const oblivion::DistanceFunction distance = [&](std::string_view, std::string_view) -> std::optional<double> {
+        ++calls;
+        world.clear_actors();
+        world.add_actor(0x102, actor, "RefC");
+        return 10.0;
+    };
+    const auto first = world.tick(0.1, distance);
+    CHECK(calls == 2 && first.actions.size() == 2);
+    // The actors are the one added during the tick, after the clear.
+    world.tick(0.1, distance);
+    CHECK(calls == 3);
+}
+
+void test_global_comparison() {
+    // A condition compared against a global asks the host for it; an unknown global leaves the condition false.
+    struct GlobalHost final : oblivion::ScriptHost {
+        std::optional<oblivion::ScriptValue> call_command(std::string_view, const oblivion::ScriptValue*,
+                                                          const std::vector<oblivion::ScriptValue>&) override { return std::nullopt; }
+        std::optional<double> call_condition(std::uint16_t, std::uint32_t, std::uint32_t) override { return 3.0; }
+        std::optional<double> global_value(std::uint32_t form_id) override {
+            if (form_id == 0x77) return 3.0;
+            return std::nullopt;
+        }
+    } host;
+    oblivion::QuestCondition condition;
+    condition.function_index = 58;
+    condition.comparison_is_global = true;
+    condition.comparison_global_form_id = 0x77;
+    CHECK(oblivion::evaluate_conditions({condition}, host));
+    condition.comparison_global_form_id = 0x78;
+    std::vector<std::string> missing;
+    CHECK(!oblivion::evaluate_conditions({condition}, host, &missing));
+    CHECK(missing.size() == 1);
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -1339,6 +1623,16 @@ int main() {
         test_same_stage_is_ignored();
         test_dotted_condition_parses();
         test_subtraction_after_variable_parses();
+        test_actor_variables_stay_out_of_quest();
+        test_say_to_cycles_stop();
+        test_stage_oscillation_is_deterministic();
+        test_bare_quest_variables_in_results();
+        test_stale_foreign_variable();
+        test_modulo_and_stage_numbers_are_safe();
+        test_integer_semantics_and_unresolved_names();
+        test_parser_limits();
+        test_world_changes_during_tick();
+        test_global_comparison();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

@@ -19,6 +19,8 @@ struct ScriptValue {
     double number = 0.0;
     std::string text;
     bool is_text = false;
+    // A bare name that is no variable: text for the host to resolve (a quest, a reference), never a truth value.
+    bool unresolved = false;
 
     static ScriptValue from_number(double value) {
         ScriptValue result;
@@ -51,6 +53,13 @@ public:
         static_cast<void>(function_index);
         static_cast<void>(parameter1);
         static_cast<void>(parameter2);
+        return std::nullopt;
+    }
+
+    // The value of a GLOB record, for a condition compared against a global (CTDA "use global"). Returns
+    // nullopt when the host does not know it; the condition then counts as false.
+    virtual std::optional<double> global_value(std::uint32_t form_id) {
+        static_cast<void>(form_id);
         return std::nullopt;
     }
 
@@ -90,12 +99,21 @@ public:
     const std::map<std::string, ScriptValue>& variables() const { return variables_; }
     void set_variable(const std::string& name, ScriptValue value) { variables_[lower(name)] = std::move(value); }
 
+    // Marks a variable as a short or long: values assigned to it by `set` are truncated toward zero.
+    // The script's own `short`, `long` and `int` declarations are marked already.
+    void declare_integer(const std::string& name) { integers_.insert(lower(name)); }
+
+    // The trace holds one line per executed statement and is costly to build; the game turns it off.
+    void set_trace(bool enabled) { trace_enabled_ = enabled; }
+
     // Upper bound on statements per run, so a bad script cannot hang the game.
     void set_step_limit(std::size_t limit) { step_limit_ = limit; }
 
 private:
     const ScriptAst& script_;
     std::map<std::string, ScriptValue> variables_;  // keyed by lowercase name
+    std::set<std::string> integers_;                // lowercase names of short/long variables
+    bool trace_enabled_ = true;
     std::size_t step_limit_ = 100000;
     std::size_t steps_ = 0;
 
@@ -114,7 +132,10 @@ private:
     ScriptValue lookup_name(const std::string& name) const;
 
     static std::string lower(std::string_view text);
-    static bool truthy(const ScriptValue& value) { return value.number != 0.0 || (value.is_text && !value.text.empty()); }
+    static bool truthy(const ScriptValue& value) {
+        if (value.unresolved) return false;
+        return value.number != 0.0 || (value.is_text && !value.text.empty());
+    }
 };
 
 } // namespace oblivion
