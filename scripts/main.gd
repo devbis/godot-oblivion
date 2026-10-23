@@ -22,6 +22,14 @@ const PLAYER_DIRECTIONAL_KFS := {
 	"FastLeft": ["Characters/_male/walkfastleft.kf", "FastLeft"],
 	"FastRight": ["Characters/_male/walkfastright.kf", "FastRight"],
 }
+## Unarmed sneak clips, played while the player holds the crouch key. The sequence names match the walk clips.
+const PLAYER_SNEAK_KFS := {
+	"SneakIdle": ["Characters/_male/sneakidle.kf", "Idle"],
+	"SneakForward": ["Characters/_male/sneakforward.kf", "Forward"],
+	"SneakBackward": ["Characters/_male/sneakbackward.kf", "Backward"],
+	"SneakLeft": ["Characters/_male/sneakleft.kf", "Left"],
+	"SneakRight": ["Characters/_male/sneakright.kf", "Right"],
+}
 const PLAYER_JUMP_KFS := {
 	"JumpStart": ["Characters/_male/jumpstart.kf", "JumpStart"],
 	"JumpLoop": ["Characters/_male/jumploop.kf", "JumpLoop"],
@@ -2142,6 +2150,11 @@ func _load_deferred_player_assets() -> void:
 		var asset_path := str(animation_info[0])
 		await assets.meshes_for_model(asset_path)
 		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	for animation_name: String in PLAYER_SNEAK_KFS:
+		var animation_info: Array = PLAYER_SNEAK_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await assets.meshes_for_model(asset_path)
+		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
 	for animation_name: String in PLAYER_JUMP_KFS:
 		var animation_info: Array = PLAYER_JUMP_KFS[animation_name]
 		var asset_path := str(animation_info[0])
@@ -3449,15 +3462,18 @@ func _has_nearby_walkable_support() -> bool:
 	return support_normal.dot(Vector3.UP) >= cos(player.floor_max_angle)
 
 func _player_locomotion_animation(horizontal_speed: float) -> String:
+	var sneaking: bool = player.is_crouching
 	if horizontal_speed <= 0.08:
-		return "Idle"
+		return "SneakIdle" if sneaking and _player_animations.has("SneakIdle") else "Idle"
 	var local_velocity := Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z)
-	var is_fast := Input.is_action_pressed("run")
+	var is_fast := Input.is_action_pressed("run") and not sneaking
 	var direction_name := "Forward"
 	if absf(local_velocity.x) > absf(local_velocity.z):
 		direction_name = "Left" if local_velocity.x < 0.0 else "Right"
 	else:
 		direction_name = "Backward" if local_velocity.z > 0.0 else "Forward"
+	if sneaking and _player_animations.has("Sneak" + direction_name):
+		return "Sneak" + direction_name
 	return ("Fast" + direction_name) if is_fast else direction_name
 
 func _set_player_animation(animation_name: String) -> void:

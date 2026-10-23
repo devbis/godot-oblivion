@@ -21,11 +21,11 @@ extends CharacterBody3D
 @export var fly_speed_mps := 5.0
 @export var fly_fast_speed_mps := 15.0
 @export var chain_push_force_newtons := 20.0
-## Crouch values are prototype defaults, not measured from the original game. There is no crouch animation yet, so only the
-## collision capsule, movement speed, and camera height change.
+## Crouch values are prototype defaults, not measured from the original game. main.gd plays the original sneak clips while
+## `is_crouching`; the capsule, movement speed, and camera height change here.
 @export var crouch_speed_scale := 0.5
 @export var crouch_capsule_height_m := 1.0
-@export var crouch_camera_drop_m := 0.5
+@export var crouch_camera_drop_m := 0.4
 @export var crouch_blend_speed := 10.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
