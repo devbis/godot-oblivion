@@ -292,6 +292,9 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
         tick.parse_errors.push_back("stage chain deeper than " + std::to_string(kMaxStageDepth));
         return;
     }
+    // Setting the stage the quest is already in does nothing: its results do not run again, so a package whose
+    // OnPackageDone sets the stage does not restart its route every time.
+    if (stage == stage_ && has_entered(stage)) return;
     stage_ = stage;
     entered_.insert(stage);
     tick.stage_changes.push_back(std::to_string(stage));
@@ -424,12 +427,19 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     const auto run = quest->run_topic(*topic, context, distance);
     append_tick(tick, run.tick);
     if (!run.reply) return 0.0;
-    // The line is recorded as spoken, so the scene can show it.
+    // The line is recorded as spoken, so the scene can show it: its text, speaker, reply form and quest.
     ScriptAction speech;
     speech.command = "speech";
     speech.target = std::string(topic_editor_id);
     speech.arguments.push_back(ScriptValue::from_text(run.reply->text));
+    speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(speaker)));
+    speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(run.reply->form_id)));
+    speech.arguments.push_back(ScriptValue::from_text(quest->quest().editor_id));
     tick.actions.push_back(std::move(speech));
+    if (speech_length_) {
+        if (const auto seconds = speech_length_(speaker, quest->quest().editor_id, topic->editor_id, run.reply->form_id, run.reply->text))
+            return *seconds;
+    }
     return speech_seconds(run.reply->text);
 }
 
@@ -531,6 +541,18 @@ void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double 
     }
     for (const auto& [key, value] : actor.pending) actor.variables[key] = value;
     actor.pending.clear();
+}
+
+QuestTick QuestWorld::run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
+                                       const DistanceFunction& distance) {
+    QuestTick tick;
+    const auto ast = parse_script(script.source, lookup_);
+    for (const auto& diagnostic : ast.diagnostics)
+        tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
+    ScriptInterpreter interpreter(ast);
+    ActorTickHost host(*this, 0, tick, 0.0, distance, [] {});
+    interpreter.run_event(event, detail, host);
+    return tick;
 }
 
 void QuestWorld::set_stage(std::string_view editor_id, unsigned stage, QuestTick& tick, const DistanceFunction& distance, int depth) {

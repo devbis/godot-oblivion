@@ -1223,6 +1223,66 @@ void test_short_circuit() {
     CHECK(host.asked.empty());
 }
 
+void test_same_stage_is_ignored() {
+    // Setting the stage a quest is already in runs nothing: the stage's result runs once.
+    oblivion::QuestRecord quest;
+    quest.form_id = 0x870;
+    quest.editor_id = "Once";
+    oblivion::QuestStage stage3;
+    stage3.index = 3;
+    oblivion::QuestStageEntry entry;
+    entry.result_source = "Activate onceRan 1\n";
+    stage3.entries.push_back(entry);
+    quest.stages = {stage3};
+    oblivion::ScriptRecord script;
+    script.editor_id = "OnceScript";
+    script.source = "scn Once\n";
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "Activate") return oblivion::ScriptCommandSignature{1, 2};
+        return std::nullopt;
+    };
+    oblivion::QuestWorld world(commands);
+    world.add(quest, script);
+    const auto first = world.start("Once", 3);
+    CHECK(first.actions.size() == 1);
+    oblivion::QuestTick again;
+    world.set_stage("Once", 3, again, {}, 0);
+    CHECK(again.stage_changes.empty() && again.actions.empty());
+}
+
+void test_dotted_condition_parses() {
+    // A quest variable in an if condition (Ref.variable <= 0) is a read, not a command: it parses without diagnostics.
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "SayTo") return oblivion::ScriptCommandSignature{2, 3};
+        if (name == "getstage") return oblivion::ScriptCommandSignature{1, 1};
+        return std::nullopt;
+    };
+    const auto ast = oblivion::parse_script(
+        "scn Glenroy\n"
+        "begin gamemode\n"
+        "if getstage charactergen == 13\n"
+        "  if charactergen.convTimer <= 0\n"
+        "    SayTo player CharGenVoice 1\n"
+        "    set charactergen.convTimer to 7\n"
+        "  endif\n"
+        "endif\n"
+        "end\n", commands);
+    for (const auto& diagnostic : ast.diagnostics) std::cerr << "DIAG line " << diagnostic.line << ": " << diagnostic.message << "\n";
+    CHECK(ast.diagnostics.empty());
+}
+
+void test_subtraction_after_variable_parses() {
+    // `Ref.variable - .4` is a subtraction, even though `-` is followed by a number.
+    const oblivion::ScriptCommandLookup commands = [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
+        if (name == "setstage") return oblivion::ScriptCommandSignature{2, 2};
+        return std::nullopt;
+    };
+    const auto fragment = oblivion::parse_fragment(
+        "set characterGen.convTimer to characterGen.convTimer - .4 ; cut him off\nsetstage characterGen 9\n", commands);
+    for (const auto& diagnostic : fragment.diagnostics) std::cerr << "DIAG line " << diagnostic.line << ": " << diagnostic.message << "\n";
+    CHECK(fragment.diagnostics.empty());
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -1276,6 +1336,9 @@ int main() {
         test_cross_quest_variables();
         test_stage_writes_survive_game_mode();
         test_short_circuit();
+        test_same_stage_is_ignored();
+        test_dotted_condition_parses();
+        test_subtraction_after_variable_parses();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

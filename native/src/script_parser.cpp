@@ -345,7 +345,8 @@ private:
             member.children.push_back(std::move(call));
             return member;
         }
-        if (target.kind != ScriptExprKind::Name || starts_argument(line))
+        // After `Ref.variable`, a `-` is subtraction, even before a literal such as `.4`.
+        if (target.kind != ScriptExprKind::Name || starts_plain_argument(line))
             throw SyntaxError{line, "'" + name + "' is not a command"};
         target.text += "." + name;
         return target;
@@ -415,6 +416,15 @@ private:
     std::optional<ScriptCommandSignature> command_signature(std::string_view name) const {
         if (!lookup_) return ScriptCommandSignature{0, SIZE_MAX};
         return lookup_(name);
+    }
+
+    bool starts_plain_argument(std::size_t line) const {
+        const auto& token = peek();
+        if (token.line != line) return false;
+        if (token.kind == ScriptTokenKind::Identifier || token.kind == ScriptTokenKind::Number ||
+            token.kind == ScriptTokenKind::String)
+            return true;
+        return token.kind == ScriptTokenKind::Operator && token.text == "(";
     }
 
     bool starts_argument(std::size_t line) const {

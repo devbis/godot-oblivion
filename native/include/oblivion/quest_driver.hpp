@@ -118,6 +118,10 @@ public:
                                                                  const std::vector<ScriptValue>& arguments)>;
     // Finds a dialogue topic by editor ID, for SayTo.
     using TopicFinder = std::function<const DialogTopic*(std::string_view editor_id)>;
+    // Seconds a reply takes to say, from the speaker's base, the quest and topic, the reply's form ID and text; nullopt
+    // when the scene does not know (the length is then estimated from the text).
+    using SpeechLength = std::function<std::optional<double>(std::uint32_t speaker, std::string_view quest,
+                                                             std::string_view topic, std::uint32_t reply, std::string_view text)>;
 
     explicit QuestWorld(ScriptCommandLookup lookup);
 
@@ -147,6 +151,10 @@ public:
     double say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
                const DistanceFunction& distance);
 
+    // Runs an event of an object's script (OnTrigger with the player as the detail) in the world, as an actor's would run.
+    QuestTick run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
+                               const DistanceFunction& distance = {});
+
     // The NPC base a placed reference of the scene stands for, so that SayTo to the reference names its base.
     void set_reference_base(std::string_view reference, std::uint32_t base);
     std::optional<std::uint32_t> reference_base(std::string_view reference) const;
@@ -165,6 +173,7 @@ public:
     const WorldAnswer& answer() const { return answer_; }
 
     void set_topic_finder(TopicFinder finder) { find_topic_ = std::move(finder); }
+    void set_speech_length(SpeechLength length) { speech_length_ = std::move(length); }
 
 private:
     struct ActorState {
@@ -179,6 +188,7 @@ private:
     ScriptCommandLookup lookup_;
     WorldAnswer answer_;
     TopicFinder find_topic_;
+    SpeechLength speech_length_;
     std::map<std::string, std::uint32_t> reference_bases_;  // lowercase reference name -> NPC base
     std::uint32_t listener_race_ = 0;
     bool listener_female_ = false;
