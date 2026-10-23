@@ -5,6 +5,7 @@
  */
 #include "oblivion/nif_mesh.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <istream>
 #include <stdexcept>
@@ -65,22 +66,53 @@ protected:
 };
 
 using GlobalTransforms = std::unordered_map<const nifly::NiAVObject*, nifly::MatTransform>;
+using ParentMap = std::unordered_map<const nifly::NiAVObject*, const nifly::NiNode*>;
 
-// Composes transforms down the parent chain. Results are keyed by block
-// pointer, not node name, so duplicate names in one NIF resolve correctly.
-nifly::MatTransform global_transform(nifly::NifFile& file, const nifly::NiAVObject* object,
+// One pass over the blocks: child -> first node that lists it (the same answer
+// NifFile::GetParentNode gives, without a full scan per lookup).
+ParentMap build_parent_map(nifly::NifFile& file) {
+    ParentMap parents;
+    auto& header = file.GetHeader();
+    const auto block_count = header.GetNumBlocks();
+    for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
+        auto* node = header.GetBlock<nifly::NiNode>(block_index);
+        if (!node) continue;
+        for (const auto& child_ref : node->childRefs) {
+            if (child_ref.IsEmpty()) continue;
+            const auto* child = header.GetBlock<nifly::NiAVObject>(child_ref.index);
+            if (child) parents.emplace(child, node);
+        }
+    }
+    return parents;
+}
+
+// Composes transforms down the parent chain, iteratively so a malformed deep
+// chain cannot overflow the stack. Results are keyed by block pointer, not node
+// name, so duplicate names in one NIF resolve correctly. A parent cycle ends
+// the walk at the first repeated block.
+nifly::MatTransform global_transform(const ParentMap& parents, const nifly::NiAVObject* object,
                                      GlobalTransforms& cache) {
     nifly::MatTransform identity;
     identity.Clear();
     if (!object) return identity;
-    if (const auto cached = cache.find(object); cached != cache.end()) return cached->second;
-    // Placeholder first, so a malformed parent cycle terminates.
-    cache.emplace(object, identity);
-    const auto* parent = file.GetParentNode(const_cast<nifly::NiAVObject*>(object));
-    const auto parent_global = global_transform(file, parent, cache);
-    const auto result = parent_global.ComposeTransforms(object->GetTransformToParent());
-    cache[object] = result;
-    return result;
+    std::vector<const nifly::NiAVObject*> chain;
+    std::unordered_set<const nifly::NiAVObject*> seen;
+    nifly::MatTransform base = identity;
+    for (const auto* current = object; current;) {
+        if (const auto cached = cache.find(current); cached != cache.end()) {
+            base = cached->second;
+            break;
+        }
+        if (!seen.insert(current).second) break;
+        chain.push_back(current);
+        const auto parent = parents.find(current);
+        current = parent == parents.end() ? nullptr : parent->second;
+    }
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        base = base.ComposeTransforms((*it)->GetTransformToParent());
+        cache[*it] = base;
+    }
+    return cache.find(object) != cache.end() ? cache[object] : base;
 }
 
 void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
@@ -108,25 +140,35 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
         output.parent_local_vertices.push_back(to_godot(parent_inverse.ApplyTransform(world_vertex)));
     }
 
-    if (geometry->normals.size() == geometry->vertices.size()) {
-        output.normals.reserve(geometry->normals.size());
-        output.parent_local_normals.reserve(geometry->normals.size());
-        for (const auto& normal : geometry->normals) {
+    // Normals and UVs must match the vertex count for the consumer's parallel arrays. A
+    // present-but-wrong-length array is padded or truncated; an absent one stays empty.
+    if (!geometry->normals.empty()) {
+        output.normals.reserve(geometry->vertices.size());
+        output.parent_local_normals.reserve(geometry->vertices.size());
+        for (std::size_t i = 0; i < geometry->vertices.size(); ++i) {
+            const nifly::Vector3 normal = i < geometry->normals.size() ? geometry->normals[i]
+                                                                       : nifly::Vector3(0.0f, 0.0f, 1.0f);
             const auto world_normal = transform.ApplyTransformToDir(normal);
             output.normals.push_back(to_godot(world_normal));
             output.parent_local_normals.push_back(to_godot(parent_inverse.ApplyTransformToDir(world_normal)));
         }
     }
 
-    if (!geometry->uvSets.empty() && geometry->uvSets.front().size() == geometry->vertices.size()) {
-        output.uvs.reserve(geometry->uvSets.front().size());
-        for (const auto& uv : geometry->uvSets.front()) output.uvs.push_back({uv.u, uv.v});
+    if (!geometry->uvSets.empty() && !geometry->uvSets.front().empty()) {
+        const auto& uvs = geometry->uvSets.front();
+        output.uvs.reserve(geometry->vertices.size());
+        for (std::size_t i = 0; i < geometry->vertices.size(); ++i)
+            output.uvs.push_back(i < uvs.size() ? std::array<float, 2>{uvs[i].u, uvs[i].v}
+                                                : std::array<float, 2>{0.0f, 0.0f});
     }
 
     std::vector<nifly::Triangle> triangles;
     geometry->GetTriangles(triangles);
     output.indices.reserve(triangles.size() * 3);
+    const auto vertex_count = geometry->vertices.size();
     for (const auto& triangle : triangles) {
+        // A triangle that refers past the vertex array is dropped whole.
+        if (triangle.p1 >= vertex_count || triangle.p2 >= vertex_count || triangle.p3 >= vertex_count) continue;
         output.indices.push_back(triangle.p1);
         output.indices.push_back(triangle.p2);
         output.indices.push_back(triangle.p3);
@@ -164,28 +206,96 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
     }
 }
 
-void visit_node(nifly::NifFile& file, nifly::NiAVObject* object,
-                const nifly::MatTransform& parent_transform,
-                std::string_view parent_node_name,
-                std::unordered_set<const nifly::NiAVObject*>& visited,
-                std::vector<NifMeshData>& meshes) {
-    if (!object || !visited.insert(object).second) return;
-    const auto world_transform = parent_transform.ComposeTransforms(object->transform);
+// Depth-first, pre-order traversal with an explicit stack (children are visited in
+// order), so a deep chain in a malformed NIF cannot overflow the stack.
+void visit_scene(nifly::NifFile& file, nifly::NiAVObject* root, std::vector<NifMeshData>& meshes) {
+    struct Frame {
+        nifly::NiAVObject* object;
+        nifly::MatTransform parent_transform;
+        std::string parent_node_name;
+    };
+    nifly::MatTransform identity;
+    identity.Clear();
+    std::unordered_set<const nifly::NiAVObject*> visited;
+    std::vector<Frame> stack;
+    stack.push_back({root, identity, {}});
+    while (!stack.empty()) {
+        Frame frame = std::move(stack.back());
+        stack.pop_back();
+        auto* object = frame.object;
+        if (!object || !visited.insert(object).second) continue;
+        const auto world_transform = frame.parent_transform.ComposeTransforms(object->transform);
 
-    if (auto* shape = dynamic_cast<nifly::NiShape*>(object)) {
-        NifMeshData mesh;
-        append_shape(file, *shape, world_transform, parent_transform, parent_node_name, mesh);
-        if (mesh.vertices.size() >= 3 && mesh.indices.size() >= 3)
-            meshes.push_back(std::move(mesh));
-    }
+        if (auto* shape = dynamic_cast<nifly::NiShape*>(object)) {
+            NifMeshData mesh;
+            append_shape(file, *shape, world_transform, frame.parent_transform, frame.parent_node_name, mesh);
+            if (mesh.vertices.size() >= 3 && mesh.indices.size() >= 3)
+                meshes.push_back(std::move(mesh));
+        }
 
-    if (auto* node = dynamic_cast<nifly::NiNode*>(object)) {
-        for (const auto& child_ref : node->childRefs) {
-            if (child_ref.IsEmpty()) continue;
-            auto* child = file.GetHeader().GetBlock<nifly::NiAVObject>(child_ref.index);
-            visit_node(file, child, world_transform, node->name.get(), visited, meshes);
+        if (auto* node = dynamic_cast<nifly::NiNode*>(object)) {
+            const std::string node_name = node->name.get();
+            const auto first_child = stack.size();
+            for (const auto& child_ref : node->childRefs) {
+                if (child_ref.IsEmpty()) continue;
+                auto* child = file.GetHeader().GetBlock<nifly::NiAVObject>(child_ref.index);
+                if (child) stack.push_back({child, world_transform, node_name});
+            }
+            std::reverse(stack.begin() + static_cast<std::ptrdiff_t>(first_child), stack.end());
         }
     }
+}
+
+// Linear sample of a float key group, clamped at both ends.
+float sample_keys(const nifly::NiAnimationKeyGroup<float>& group, float time) {
+    const auto count = group.GetNumKeys();
+    if (count == 0) return 0.0f;
+    auto first = group.GetKey(0);
+    if (time <= first.time || count == 1) return first.value;
+    for (uint32_t i = 1; i < count; ++i) {
+        const auto next = group.GetKey(static_cast<int>(i));
+        if (time <= next.time) {
+            const auto previous = group.GetKey(static_cast<int>(i - 1));
+            const float span = next.time - previous.time;
+            if (span <= 0.0f) return next.value;
+            return previous.value + (next.value - previous.value) * ((time - previous.time) / span);
+        }
+    }
+    return group.GetKey(static_cast<int>(count - 1)).value;
+}
+
+// Converts separate X/Y/Z Euler key groups (XYZ_ROTATION_KEY, where quaternionKeys is
+// empty) into quaternion keys at the union of the key times. The rotation is
+// Rz * Ry * Rx (X applied first), the order Gamebryo uses. Returns false when the
+// data holds no Euler keys.
+bool euler_rotation_keys(const nifly::NiKeyframeData& data, std::vector<std::array<float, 5>>& out) {
+    if (!data.quaternionKeys.empty()) return false;
+    const nifly::NiAnimationKeyGroup<float>* groups[3] = {&data.xRotations, &data.yRotations, &data.zRotations};
+    std::vector<float> times;
+    for (const auto* group : groups)
+        for (uint32_t i = 0; i < group->GetNumKeys(); ++i) times.push_back(group->GetKey(static_cast<int>(i)).time);
+    if (times.empty()) return false;
+    std::sort(times.begin(), times.end());
+    times.erase(std::unique(times.begin(), times.end()), times.end());
+    struct Q { float w, x, y, z; };
+    const auto multiply = [](const Q& a, const Q& b) {
+        return Q{a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+                 a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                 a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                 a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+    };
+    for (const float time : times) {
+        const float half_x = sample_keys(data.xRotations, time) * 0.5f;
+        const float half_y = sample_keys(data.yRotations, time) * 0.5f;
+        const float half_z = sample_keys(data.zRotations, time) * 0.5f;
+        const Q qx{std::cos(half_x), std::sin(half_x), 0.0f, 0.0f};
+        const Q qy{std::cos(half_y), 0.0f, std::sin(half_y), 0.0f};
+        const Q qz{std::cos(half_z), 0.0f, 0.0f, std::sin(half_z)};
+        const Q q = multiply(qz, multiply(qy, qx));
+        const auto value = to_godot(nifly::Quaternion(q.w, q.x, q.y, q.z));
+        out.push_back({time, value[0], value[1], value[2], value[3]});
+    }
+    return true;
 }
 
 void copy_transform(const nifly::MatTransform& source, std::array<float, 3>& translation,
@@ -204,7 +314,8 @@ std::array<float, 3> havok_point_to_game_units(const nifly::Vector3& value) {
             converted[2] * kHavokToGameUnits};
 }
 
-void append_physics(nifly::NifFile& file, NifAssetData& result, GlobalTransforms& global_transforms) {
+void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap& parents,
+                    GlobalTransforms& global_transforms) {
     auto& header = file.GetHeader();
     const auto block_count = header.GetNumBlocks();
     std::unordered_map<uint32_t, std::string> body_node_names;
@@ -216,7 +327,7 @@ void append_physics(nifly::NifFile& file, NifAssetData& result, GlobalTransforms
         auto* target = header.GetBlock<nifly::NiAVObject>(collision->targetRef);
         if (!body || !target || target->name.get().empty()) continue;
 
-        const auto node_transform = global_transform(file, target, global_transforms);
+        const auto node_transform = global_transform(parents, target, global_transforms);
 
         NifPhysicsBodyData output;
         output.block_index = collision->bodyRef.index;
@@ -291,17 +402,19 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
 
     NifAssetData result;
     GlobalTransforms global_transforms;
+    const ParentMap parents = geometry_only ? ParentMap{} : build_parent_map(file);
     if (!geometry_only) {
         for (auto* node : file.GetNodes()) {
             NifNodeData output;
             output.name = node->name.get();
-            if (const auto* parent = file.GetParentNode(node)) output.parent_name = parent->name.get();
+            if (const auto parent = parents.find(node); parent != parents.end())
+                output.parent_name = parent->second->name.get();
             output.translation = to_godot(node->transform.translation);
             for (std::size_t row = 0; row < 3; ++row)
                 for (std::size_t column = 0; column < 3; ++column)
                     output.rotation_rows[row * 3 + column] = node->transform.rotation[row][column];
             output.scale = node->transform.scale;
-            copy_transform(global_transform(file, node, global_transforms), output.global_translation,
+            copy_transform(global_transform(parents, node, global_transforms), output.global_translation,
                            output.global_rotation_rows, output.global_scale);
             result.nodes.push_back(std::move(output));
         }
@@ -350,6 +463,8 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                     const auto value = to_godot(key.value);
                     track.rotations.push_back({key.time, value[0], value[1], value[2], value[3]});
                 }
+            } else if (transform_data && euler_rotation_keys(*transform_data, track.rotations)) {
+                // XYZ_ROTATION_KEY data was converted to quaternion keys.
             } else {
                 const auto& value = interpolator->rotation;
                 if (std::abs(value.w) < 1.0e30f && std::abs(value.x) < 1.0e30f &&
@@ -382,11 +497,8 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         if (result.animations.empty()) throw std::runtime_error("NIF has no NiNode root");
         return result;
     }
-    nifly::MatTransform identity;
-    identity.Clear();
-    std::unordered_set<const nifly::NiAVObject*> visited;
-    visit_node(file, root, identity, {}, visited, result.meshes);
-    if (!geometry_only) append_physics(file, result, global_transforms);
+    visit_scene(file, root, result.meshes);
+    if (!geometry_only) append_physics(file, result, parents, global_transforms);
     return result;
 }
 

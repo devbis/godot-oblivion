@@ -53,14 +53,24 @@ bool has_parent_component(std::string_view normalized) {
 std::map<std::string, std::filesystem::path, std::less<>> index_loose_files(const std::filesystem::path& root) {
     std::map<std::string, std::filesystem::path, std::less<>> index;
     std::error_code error;
-    for (std::filesystem::recursive_directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
-        if (!it->is_regular_file(error)) continue;
-        std::string key;
-        for (const auto& part : it->path().lexically_relative(root)) {
-            if (!key.empty()) key.push_back('\\');
-            key += lower_ascii(part.string());
+    std::filesystem::recursive_directory_iterator it(
+        root, std::filesystem::directory_options::skip_permission_denied, error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && it != end) {
+        std::error_code entry_error;
+        if (it->is_regular_file(entry_error) && !entry_error) {
+            std::string key;
+            for (const auto& part : it->path().lexically_relative(root)) {
+                if (!key.empty()) key.push_back('\\');
+                key += lower_ascii(part.string());
+            }
+            // Files that differ only by case map to one key; the lexicographically smallest
+            // on-disk path wins so the result does not depend on directory order.
+            const auto [slot, inserted] = index.emplace(std::move(key), it->path());
+            if (!inserted && it->path().string() < slot->second.string()) slot->second = it->path();
         }
-        index.emplace(std::move(key), it->path());
+        // A failed increment ends the walk (the iterator is then invalid); a failed entry is skipped.
+        it.increment(error);
     }
     return index;
 }

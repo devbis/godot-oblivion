@@ -11,6 +11,17 @@ set(NIFLY_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../extern/nifly" CACHE PATH "Path to
 if(NOT EXISTS "${NIFLY_PATH}/CMakeLists.txt")
     message(FATAL_ERROR "nifly sources are required at ${NIFLY_PATH}")
 endif()
+# nifly is built as a static library that ends up inside a shared module, so it needs PIC,
+# and an unconfigured CMAKE_BUILD_TYPE would build it (and NIF parsing) without optimization.
+# Both must be set before add_subdirectory so nifly picks them up.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        string(APPEND CMAKE_CXX_FLAGS " -O2")
+    elseif(MSVC)
+        string(APPEND CMAKE_CXX_FLAGS " /O2")
+    endif()
+endif()
 add_subdirectory("${NIFLY_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/nifly")
 
 add_library(oblivion_data_core STATIC
@@ -77,4 +88,9 @@ if(OPENOB_BUILD_TESTS)
     )
     target_link_libraries(format_fixture_tests PRIVATE oblivion_data_core)
     add_test(NAME format_fixture_tests COMMAND format_fixture_tests)
+    add_executable(format_hardening_tests
+        tests/format_hardening_tests.cpp
+    )
+    target_link_libraries(format_hardening_tests PRIVATE oblivion_data_core)
+    add_test(NAME format_hardening_tests COMMAND format_hardening_tests)
 endif()

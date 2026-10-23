@@ -12,6 +12,10 @@ namespace oblivion {
 struct QuestCondition {
     std::uint8_t operator_code = 0;
     float comparison = 0.0f;
+    // CTDA type flag 0x04 ("use global"): the compared value is the GLOB record with this
+    // form id, not `comparison` (which stays 0). The caller resolves it at evaluation time.
+    bool comparison_is_global = false;
+    std::uint32_t comparison_global_form_id = 0;
     std::uint16_t function_index = 0;
     std::uint32_t parameter1 = 0;
     std::uint32_t parameter2 = 0;
@@ -44,10 +48,18 @@ struct QuestRecord {
 
 // One INFO record of a dialogue topic: a reply the NPC can give when its conditions hold.
 // The result script runs when the reply is given (for example it can set a quest stage).
+// One spoken response of an INFO: TRDT's response number and the NAM1 text that follows it.
+struct DialogResponseLine {
+    std::uint8_t number = 0;
+    std::string text;
+    bool has_text = false;
+};
+
 struct DialogResponse {
     std::uint32_t form_id = 0;
     std::uint8_t flags = 0;                        // DATA byte 2: the response's flags (say once, goodbye, ...)
-    std::string text;                              // NAM1
+    std::string text;                              // NAM1 of the first response (see lines for all)
+    std::vector<DialogResponseLine> lines;         // TRDT response number + NAM1, in record order
     std::uint32_t quest = 0;                       // QSTI: the quest the reply belongs to
     std::vector<QuestCondition> conditions;        // CTDA
     std::vector<std::uint32_t> topic_links;        // TCLT: topics this reply leads to

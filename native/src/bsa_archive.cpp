@@ -179,7 +179,9 @@ void BsaArchive::open(const std::filesystem::path& path) {
             throw std::runtime_error("BSA folder file count exceeds header total");
         total_files += folder.count;
         std::vector<FileRecord> files;
-        files.reserve(folder.count);
+        // The count comes from the header, so cap the up-front reservation; the loop
+        // below fails on a truncated record table before the vector can grow large.
+        files.reserve(std::min<std::size_t>(folder.count, 65536));
         for (std::uint32_t i = 0; i < folder.count; ++i)
             files.push_back({reader.u64("file record"), reader.u32("file record"), reader.u32("file record")});
         folder_contents.emplace_back(std::move(folder_name), std::move(files));
@@ -188,23 +190,20 @@ void BsaArchive::open(const std::filesystem::path& path) {
         throw std::runtime_error("BSA file count does not match its folder records");
     reader.skip(folder_names_remaining, "remaining folder names");
 
+    // Read the whole name table at once (the read is bounds-checked against the file size).
+    if (file_names_remaining > archive_size - std::min(archive_size, reader.position()))
+        throw std::runtime_error("BSA filename table is out of bounds");
+    std::string name_table(file_names_remaining, '\0');
+    if (!name_table.empty()) reader.read(name_table.data(), name_table.size(), "filename table");
+    std::size_t name_cursor = 0;
     std::vector<std::vector<std::string>> filenames(folder_contents.size());
     for (std::size_t i = 0; i < folder_contents.size(); ++i) {
         filenames[i].reserve(folder_contents[i].second.size());
         for (std::size_t j = 0; j < folder_contents[i].second.size(); ++j) {
-            const auto name_start = reader.position();
-            std::string name;
-            bool terminated = false;
-            while (reader.position() - name_start < file_names_remaining) {
-                const char ch = static_cast<char>(reader.u8("filename table"));
-                if (ch == '\0') { terminated = true; break; }
-                name.push_back(ch);
-            }
-            if (!terminated) throw std::runtime_error("BSA filename is unterminated");
-            const auto consumed = static_cast<std::uint32_t>(name.size() + 1);
-            if (consumed > file_names_remaining) throw std::runtime_error("BSA filename table overrun");
-            file_names_remaining -= consumed;
-            filenames[i].push_back(std::move(name));
+            const auto nul = name_table.find('\0', name_cursor);
+            if (nul == std::string::npos) throw std::runtime_error("BSA filename is unterminated");
+            filenames[i].push_back(name_table.substr(name_cursor, nul - name_cursor));
+            name_cursor = nul + 1;
         }
     }
 
@@ -257,42 +256,47 @@ std::vector<std::uint8_t> BsaArchive::read(std::string_view asset_path) const {
 
 std::vector<std::uint8_t> BsaArchive::read_entry(const Entry& entry) const {
     if (!stream_) throw std::runtime_error("BSA archive is not open: " + path_.string());
-    std::scoped_lock lock(stream_->mutex);
-    StreamReader reader(stream_->input, archive_size_);
-    std::uint64_t cursor = entry.offset;
-    std::size_t stored_size = entry.stored_size;
-    if (archive_flags_ & kEmbeddedNames) {
-        reader.seek(cursor, "embedded asset name");
-        const auto name_length = reader.u8("embedded asset name length");
-        if (name_length > 0 && static_cast<std::size_t>(name_length) + 1 <= stored_size) {
-            std::string embedded_name(name_length, '\0');
-            reader.read(embedded_name.data(), embedded_name.size(), "embedded asset name");
-            if (!embedded_name.empty() && embedded_name.back() == '\0') embedded_name.pop_back();
-            const auto normalized_name = normalize_asset_path(embedded_name);
-            const auto separator = entry.path.find_last_of('\\');
-            const auto basename = separator == std::string::npos ? entry.path : entry.path.substr(separator + 1);
-            if (normalized_name == entry.path || normalized_name == basename) {
-                const auto prefix_size = static_cast<std::size_t>(name_length) + 1;
-                cursor += prefix_size;
-                stored_size -= prefix_size;
+    std::vector<std::uint8_t> payload;
+    std::uint32_t output_size = 0;
+    bool compressed = false;
+    {
+        // Only the file I/O is serialized; decompression below runs outside the lock.
+        std::scoped_lock lock(stream_->mutex);
+        StreamReader reader(stream_->input, archive_size_);
+        std::uint64_t cursor = entry.offset;
+        std::size_t stored_size = entry.stored_size;
+        if (archive_flags_ & kEmbeddedNames) {
+            reader.seek(cursor, "embedded asset name");
+            const auto name_length = reader.u8("embedded asset name length");
+            if (name_length > 0 && static_cast<std::size_t>(name_length) + 1 <= stored_size) {
+                std::string embedded_name(name_length, '\0');
+                reader.read(embedded_name.data(), embedded_name.size(), "embedded asset name");
+                if (!embedded_name.empty() && embedded_name.back() == '\0') embedded_name.pop_back();
+                const auto normalized_name = normalize_asset_path(embedded_name);
+                const auto separator = entry.path.find_last_of('\\');
+                const auto basename = separator == std::string::npos ? entry.path : entry.path.substr(separator + 1);
+                if (normalized_name == entry.path || normalized_name == basename) {
+                    const auto prefix_size = static_cast<std::size_t>(name_length) + 1;
+                    cursor += prefix_size;
+                    stored_size -= prefix_size;
+                }
             }
         }
-    }
 
-    const bool compressed = entry.size_compression_override != ((archive_flags_ & kArchiveCompress) != 0);
-    reader.seek(cursor, "asset payload");
-    if (!compressed) {
-        std::vector<std::uint8_t> result(stored_size);
-        if (!result.empty()) reader.read(result.data(), result.size(), "asset payload");
-        return result;
+        compressed = entry.size_compression_override != ((archive_flags_ & kArchiveCompress) != 0);
+        reader.seek(cursor, "asset payload");
+        if (!compressed) {
+            payload.resize(stored_size);
+            if (!payload.empty()) reader.read(payload.data(), payload.size(), "asset payload");
+            return payload;
+        }
+        if (stored_size < 4) throw std::runtime_error("BSA compressed entry lacks an output size");
+        output_size = reader.u32("compressed asset output size");
+        stored_size -= 4;
+        payload.resize(stored_size);
+        if (!payload.empty()) reader.read(payload.data(), payload.size(), "compressed asset");
     }
-    if (stored_size < 4) throw std::runtime_error("BSA compressed entry lacks an output size");
-    const auto output_size = reader.u32("compressed asset output size");
-    stored_size -= 4;
-    std::vector<std::uint8_t> compressed_data(stored_size);
-    if (!compressed_data.empty()) reader.read(compressed_data.data(), compressed_data.size(), "compressed asset");
-    return inflate_bounded(compressed_data.data(), compressed_data.size(), output_size,
-                           "BSA entry in " + path_.string());
+    return inflate_bounded(payload.data(), payload.size(), output_size, "BSA entry in " + path_.string());
 }
 
 } // namespace oblivion

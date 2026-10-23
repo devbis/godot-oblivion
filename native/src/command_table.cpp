@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <system_error>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -21,7 +24,8 @@ constexpr std::uint32_t kMinOpcode = 0x1000;
 constexpr std::uint32_t kMaxOpcode = 0x4000;
 constexpr std::uint32_t kMaxParameters = 20;
 constexpr std::size_t kMaxNameLength = 256;
-constexpr std::string_view kCacheHeader = "openob-command-table 1";
+constexpr std::string_view kCacheTrailer = "end";
+constexpr std::string_view kCacheHeader = "openob-command-table 2";
 
 // Parameter type ids as the executable's command table stores them.
 constexpr std::array<std::string_view, 38> kParameterTypeNames = {
@@ -206,6 +210,8 @@ std::string serialize(const std::vector<ScriptCommand>& commands, const std::str
         }
         text << '\n';
     }
+    // The trailer lets a reader tell a complete cache from one cut at a line boundary.
+    text << kCacheTrailer << '\t' << commands.size() << '\n';
     return text.str();
 }
 
@@ -231,8 +237,15 @@ std::optional<std::vector<ScriptCommand>> deserialize(const std::string& text, c
     if (!std::getline(input, header) || header != std::string(kCacheHeader) + '\t' + cache_name) return std::nullopt;
     std::vector<ScriptCommand> commands;
     std::string line;
+    bool complete = false;
     while (std::getline(input, line)) {
+        if (complete) return std::nullopt;
         const auto fields = split(line, '\t');
+        if (fields.size() == 2 && fields[0] == kCacheTrailer) {
+            if (std::stoul(fields[1]) != commands.size()) return std::nullopt;
+            complete = true;
+            continue;
+        }
         if (fields.size() != 5) return std::nullopt;
         ScriptCommand command;
         command.opcode = static_cast<std::uint32_t>(std::stoul(fields[0], nullptr, 16));
@@ -252,7 +265,16 @@ std::optional<std::vector<ScriptCommand>> deserialize(const std::string& text, c
         }
         commands.push_back(std::move(command));
     }
+    if (!complete) return std::nullopt;
     return commands;
+}
+
+// Names are written into a tab/newline separated cache, so a name holding a separator
+// would corrupt it. Such a name is treated as absent.
+std::string cache_safe_name(std::string name) {
+    for (const char c : name)
+        if (c == '\t' || c == '\n' || c == '\r' || c == '\0') return {};
+    return name;
 }
 
 } // namespace
@@ -308,8 +330,8 @@ std::vector<ScriptCommand> read_command_table(const std::vector<std::uint8_t>& e
     for (std::size_t offset = best->first; offset <= best->second; offset += kEntrySize) {
         const auto entry = read_entry(exe, offset);
         ScriptCommand command;
-        command.name = exe.c_string(entry.name).value_or("");
-        command.short_name = exe.c_string(entry.short_name).value_or("");
+        command.name = cache_safe_name(exe.c_string(entry.name).value_or(""));
+        command.short_name = cache_safe_name(exe.c_string(entry.short_name).value_or(""));
         command.opcode = entry.opcode;
         command.needs_parent = entry.parent != 0;
         const auto parameters_at = exe.file_offset(entry.parameters);
@@ -351,14 +373,28 @@ std::vector<ScriptCommand> load_command_table(const std::filesystem::path& execu
     }
 
     auto commands = read_command_table(bytes);
-    std::filesystem::create_directories(cache_dir);
-    // Write to a temporary name first, so an interrupted run never leaves a half-written cache.
-    const auto temporary = cache_file.string() + ".tmp";
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        output << serialize(commands, cache_name);
+    // The cache is an optimization: failing to write it must not lose the parsed table.
+    try {
+        std::filesystem::create_directories(cache_dir);
+        // Write to a process-unique temporary name first, so an interrupted run or a
+        // concurrent process never leaves a half-written cache in place.
+        static std::atomic<unsigned> counter{0};
+        const auto temporary = cache_file.string() + "." +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." +
+            std::to_string(counter.fetch_add(1)) + ".tmp";
+        const auto payload = serialize(commands, cache_name);
+        bool written = false;
+        {
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            output.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            output.flush();
+            written = static_cast<bool>(output);
+        }
+        std::error_code error;
+        if (written) std::filesystem::rename(temporary, cache_file, error);
+        if (!written || error) std::filesystem::remove(temporary, error);
+    } catch (const std::exception&) {
     }
-    std::filesystem::rename(temporary, cache_file);
     return commands;
 }
 

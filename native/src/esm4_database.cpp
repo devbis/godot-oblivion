@@ -119,6 +119,23 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+// Parses a 24-byte CTDA. When the "use global" flag (0x04) is set, the comparison field is the
+// form id of a GLOB record rather than a float.
+QuestCondition parse_condition(const std::uint8_t* value) {
+    QuestCondition condition;
+    condition.operator_code = value[0];
+    condition.function_index = u16(value + 8);
+    condition.parameter1 = u32(value + 12);
+    condition.parameter2 = u32(value + 16);
+    if ((condition.operator_code & 0x04) != 0) {
+        condition.comparison_is_global = true;
+        condition.comparison_global_form_id = u32(value + 4);
+    } else {
+        condition.comparison = f32(value + 4);
+    }
+    return condition;
+}
+
 bool is_runtime_visual_record(std::string_view type) {
     static constexpr std::array relevant_types = {
         std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
@@ -174,10 +191,12 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     float_game_settings_.clear();
     record_count_ = 0;
     unplaced_reference_count_ = 0;
+    unplaced_references_.clear();
     const auto bytes = read_file(path);
     parse_file(bytes, runtime_visuals_only);
     for (std::size_t index = 0; index < cells_.size(); ++index)
-        cell_by_editor_id_.try_emplace(lower_ascii(cells_[index].editor_id), index);
+        if (!cells_[index].editor_id.empty())
+            cell_by_editor_id_.try_emplace(lower_ascii(cells_[index].editor_id), index);
     for (auto& cell : cells_) {
         if (const auto water = worldspace_water_level_by_id_.find(cell.worldspace_form_id);
             water != worldspace_water_level_by_id_.end()) {
@@ -679,12 +698,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "PKID" && is_npc_base && subrecord_size >= 4) {
             npc.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {
-            QuestCondition condition;
-            condition.operator_code = value[0];
-            condition.comparison = f32(value + 4);
-            condition.function_index = u16(value + 8);
-            condition.parameter1 = u32(value + 12);
-            condition.parameter2 = u32(value + 16);
+            QuestCondition condition = parse_condition(value);
             ai_package.conditions.push_back(condition);
         } else if (tag == "PKDT" && is_ai_package) {
             if (subrecord_size >= 8) {
@@ -717,12 +731,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 quest.stages.back().entries.push_back(QuestStageEntry{});
                 quest.stages.back().entries.back().completes = value[0] != 0;
             } else if (tag == "CTDA" && subrecord_size >= 24 && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
-                QuestCondition condition;
-                condition.operator_code = value[0];
-                condition.comparison = f32(value + 4);
-                condition.function_index = u16(value + 8);
-                condition.parameter1 = u32(value + 12);
-                condition.parameter2 = u32(value + 16);
+                QuestCondition condition = parse_condition(value);
                 quest.stages.back().entries.back().conditions.push_back(condition);
             } else if (tag == "CNAM" && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
                 quest.stages.back().entries.back().log_text = read_zstring(value, subrecord_size);
@@ -738,16 +747,25 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             else if (tag == "FULL") topic.name = read_zstring(value, subrecord_size);
             else if (tag == "QSTI" && subrecord_size >= 4) topic.quests.push_back(u32(value));
         } else if (is_response) {
-            if (tag == "NAM1") response.text = read_zstring(value, subrecord_size);
-            else if (tag == "DATA" && subrecord_size >= 3) response.flags = value[2];
+            if (tag == "TRDT") {
+                // Each TRDT starts a response; the NAM1 that follows is that response's text.
+                DialogResponseLine line;
+                line.number = subrecord_size >= 13 ? value[12] : static_cast<std::uint8_t>(response.lines.size() + 1);
+                response.lines.push_back(std::move(line));
+            } else if (tag == "NAM1") {
+                auto text = read_zstring(value, subrecord_size);
+                if (response.lines.empty() || response.lines.back().has_text) {
+                    DialogResponseLine line;
+                    line.number = static_cast<std::uint8_t>(response.lines.size() + 1);
+                    response.lines.push_back(std::move(line));
+                }
+                response.lines.back().text = text;
+                response.lines.back().has_text = true;
+                if (response.lines.size() == 1) response.text = std::move(text);
+            } else if (tag == "DATA" && subrecord_size >= 3) response.flags = value[2];
             else if (tag == "QSTI" && subrecord_size >= 4) response.quest = u32(value);
             else if (tag == "CTDA" && subrecord_size >= 24) {
-                QuestCondition condition;
-                condition.operator_code = value[0];
-                condition.comparison = f32(value + 4);
-                condition.function_index = u16(value + 8);
-                condition.parameter1 = u32(value + 12);
-                condition.parameter2 = u32(value + 16);
+                QuestCondition condition = parse_condition(value);
                 response.conditions.push_back(condition);
             } else if (tag == "TCLT" && subrecord_size >= 4) response.topic_links.push_back(u32(value));
             else if (tag == "SCTX") {
@@ -764,7 +782,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             while (!script.source.empty() && script.source.back() == '\0') script.source.pop_back();
         } else if (tag == "SLSD" && is_script && subrecord_size >= 24) {
             // SLSD is followed by its SCVR name, so the variable is completed then.
-            script.variables.push_back({u32(value), u32(value + 16), {}});
+            script.variables.push_back({u32(value), static_cast<std::uint32_t>(value[16]), {}});
         } else if (tag == "SCVR" && is_script && !script.variables.empty()) {
             script.variables.back().name = read_zstring(value, subrecord_size);
         } else if (tag == "SCRO" && is_script && subrecord_size >= 4) {
