@@ -31,6 +31,8 @@ var _target_camera_distance := 2.0
 var _current_camera_distance := 2.0
 var _camera_collision_shape: SphereShape3D
 var _third_person := true
+var _normal_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
+var _first_person_eye_anchor := Vector3(0.0, 1.5, 0.0)
 var face_preview_enabled := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
@@ -45,7 +47,13 @@ var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
 
+var is_first_person: bool:
+	get:
+		return not face_preview_enabled and not _third_person
+
 func _ready() -> void:
+	_normal_camera_pivot_position = camera_pivot.position
+	_first_person_eye_anchor = _normal_camera_pivot_position
 	_camera_yaw = rotation.y
 	_target_camera_distance = camera_distance
 	_current_camera_distance = camera_distance
@@ -65,6 +73,12 @@ func set_spawn_yaw(yaw: float) -> void:
 	_camera_yaw = wrapf(yaw, -PI, PI)
 	rotation.y = _camera_yaw
 	_apply_camera_orbit()
+
+func set_first_person_eye_anchor(anchor: Vector3) -> void:
+	_first_person_eye_anchor = anchor
+	if is_first_person:
+		camera_pivot.position = _first_person_eye_anchor
+		camera.position = Vector3.ZERO
 
 func capture_mouse() -> void:
 	_capture_mouse_on_focus = true
@@ -175,7 +189,11 @@ func _notification(what: int) -> void:
 
 func _apply_camera_orbit() -> void:
 	if is_instance_valid(camera_pivot):
+		if not face_preview_enabled:
+			camera_pivot.position = _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
 		camera_pivot.rotation = Vector3(_camera_pitch, PI if face_preview_enabled else 0.0, 0.0)
+		if is_first_person:
+			camera.position = Vector3.ZERO
 
 func _set_camera_distance(distance: float) -> void:
 	var min_distance := FACE_PREVIEW_MIN_DISTANCE if face_preview_enabled else camera_zoom_min
@@ -265,6 +283,10 @@ func _update_camera_clearance(delta: float) -> void:
 	if is_flying:
 		_current_camera_distance = _target_camera_distance
 		camera.position = Vector3(camera_shoulder_offset, 0.0, _current_camera_distance)
+		return
+	if is_first_person:
+		_current_camera_distance = 0.0
+		camera.position = Vector3.ZERO
 		return
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = _camera_collision_shape
