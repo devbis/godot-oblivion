@@ -665,6 +665,7 @@ public:
             Dictionary item;
             item["name"] = String::utf8(node.name.c_str());
             item["parent_name"] = String::utf8(node.parent_name.c_str());
+            item["parent_reference_node"] = String::utf8(node.parent_reference_node.c_str());
             item["translation"] = Vector3(node.translation[0], node.translation[1], node.translation[2]);
             PackedFloat32Array rotation_rows;
             rotation_rows.resize(9);

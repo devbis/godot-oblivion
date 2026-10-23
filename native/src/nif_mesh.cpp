@@ -409,6 +409,12 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
             output.name = node->name.get();
             if (const auto parent = parents.find(node); parent != parents.end())
                 output.parent_name = parent->second->name.get();
+            for (const auto& extra_data_ref : node->extraDataRefs) {
+                const auto* extra_data = file.GetHeader().GetBlock<nifly::NiStringExtraData>(extra_data_ref);
+                if (!extra_data || extra_data->name.get() != "Prn") continue;
+                output.parent_reference_node = extra_data->stringData.get();
+                break;
+            }
             output.translation = to_godot(node->transform.translation);
             for (std::size_t row = 0; row < 3; ++row)
                 for (std::size_t column = 0; column < 3; ++column)

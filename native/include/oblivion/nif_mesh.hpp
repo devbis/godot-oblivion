@@ -30,6 +30,7 @@ struct NifMeshData {
 struct NifNodeData {
     std::string name;
     std::string parent_name;
+    std::string parent_reference_node;
     std::array<float, 3> translation{};
     std::array<float, 9> rotation_rows{};
     float scale = 1.0f;
