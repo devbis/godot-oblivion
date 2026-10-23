@@ -36,7 +36,12 @@ struct QuestTick {
     std::vector<ScriptAction> actions;           // stage results and GameMode calls, in order
     std::vector<std::string> unanswered;         // functions the driver could not answer (value 0)
     std::vector<std::string> parse_errors;
+    unsigned stage_entries = 0;                  // stages entered so far in this tick, counted against kMaxStageEntriesPerTick
 };
+
+// Total stages one tick may enter, over every branch of its stage chains. The depth limit alone bounds a chain, but a
+// stage that sets b stages each could still enter b^depth of them.
+constexpr unsigned kMaxStageEntriesPerTick = 256;
 
 struct TopicRun {
     const DialogResponse* reply = nullptr;  // the reply whose conditions held first, or null
@@ -201,6 +206,12 @@ public:
         listener_female_ = female;
     }
 
+    // The value of a GLOB record, for conditions compared against a global (CTDA "use global"). Nullopt: unknown,
+    // and the condition counts as false.
+    using GlobalValue = std::function<std::optional<double>(std::uint32_t form_id)>;
+    void set_global_value(GlobalValue value) { global_value_ = std::move(value); }
+    const GlobalValue& global_value() const { return global_value_; }
+
     void set_answer(WorldAnswer answer) { answer_ = std::move(answer); }
     const WorldAnswer& answer() const { return answer_; }
 
@@ -239,6 +250,7 @@ private:
 
     ScriptCommandLookup lookup_;
     WorldAnswer answer_;
+    GlobalValue global_value_;
     TopicFinder find_topic_;
     SpeechLength speech_length_;
     std::map<std::string, std::uint32_t> reference_bases_;  // lowercase reference name -> NPC base

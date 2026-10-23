@@ -430,6 +430,31 @@ void test_loose_assets(const std::filesystem::path& directory) {
     CHECK(rejected);
 }
 
+void test_loose_file_index_edge_cases(const std::filesystem::path& directory) {
+    namespace fs = std::filesystem;
+    const auto data = directory / "loose-edge";
+    write_bytes(data / "Oblivion.esm", esm_fixture());
+    // Files that differ only by case: possible on case-sensitive volumes only. The smallest on-disk path wins
+    // ("Meshes" sorts before "meshes"), whatever order the directory lists them in.
+    write_bytes(data / "meshes" / "case" / "dup.kf", Bytes{'l', 'o', 'w'});
+    write_bytes(data / "Meshes" / "Case" / "Dup.KF", Bytes{'u', 'p'});
+    std::error_code ec;
+    const bool collided = fs::exists(data / "Meshes" / "Case" / "Dup.KF", ec) && fs::exists(data / "meshes" / "case" / "dup.kf", ec)
+        && !fs::equivalent(data / "Meshes" / "Case" / "Dup.KF", data / "meshes" / "case" / "dup.kf", ec);
+    // A directory that cannot be listed loses only its own files; the rest of the tree is still indexed.
+    write_bytes(data / "aaa-locked" / "hidden.kf", Bytes{'x'});
+    write_bytes(data / "zzz-open" / "visible.kf", Bytes{'v'});
+    fs::permissions(data / "aaa-locked", fs::perms::none, ec);
+
+    oblivion::GameData game;
+    std::ostringstream log;
+    game.open(data, oblivion::GameData::LoadProfile::Full, &log);
+    fs::permissions(data / "aaa-locked", fs::perms::owner_all, ec);
+    CHECK(game.read_asset("zzz-open\\visible.kf") == Bytes{'v'});
+    if (collided) CHECK(game.read_asset("meshes\\case\\dup.kf") == (Bytes{'u', 'p'}));
+    else std::cerr << "note: volume is case-insensitive, case collision not exercised\n";
+}
+
 void test_script_lexer() {
     const auto tokens = oblivion::tokenize_script("scn Test ; comment\nshort x\nset x to 1.5\nif x >= 1\n\"msg\"\n");
     using Kind = oblivion::ScriptTokenKind;
@@ -850,7 +875,8 @@ void test_actor_package_event() {
     const auto event = driver.run_actor_event(actor_script, "OnPackageDone", "WalkB");
     CHECK(event.stage == 16);
     CHECK(event.stage_changes == std::vector<std::string>({"16"}));
-    CHECK(event.actions.size() == 1 && event.actions[0].command == "Activate");
+    // The SetStage is recorded first, then what the new stage did (the order a stage result gives too).
+    CHECK(event.actions.size() == 2 && event.actions[0].command == "setstage" && event.actions[1].command == "Activate");
     // The driver chooses a package by its own stage: stage 16 selects the package that waits for it.
     oblivion::AiPackageRecord at_fifteen;
     at_fifteen.editor_id = "AtFifteen";
@@ -1567,6 +1593,118 @@ void test_global_comparison() {
     CHECK(missing.size() == 1);
 }
 
+std::vector<std::string> action_commands(const oblivion::QuestTick& tick) {
+    std::vector<std::string> result;
+    for (const auto& action : tick.actions)
+        if (action.command != "speech") result.push_back(action.command);
+    return result;
+}
+
+void test_set_stage_order_is_the_same_everywhere() {
+    // The same commands leave the same actions in the same order whether they run as a stage result (collected,
+    // then applied) or in a GameMode / topic / actor script (applied at once): the command, then what it caused.
+    const std::vector<std::string> expected{"Activate", "setstage", "Activate", "Activate"};  // a, SetStage, n, b
+    oblivion::QuestWorld results_world(review_commands());
+    const auto results_quest = review_quest(0x1100, "Q", {{1, "Activate a\nsetstage Q 2\nActivate b\n"}, {2, "Activate n\n"}});
+    const auto plain_script = review_script("QScript", "scn Q\n");
+    results_world.add(results_quest, plain_script);
+    const auto from_results = results_world.start("Q", 1);
+    CHECK(action_commands(from_results) == expected);
+    CHECK(from_results.actions[2].arguments[0].text == "n" && from_results.actions[3].arguments[0].text == "b");
+
+    oblivion::QuestWorld mode_world(review_commands());
+    const auto mode_quest = review_quest(0x1101, "Q", {{0, ""}, {2, "Activate n\n"}});
+    const auto mode_script = review_script("QScript", "scn Q\nbegin GameMode\n  Activate a\n  setstage Q 2\n  Activate b\nend\n");
+    mode_world.add(mode_quest, mode_script);
+    mode_world.start("Q", 0);
+    const auto from_game_mode = mode_world.tick(0.1);
+    CHECK(action_commands(from_game_mode) == expected);
+    CHECK(from_game_mode.actions[2].arguments[0].text == "n" && from_game_mode.actions[3].arguments[0].text == "b");
+
+    // Through another quest, from a topic and from an actor's script.
+    const auto owner = review_quest(0x1102, "Owner", {{0, ""}});
+    const auto target = review_quest(0x1103, "Target", {{0, ""}, {2, "Activate n\n"}});
+    const auto owner_script = review_script("OwnerScript", "scn Owner\n");
+    const auto target_script = review_script("TargetScript", "scn Target\n");
+    oblivion::QuestWorld topic_world(review_commands());
+    topic_world.add(owner, owner_script);
+    topic_world.add(target, target_script);
+    topic_world.start("Owner", 0);
+    topic_world.start("Target", 0);
+    const auto topic = review_topic("T", 0x1102, "Activate a\nsetstage Target 2\nActivate b\n");
+    topic_world.set_topic_finder([&](std::string_view id) { return id == "T" ? &topic : nullptr; });
+    oblivion::QuestTick said;
+    topic_world.say("T", 0, 0, said, {});
+    CHECK(action_commands(said) == expected);
+
+    oblivion::QuestWorld actor_world(review_commands());
+    actor_world.add(target, target_script);
+    actor_world.start("Target", 0);
+    const auto actor_script = review_script("Act", "scn Act\nbegin GameMode\n  Activate a\n  setstage Target 2\n  Activate b\nend\n");
+    actor_world.add_actor(0x100, actor_script, "RefA");
+    CHECK(action_commands(actor_world.tick(0.1)) == expected);
+}
+
+void test_stage_chain_work_budget() {
+    // Every stage n sets stages 2n and 2n+1: eight levels of branching would enter 511 stages. One tick enters at
+    // most kMaxStageEntriesPerTick of them, and says so.
+    std::vector<std::pair<unsigned, std::string>> results;
+    for (unsigned n = 1; n < 256; ++n)
+        results.push_back({n, "setstage W " + std::to_string(2 * n) + "\nsetstage W " + std::to_string(2 * n + 1) + "\n"});
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0x1200, "W", results);
+    const auto script = review_script("WScript", "scn W\n");
+    world.add(quest, script);
+    const auto run = world.start("W", 1);
+    CHECK(run.stage_changes.size() == oblivion::kMaxStageEntriesPerTick);
+    CHECK(has_error(run, "stages entered in one tick"));
+    // The budget is per tick: the next one starts afresh.
+    CHECK(world.start("W", 300).stage_changes.size() == 1);
+}
+
+void test_global_condition_in_world() {
+    // A package condition compared against a GLOB reads the world's global source (CTDA "use global").
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0x1300, "G", {{3, ""}});
+    const auto script = review_script("GScript", "scn G\n");
+    auto& driver = world.add(quest, script);
+    double global = 3.0;
+    world.set_global_value([&](std::uint32_t form_id) -> std::optional<double> {
+        if (form_id == 0x77) return global;
+        return std::nullopt;
+    });
+    world.start("G", 3);
+    oblivion::AiPackageRecord package;
+    oblivion::QuestCondition condition;
+    condition.function_index = 58;  // GetStage
+    condition.parameter1 = 0x1300;
+    condition.comparison_is_global = true;
+    condition.comparison_global_form_id = 0x77;
+    package.conditions.push_back(condition);
+    const std::vector<const oblivion::AiPackageRecord*> packages{&package};
+    CHECK(driver.select_package(packages) == &package);
+    global = 4.0;
+    CHECK(driver.select_package(packages) == nullptr);
+    package.conditions[0].comparison_global_form_id = 0x78;  // unknown global: false
+    global = 3.0;
+    CHECK(driver.select_package(packages) == nullptr);
+}
+
+void test_modulo_of_the_smallest_integer() {
+    // LLONG_MIN % -1 traps in hardware; the interpreter refuses it (and anything at the edge) with 0.
+    const auto ast = oblivion::parse_script(
+        "scn Min\nfloat r\nfloat s\nfloat t\nbegin GameMode\n"
+        "  set r to 0 - 9223372036854775807 - 1\n"
+        "  set s to r % (0 - 1)\n"
+        "  set t to r % 7\n"
+        "end\n");
+    oblivion::ScriptInterpreter interpreter(ast);
+    RecordingHost host;
+    interpreter.run("GameMode", host);
+    CHECK(interpreter.variables().at("s").number == 0.0);
+    CHECK(interpreter.variables().at("t").number == 0.0);
+}
+
 void test_nif_mesh_decoder() {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
@@ -1604,6 +1742,7 @@ int main() {
         test_bsa_rejects_implausible_output_size(directory);
         test_esm4(directory);
         test_loose_assets(directory);
+        test_loose_file_index_edge_cases(directory);
         test_script_lexer();
         test_script_parser();
         test_command_table(directory);
@@ -1633,6 +1772,10 @@ int main() {
         test_parser_limits();
         test_world_changes_during_tick();
         test_global_comparison();
+        test_set_stage_order_is_the_same_everywhere();
+        test_stage_chain_work_budget();
+        test_global_condition_in_world();
+        test_modulo_of_the_smallest_integer();
         test_nif_mesh_decoder();
         std::filesystem::remove_all(directory);
         return 0;

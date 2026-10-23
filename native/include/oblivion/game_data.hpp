@@ -35,6 +35,7 @@ public:
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
+    [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const { return esm_.find_global_value(form_id); }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const { return esm_.find_quest(form_id); }
     [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return esm_.quests(); }
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const { return esm_.find_quest(editor_id); }

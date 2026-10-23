@@ -149,7 +149,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
         std::string_view("SLGM"), std::string_view("SGST"),
-        std::string_view("QUST"), std::string_view("SCPT"), std::string_view("DIAL"), std::string_view("INFO"),
+        std::string_view("QUST"), std::string_view("SCPT"), std::string_view("GLOB"), std::string_view("DIAL"), std::string_view("INFO"),
     };
     return std::find(relevant_types.begin(), relevant_types.end(), type) != relevant_types.end();
 }
@@ -189,6 +189,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
     float_game_settings_.clear();
+    global_value_by_id_.clear();
     record_count_ = 0;
     unplaced_reference_count_ = 0;
     unplaced_references_.clear();
@@ -375,6 +376,12 @@ const DialogTopic* Esm4Database::find_topic(std::uint32_t form_id) const {
     return it == topic_by_id_.end() ? nullptr : &it->second;
 }
 
+std::optional<float> Esm4Database::find_global_value(std::uint32_t form_id) const {
+    const auto found = global_value_by_id_.find(form_id);
+    if (found == global_value_by_id_.end()) return std::nullopt;
+    return found->second;
+}
+
 const QuestRecord* Esm4Database::find_quest(std::uint32_t form_id) const {
     const auto it = quest_by_id_.find(form_id);
     return it == quest_by_id_.end() ? nullptr : &it->second;
@@ -472,6 +479,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_cell = type == "CELL";
     bool is_reference = type == "REFR" || type == "ACHR" || type == "ACRE";
     bool is_game_setting = type == "GMST";
+    const bool is_global = type == "GLOB";
     bool is_npc_base = type == "NPC_";
     bool is_race = type == "RACE";
     bool is_outfit = type == "OTFT";
@@ -520,6 +528,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     std::string base_editor_id;
     // GMST DATA can precede EDID, so the value is held until the name is known.
     std::optional<float> game_setting_value;
+    std::optional<float> global_value;  // GLOB FLTV: every global is stored as a float, whatever its FNAM type
 
     std::size_t cursor = 0;
     while (cursor < data_size) {
@@ -803,9 +812,13 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             }
         } else if (tag == "DATA" && is_game_setting && subrecord_size >= 4) {
             game_setting_value = f32(value);
+        } else if (tag == "FLTV" && is_global && subrecord_size >= 4) {
+            global_value = f32(value);
         }
         cursor += subrecord_size;
     }
+
+    if (is_global && global_value) global_value_by_id_[form_id] = *global_value;
 
     if (is_game_setting && game_setting_value && !base_editor_id.empty() && base_editor_id.front() == 'f')
         float_game_settings_[base_editor_id] = *game_setting_value;

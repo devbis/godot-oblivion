@@ -57,6 +57,17 @@ std::string lower(std::string_view text) {
     return result;
 }
 
+// Records a SetStage or StartQuest as an action before it takes effect, the way a stage result's chain does
+// (QuestDriver::enter_stage records the action, then follows it). A script that runs in GameMode, a topic or an actor
+// event therefore leaves its actions in the same order as the same commands in a stage result: the command, then
+// what it caused.
+void record_quest_action(QuestTick& tick, std::string_view command, const std::vector<ScriptValue>& arguments) {
+    ScriptAction action;
+    action.command = std::string(command);
+    action.arguments = arguments;
+    tick.actions.push_back(std::move(action));
+}
+
 } // namespace
 
 // Answers the commands of GameMode and of stage results for one tick.
@@ -94,6 +105,7 @@ public:
                 return ScriptValue::from_number(0.0);
             }
             flush_variables();
+            record_quest_action(tick_, name, arguments);
             if (lower(arguments[0].text) == driver_.lower_editor_id_) driver_.enter_stage(stage, tick_, distance_, depth_ + 1);
             else driver_.world_->set_stage(arguments[0].text, stage, tick_, distance_, depth_ + 1);
             reload_variables();
@@ -101,6 +113,7 @@ public:
         }
         if (command == "startquest" && !arguments.empty() && arguments[0].is_text && driver_.world_ && driver_.world_->find(arguments[0].text)) {
             flush_variables();
+            record_quest_action(tick_, name, arguments);
             driver_.world_->begin(arguments[0].text, tick_, distance_, depth_ + 1);
             reload_variables();
             return ScriptValue::from_number(0.0);
@@ -280,6 +293,11 @@ public:
         return std::nullopt;
     }
 
+    std::optional<double> global_value(std::uint32_t form_id) override {
+        if (world_ && world_->global_value()) return world_->global_value()(form_id);
+        return std::nullopt;
+    }
+
 private:
     // This quest, or a quest of the same world with that form ID.
     const QuestDriver* find_quest(std::uint32_t form_id) const {
@@ -406,6 +424,14 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
         tick.parse_errors.push_back("stage " + std::to_string(stage) + " of " + quest_.editor_id + " sets itself again through its results");
         return;
     }
+    if (tick.stage_entries >= kMaxStageEntriesPerTick) {
+        if (tick.stage_entries == kMaxStageEntriesPerTick) {
+            ++tick.stage_entries;  // reported once; later entries are refused silently
+            tick.parse_errors.push_back("more than " + std::to_string(kMaxStageEntriesPerTick) + " stages entered in one tick");
+        }
+        return;
+    }
+    ++tick.stage_entries;
     struct Running {
         std::set<unsigned>& set;
         unsigned stage;
@@ -485,6 +511,7 @@ QuestTick QuestWorld::start(std::string_view editor_id, unsigned stage, const Di
 namespace {
 
 void append_tick(QuestTick& into, const QuestTick& from) {
+    into.stage_entries += from.stage_entries;
     into.stage_changes.insert(into.stage_changes.end(), from.stage_changes.begin(), from.stage_changes.end());
     into.actions.insert(into.actions.end(), from.actions.begin(), from.actions.end());
     into.unanswered.insert(into.unanswered.end(), from.unanswered.begin(), from.unanswered.end());
@@ -650,11 +677,13 @@ public:
                 tick_.parse_errors.push_back("SetStage with a stage that is not a valid number");
                 return ScriptValue::from_number(0.0);
             }
+            record_quest_action(tick_, name, arguments);
             world_.set_stage(arguments[0].text, stage, tick_, distance_, 0);
             take_writes_();
             return ScriptValue::from_number(0.0);
         }
         if (command == "startquest" && quest) {
+            record_quest_action(tick_, name, arguments);
             world_.begin(arguments[0].text, tick_, distance_, 0);
             take_writes_();
             return ScriptValue::from_number(0.0);

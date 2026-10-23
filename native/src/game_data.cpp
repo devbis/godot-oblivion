@@ -50,27 +50,53 @@ bool has_parent_component(std::string_view normalized) {
 // Indexes every loose file under root by its lowercase, backslash-separated
 // path relative to root. Lookups are then case-insensitive on any volume,
 // including case-sensitive ones where the on-disk directory names are mixed case.
-std::map<std::string, std::filesystem::path, std::less<>> index_loose_files(const std::filesystem::path& root) {
-    std::map<std::string, std::filesystem::path, std::less<>> index;
-    std::error_code error;
-    std::filesystem::recursive_directory_iterator it(
-        root, std::filesystem::directory_options::skip_permission_denied, error);
-    const std::filesystem::recursive_directory_iterator end;
-    while (!error && it != end) {
-        std::error_code entry_error;
-        if (it->is_regular_file(entry_error) && !entry_error) {
-            std::string key;
-            for (const auto& part : it->path().lexically_relative(root)) {
-                if (!key.empty()) key.push_back('\\');
-                key += lower_ascii(part.string());
-            }
-            // Files that differ only by case map to one key; the lexicographically smallest
-            // on-disk path wins so the result does not depend on directory order.
-            const auto [slot, inserted] = index.emplace(std::move(key), it->path());
-            if (!inserted && it->path().string() < slot->second.string()) slot->second = it->path();
+// The tree is walked one directory at a time, so a directory that cannot be listed or whose iteration fails
+// midway loses only its own remaining entries (reported to `log`), not the rest of the tree.
+std::map<std::string, std::filesystem::path, std::less<>> index_loose_files(const std::filesystem::path& root,
+                                                                           std::ostream* log) {
+    namespace fs = std::filesystem;
+    std::map<std::string, fs::path, std::less<>> index;
+    std::vector<fs::path> pending{root};
+    const auto report = [log](const fs::path& where, const std::error_code& error) {
+        if (log) *log << "OpenOB data index: loose files under " << where.string() << " skipped: " << error.message() << '\n';
+    };
+    while (!pending.empty()) {
+        const auto directory = std::move(pending.back());
+        pending.pop_back();
+        std::error_code error;
+        fs::directory_iterator it(directory, fs::directory_options::skip_permission_denied, error);
+        if (error) {
+            report(directory, error);
+            continue;
         }
-        // A failed increment ends the walk (the iterator is then invalid); a failed entry is skipped.
-        it.increment(error);
+        const fs::directory_iterator end;
+        while (it != end) {
+            std::error_code entry_error;
+            const auto& entry = *it;
+            // Symbolic links to directories are not followed, as a recursive walk would not, so a link cycle ends.
+            const auto link_status = entry.symlink_status(entry_error);
+            if (!entry_error && link_status.type() == fs::file_type::directory) {
+                pending.push_back(entry.path());
+            } else if (entry.is_regular_file(entry_error) && !entry_error) {
+                std::string key;
+                for (const auto& part : entry.path().lexically_relative(root)) {
+                    if (!key.empty()) key.push_back('\\');
+                    key += lower_ascii(part.string());
+                }
+                // Files that differ only by case map to one key; the lexicographically smallest
+                // on-disk path wins so the result does not depend on directory order.
+                const auto [slot, inserted] = index.emplace(std::move(key), entry.path());
+                if (!inserted && entry.path().string() < slot->second.string()) slot->second = entry.path();
+            }
+            // A failed increment leaves this directory's iterator unusable: the rest of this directory is skipped
+            // and reported, and the other directories are still walked.
+            std::error_code step_error;
+            it.increment(step_error);
+            if (step_error) {
+                report(directory, step_error);
+                break;
+            }
+        }
     }
     return index;
 }
@@ -141,7 +167,7 @@ void GameData::open(const std::filesystem::path& data_directory, LoadProfile pro
                  << " references have no owning cell in " << esm_path.string() << '\n';
     }
     data_directory_ = data_directory;
-    loose_files_ = index_loose_files(data_directory);
+    loose_files_ = index_loose_files(data_directory, log);
     archives_ = std::move(archives);
     archive_paths_ = std::move(archive_paths);
     esm_ = std::move(esm);

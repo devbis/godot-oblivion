@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -142,6 +143,8 @@ public:
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const;
+    // The initial value (FLTV) of a GLOB record, or nullopt when there is no such global.
+    [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const;
     [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const;
     [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return topic_by_id_; }
     [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return quest_by_id_; }
@@ -187,6 +190,7 @@ private:
     std::map<std::string, std::uint32_t> quest_id_by_editor_id_;
     std::map<std::string, std::uint32_t> script_id_by_editor_id_;
     std::map<std::string, float> float_game_settings_;
+    std::map<std::uint32_t, float> global_value_by_id_;
     std::size_t record_count_ = 0;
     std::size_t unplaced_reference_count_ = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> unplaced_references_;

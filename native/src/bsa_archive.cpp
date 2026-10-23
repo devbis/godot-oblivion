@@ -15,19 +15,11 @@
 #include <fstream>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 
 #include "inflate_bounded.hpp"
 
 namespace oblivion {
-
-struct BsaArchive::Stream {
-    explicit Stream(const std::filesystem::path& path) : input(path, std::ios::binary | std::ios::ate) {}
-
-    std::ifstream input;
-    std::mutex mutex;
-};
 
 namespace {
 
@@ -126,13 +118,13 @@ std::string normalize_asset_path(std::string_view path) {
 }
 
 void BsaArchive::open(const std::filesystem::path& path) {
-    auto stream = std::make_shared<Stream>(path);
-    if (!stream->input) throw std::runtime_error("cannot open " + path.string());
-    const auto end = stream->input.tellg();
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) throw std::runtime_error("cannot open " + path.string());
+    const auto end = input.tellg();
     if (end < 0 || static_cast<std::uint64_t>(end) < kHeaderSize)
         throw std::runtime_error("BSA header is truncated: " + path.string());
     const auto archive_size = static_cast<std::uint64_t>(end);
-    StreamReader reader(stream->input, archive_size);
+    StreamReader reader(input, archive_size);
     reader.seek(0, "header");
     const auto magic = reader.u32("magic");
     const auto version = reader.u32("version");
@@ -229,7 +221,7 @@ void BsaArchive::open(const std::filesystem::path& path) {
     archive_size_ = archive_size;
     archive_flags_ = archive_flags;
     entries_ = std::move(entries);
-    stream_ = std::move(stream);
+    opened_ = true;
 }
 
 bool BsaArchive::contains(std::string_view asset_path) const {
@@ -255,14 +247,16 @@ std::vector<std::uint8_t> BsaArchive::read(std::string_view asset_path) const {
 }
 
 std::vector<std::uint8_t> BsaArchive::read_entry(const Entry& entry) const {
-    if (!stream_) throw std::runtime_error("BSA archive is not open: " + path_.string());
+    if (!opened_) throw std::runtime_error("BSA archive is not open: " + path_.string());
     std::vector<std::uint8_t> payload;
     std::uint32_t output_size = 0;
     bool compressed = false;
     {
-        // Only the file I/O is serialized; decompression below runs outside the lock.
-        std::scoped_lock lock(stream_->mutex);
-        StreamReader reader(stream_->input, archive_size_);
+        // Each call reads through its own stream, so concurrent reads (and the
+        // decompression below) never serialize on a shared file position or mutex.
+        std::ifstream input(path_, std::ios::binary);
+        if (!input) throw std::runtime_error("cannot open " + path_.string());
+        StreamReader reader(input, archive_size_);
         std::uint64_t cursor = entry.offset;
         std::size_t stored_size = entry.stored_size;
         if (archive_flags_ & kEmbeddedNames) {

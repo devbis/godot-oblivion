@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -212,6 +213,14 @@ void test_esm_details(const std::filesystem::path& directory) {
     append(records, record("DIAL", 0x700, dial));
     append(records, group(0x700, 7, info_record(0x701)));
 
+    Bytes glob;
+    append(glob, zsub("EDID", "HardGlobal"));
+    subrecord(glob, "FNAM", Bytes{'f'});
+    Bytes fltv;
+    u32(fltv, 0x40200000);  // 2.5f
+    subrecord(glob, "FLTV", fltv);
+    append(records, record("GLOB", 0x1234, glob));
+
     Bytes script;
     append(script, zsub("EDID", "HardScript"));
     Bytes slsd(24, 0);
@@ -246,11 +255,16 @@ void test_esm_details(const std::filesystem::path& directory) {
     CHECK(script_record && script_record->variables.size() == 1 && script_record->variables[0].type == 3);
     CHECK(db.find_cell(0x720) != nullptr);
     CHECK(db.find_cell("") == nullptr);
+    // The global the CTDA above points at has an initial value, and an unknown one has none.
+    CHECK(db.find_global_value(0x1234) == std::optional<float>(2.5f));
+    CHECK(!db.find_global_value(0x1235).has_value());
+    db.open(path, true);  // the visuals-only profile keeps globals too: quest conditions need them
+    CHECK(db.find_global_value(0x1234) == std::optional<float>(2.5f));
     db.open(path);  // reopening resets state
     CHECK(db.unplaced_references().empty());
 }
 
-Bytes nif_with_euler_and_bad_triangle() {
+Bytes nif_with_euler_and_bad_triangle(bool all_axes = false) {
     nifly::NifFile file;
     file.Create(nifly::NiVersion::getOB());
     const std::vector<nifly::Vector3> vertices{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
@@ -267,6 +281,12 @@ Bytes nif_with_euler_and_bad_triangle() {
         key.type = nifly::LINEAR_KEY;
         data->zRotations.SetInterpolationType(nifly::LINEAR_KEY);
         data->zRotations.AddKey(key);
+        if (all_axes) {
+            data->xRotations.SetInterpolationType(nifly::LINEAR_KEY);
+            data->xRotations.AddKey(key);
+            data->yRotations.SetInterpolationType(nifly::LINEAR_KEY);
+            data->yRotations.AddKey(key);
+        }
     }
     const auto data_id = header.AddBlock(std::move(data));
     auto interpolator = std::make_unique<nifly::NiTransformInterpolator>();
@@ -314,6 +334,21 @@ void test_nif_hardening() {
     CHECK(std::abs(track.rotations[0][4] - 1.0f) < 1e-5f);
 }
 
+// X, Y and Z Euler keys of pi/2 each at t=1. The documented order is Rz * Ry * Rx (X applied first): rotating
+// the NIF point (1,0,0) gives X -> (1,0,0), Y -> (0,0,-1), Z -> (0,0,-1), i.e. a single 90 degree turn about
+// NIF Y, as the quaternion (x,y,z,w) = (0, s, 0, s) with s = sqrt(1/2). The Godot basis (x, z, -y) turns that into
+// (0, 0, -s, s). The opposite order (Rx * Ry * Rz) would be a turn about X and give (s, 0, 0, s) instead.
+void test_nif_euler_multi_axis_order() {
+    const auto asset = oblivion::decode_nif_asset(nif_with_euler_and_bad_triangle(true));
+    CHECK(asset.animations.size() == 1);
+    const auto& track = asset.animations[0].tracks.at(0);
+    CHECK(track.rotations.size() == 2);
+    const float s = std::sqrt(0.5f);
+    const auto& q = track.rotations[1];  // {time, x, y, z, w}
+    CHECK(std::abs(q[1]) < 1e-4f && std::abs(q[2]) < 1e-4f);
+    CHECK(std::abs(q[3] + s) < 1e-4f && std::abs(q[4] - s) < 1e-4f);
+}
+
 } // namespace
 
 int main() {
@@ -324,6 +359,7 @@ int main() {
         test_command_table_cache(directory);
         test_esm_details(directory);
         test_nif_hardening();
+        test_nif_euler_multi_axis_order();
         std::filesystem::remove_all(directory);
         return 0;
     } catch (const std::exception& error) {

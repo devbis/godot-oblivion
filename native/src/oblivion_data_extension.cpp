@@ -1103,6 +1103,11 @@ Ref<OblivionQuestWorld> OblivionData::create_quest_world(const String& executabl
         const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
         auto world = std::make_unique<oblivion::QuestWorld>(oblivion::make_command_lookup(commands));
         world->set_answer(oblivion::answer_fresh_player);
+        // CTDA "use global": the comparison is the FLTV of a GLOB record.
+        world->set_global_value([shared_game](std::uint32_t form_id) -> std::optional<double> {
+            if (const auto value = shared_game->find_global_value(form_id)) return static_cast<double>(*value);
+            return std::nullopt;
+        });
         world->set_topic_finder([shared_game](std::string_view editor_id) { return shared_game->find_topic_by_editor_id(editor_id); });
         for (const auto& [form_id, quest] : game->quests())
             if (const auto* script = game->find_script(quest.script_form_id)) world->add(quest, *script);
