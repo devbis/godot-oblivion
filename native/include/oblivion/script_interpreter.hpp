@@ -53,6 +53,13 @@ public:
         static_cast<void>(parameter2);
         return std::nullopt;
     }
+
+    // Called after a script variable is assigned. Hosts can keep aliases or
+    // externally persisted variables in sync with the interpreter.
+    virtual void variable_written(std::string_view name, const ScriptValue& value) {
+        static_cast<void>(name);
+        static_cast<void>(value);
+    }
 };
 
 struct ScriptRunResult {

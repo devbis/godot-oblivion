@@ -145,6 +145,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     cell_by_editor_id_.clear();
     base_model_by_id_.clear();
     base_editor_id_by_id_.clear();
+    script_form_id_by_id_.clear();
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
     race_face_gen_by_id_.clear();
@@ -201,6 +202,11 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
         for (auto& reference : cell.references) {
+            if (reference.script_form_id == 0) {
+                if (const auto script = script_form_id_by_id_.find(reference.base_form_id);
+                    script != script_form_id_by_id_.end())
+                    reference.script_form_id = script->second;
+            }
             if (auto model = base_model_by_id_.find(reference.base_form_id); model != base_model_by_id_.end())
                 reference.model_path = model->second;
             else if (auto world_model = world_item_model_by_id_.find(reference.base_form_id);
@@ -514,6 +520,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         check_range(data_size, cursor, subrecord_size, "subrecord data");
         const std::string_view tag(reinterpret_cast<const char*>(subrecord_type_data), 4);
         const auto* value = data + cursor;
+
+        if (tag == "SCRI" && subrecord_size >= 4)
+            script_form_id_by_id_[form_id] = u32(value);
 
         if (tag == "EDID") {
             const auto text = read_zstring(value, subrecord_size);

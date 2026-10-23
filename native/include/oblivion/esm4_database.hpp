@@ -162,6 +162,7 @@ private:
     std::map<std::uint32_t, std::size_t> cell_by_id_;
     std::map<std::uint32_t, std::string> base_model_by_id_;
     std::map<std::uint32_t, std::string> base_editor_id_by_id_;
+    std::map<std::uint32_t, std::uint32_t> script_form_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;

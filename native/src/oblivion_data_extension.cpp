@@ -384,6 +384,7 @@ public:
         const auto& race_asymmetric = race_shape_coefficients(race, false);
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(npc->form_id);
+        result["script_form_id"] = static_cast<int64_t>(npc->script_form_id);
         result["editor_id"] = as_string(npc->editor_id);
         result["name"] = as_string(npc->name);
         result["flags"] = static_cast<int64_t>(npc->flags);
@@ -835,6 +836,7 @@ private:
         Dictionary entry;
         entry["form_id"] = static_cast<int64_t>(reference.form_id);
         entry["base_form_id"] = static_cast<int64_t>(reference.base_form_id);
+        entry["script_form_id"] = static_cast<int64_t>(reference.script_form_id);
         entry["record_type"] = as_string(reference.record_type);
         entry["reference_name"] = as_string(reference.reference_name);
         entry["base_editor_id"] = as_string(reference.base_editor_id);
@@ -936,28 +938,29 @@ public:
     }
 
     // Runs an event of an object's script (OnTrigger with the player as the detail) in the world.
-    Dictionary run_object_event(const String& script_editor_id, const String& event, const String& detail, const Callable& distance) {
+    Dictionary run_object_event(int64_t script_form_id, const String& event, const String& detail, const Callable& distance) {
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
-        const auto* script = game ? game->find_script(utf8_value(script_editor_id)) : nullptr;
+        const auto* script = game ? game->find_script(static_cast<std::uint32_t>(script_form_id)) : nullptr;
         if (!script) return Dictionary();
         return tick_to_dictionary(world_->run_object_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
     }
 
     // Registers an NPC whose script's GameMode runs on every tick. False when the NPC or its script is missing.
-    bool add_actor(const String& npc_editor_id) {
+    bool add_actor(int64_t npc_form_id, const String& reference_name) {
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
-        const auto form_id = game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u;
+        const auto form_id = static_cast<std::uint32_t>(npc_form_id);
         const auto* npc = game ? game->find_npc_base(form_id) : nullptr;
         const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
         if (!script) return false;
-        world_->add_actor(form_id, *script);
+        world_->add_actor(form_id, *script, utf8_value(reference_name));
         return true;
     }
 
+    void clear_actors() { world_->clear_actors(); }
+
     // Names the NPC a placed reference of the scene stands for, so SayTo to that reference is to that NPC.
-    void set_reference_base(const String& reference_name, const String& npc_editor_id) {
-        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
-        world_->set_reference_base(utf8_value(reference_name), game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u);
+    void set_reference_base(const String& reference_name, int64_t npc_form_id) {
+        world_->set_reference_base(utf8_value(reference_name), static_cast<std::uint32_t>(npc_form_id));
     }
 
     // The length of a spoken reply, from the voice file the scene has for it (nothing when it has none).
@@ -1023,12 +1026,13 @@ public:
         ClassDB::bind_method(D_METHOD("start", "quest_editor_id", "stage", "distance"), &OblivionQuestWorld::start);
         ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestWorld::tick);
         ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
-        ClassDB::bind_method(D_METHOD("add_actor", "npc_editor_id"), &OblivionQuestWorld::add_actor);
-        ClassDB::bind_method(D_METHOD("run_object_event", "script_editor_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
+        ClassDB::bind_method(D_METHOD("add_actor", "npc_form_id", "reference_name"), &OblivionQuestWorld::add_actor);
+        ClassDB::bind_method(D_METHOD("clear_actors"), &OblivionQuestWorld::clear_actors);
+        ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
         ClassDB::bind_method(D_METHOD("set_speech_length", "length"), &OblivionQuestWorld::set_speech_length);
-        ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_editor_id"), &OblivionQuestWorld::set_reference_base);
+        ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_form_id"), &OblivionQuestWorld::set_reference_base);
         ClassDB::bind_method(D_METHOD("select_package", "quest_editor_id", "npc_editor_id"), &OblivionQuestWorld::select_package);
         ClassDB::bind_method(D_METHOD("run_actor_event", "quest_editor_id", "npc_editor_id", "event", "detail", "distance"),
                              &OblivionQuestWorld::run_actor_event);

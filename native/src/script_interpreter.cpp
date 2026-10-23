@@ -85,6 +85,7 @@ void ScriptInterpreter::run_statement(const ScriptStmt& statement, RunState& sta
     case ScriptStmtKind::Set: {
         const auto value = evaluate(statement.children[0], state);
         variables_[lower(statement.name)] = value;
+        state.host->variable_written(statement.name, value);
         state.result->trace.push_back("line " + std::to_string(statement.line) + ": set " + statement.name + " = " + describe(value));
         return;
     }

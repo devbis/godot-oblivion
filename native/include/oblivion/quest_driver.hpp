@@ -129,7 +129,10 @@ public:
     QuestDriver& add(const QuestRecord& quest, const ScriptRecord& script);
 
     // Registers an actor whose script's GameMode runs on every tick, with its own variables. `form_id` is the NPC's base.
-    void add_actor(std::uint32_t form_id, const ScriptRecord& script);
+    void add_actor(std::uint32_t form_id, const ScriptRecord& script, std::string reference_name = {});
+
+    // Drops actor scripts and reference mappings for the cell being unloaded.
+    void clear_actors();
 
     QuestDriver* find(std::string_view editor_id);
     QuestDriver* find_form(std::uint32_t form_id);
@@ -178,6 +181,7 @@ public:
 private:
     struct ActorState {
         std::uint32_t form_id = 0;
+        std::string reference_name;
         ScriptAst ast;
         std::map<std::string, double> variables;  // lowercase name, persists across ticks
         std::map<std::string, double> pending;    // written by other scripts during a run, not yet taken by it

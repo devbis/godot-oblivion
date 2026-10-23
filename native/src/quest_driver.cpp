@@ -52,8 +52,10 @@ std::string lower(std::string_view text) {
 // Answers the commands of GameMode and of stage results for one tick.
 class QuestTickHost final : public ScriptHost {
 public:
-    QuestTickHost(QuestDriver& driver, QuestTick& tick, double seconds, const DistanceFunction& distance, int depth)
-        : driver_(driver), tick_(tick), seconds_(seconds), distance_(distance), depth_(depth) {}
+    QuestTickHost(QuestDriver& driver, QuestTick& tick, double seconds, const DistanceFunction& distance, int depth,
+                  bool sync_quest_variables = true)
+        : driver_(driver), tick_(tick), seconds_(seconds), distance_(distance), depth_(depth),
+          sync_quest_variables_(sync_quest_variables) {}
 
     ScriptInterpreter* interpreter = nullptr;  // set by the driver; its variables are flushed before nested stages
 
@@ -105,6 +107,19 @@ public:
         return ScriptValue::from_number(0.0);
     }
 
+    void variable_written(std::string_view name, const ScriptValue& value) override {
+        if (!sync_quest_variables_ || !interpreter || value.is_text) return;
+        const auto key = lower(name);
+        const auto prefix = lower(driver_.quest_.editor_id) + ".";
+        if (key.compare(0, prefix.size(), prefix) == 0) {
+            const auto alias = key.substr(prefix.size());
+            if (is_declared_variable(alias))
+                interpreter->set_variable(alias, value);
+        } else if (key.find('.') == std::string::npos && is_declared_variable(key)) {
+            interpreter->set_variable(prefix + key, value);
+        }
+    }
+
     // Writes the GameMode variables into the quest's state (and other quests' variables into theirs), so a stage run sees them.
     void flush_variables() {
         if (!interpreter) return;
@@ -123,8 +138,13 @@ public:
         if (!interpreter) return;
         const auto prefix = lower(driver_.quest_.editor_id) + ".";
         for (const auto& declaration : driver_.script_.variables) {
-            const auto found = driver_.state_.variables.find(prefix + lower(declaration.name));
-            if (found != driver_.state_.variables.end()) interpreter->set_variable(declaration.name, ScriptValue::from_number(found->second));
+            const auto key = lower(declaration.name);
+            const auto found = driver_.state_.variables.find(prefix + key);
+            if (found != driver_.state_.variables.end()) {
+                const auto value = ScriptValue::from_number(found->second);
+                interpreter->set_variable(key, value);
+                interpreter->set_variable(prefix + key, value);
+            }
         }
     }
 
@@ -140,6 +160,12 @@ private:
     double seconds_;
     const DistanceFunction& distance_;
     int depth_;
+    bool sync_quest_variables_;
+
+    bool is_declared_variable(std::string_view name) const {
+        return std::any_of(driver_.script_.variables.begin(), driver_.script_.variables.end(),
+                           [name](const auto& declaration) { return lower(declaration.name) == name; });
+    }
 };
 
 QuestDriver::QuestDriver(const QuestRecord& quest, const ScriptRecord& script, ScriptCommandLookup lookup)
@@ -229,6 +255,10 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
     TopicRun run;
     DriverConditionHost conditions(*this, world_, &context);
     for (const auto& reply : topic.responses) {
+        // A DIAL may contain replies contributed by several quests. A SayTo
+        // must evaluate only this quest's INFO records; otherwise an earlier
+        // reply owned by another quest can mask the actor's matching line.
+        if (reply.quest != quest_.form_id) continue;
         if (!evaluate_conditions(reply.conditions, conditions)) continue;
         run.reply = &reply;
         break;
@@ -257,7 +287,7 @@ QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::st
     for (const auto& diagnostic : actor_ast.diagnostics)
         tick.parse_errors.push_back("line " + std::to_string(diagnostic.line) + ": " + diagnostic.message);
     ScriptInterpreter interpreter(actor_ast);
-    QuestTickHost host(*this, tick, 0.0, distance, 0);
+    QuestTickHost host(*this, tick, 0.0, distance, 0, false);
     host.interpreter = &interpreter;
     const auto result = interpreter.run_event(event, detail, host);
     host.flush_variables();
@@ -382,11 +412,22 @@ QuestTick QuestWorld::tick(double seconds_passed, const DistanceFunction& distan
     return result;
 }
 
-void QuestWorld::add_actor(std::uint32_t form_id, const ScriptRecord& script) {
+void QuestWorld::add_actor(std::uint32_t form_id, const ScriptRecord& script, std::string reference_name) {
+    if (!reference_name.empty()) {
+        const auto wanted = lower(reference_name);
+        for (const auto& actor : actors_)
+            if (lower(actor->reference_name) == wanted) return;
+    }
     auto actor = std::make_unique<ActorState>();
     actor->form_id = form_id;
+    actor->reference_name = std::move(reference_name);
     actor->ast = parse_script(script.source, lookup_);
     actors_.push_back(std::move(actor));
+}
+
+void QuestWorld::clear_actors() {
+    actors_.clear();
+    reference_bases_.clear();
 }
 
 void QuestWorld::set_reference_base(std::string_view reference, std::uint32_t base) {
@@ -396,8 +437,12 @@ void QuestWorld::set_reference_base(std::string_view reference, std::uint32_t ba
 bool QuestWorld::set_actor_variable(std::string_view reference, std::string_view variable, double value) {
     const auto base = reference_base(reference);
     if (!base) return false;
+    const auto wanted = lower(reference);
     for (const auto& actor : actors_) {
-        if (actor->form_id != *base) continue;
+        const bool matches = actor->reference_name.empty()
+            ? actor->form_id == *base
+            : lower(actor->reference_name) == wanted;
+        if (!matches) continue;
         actor->variables[lower(variable)] = value;
         actor->pending[lower(variable)] = value;
         return true;
@@ -418,35 +463,38 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
         tick.unanswered.push_back("sayto");
         return 0.0;
     }
-    QuestDriver* quest = nullptr;
-    for (const auto quest_form : topic->quests)
-        if ((quest = find_form(quest_form))) break;
-    if (!quest) {
-        tick.parse_errors.push_back("topic " + std::string(topic_editor_id) + " belongs to no quest in the world");
-        return 0.0;
-    }
     DialogueContext context;
     context.speaker_base = speaker;
     context.listener_base = listener;
     context.listener_race = listener_race_;
     context.listener_female = listener_female_;
-    const auto run = quest->run_topic(*topic, context, distance);
-    append_tick(tick, run.tick);
-    if (!run.reply) return 0.0;
-    // The line is recorded as spoken, so the scene can show it: its text, speaker, reply form and quest.
-    ScriptAction speech;
-    speech.command = "speech";
-    speech.target = std::string(topic_editor_id);
-    speech.arguments.push_back(ScriptValue::from_text(run.reply->text));
-    speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(speaker)));
-    speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(run.reply->form_id)));
-    speech.arguments.push_back(ScriptValue::from_text(quest->quest().editor_id));
-    tick.actions.push_back(std::move(speech));
-    if (speech_length_) {
-        if (const auto seconds = speech_length_(speaker, quest->quest().editor_id, topic->editor_id, run.reply->form_id, run.reply->text))
-            return *seconds;
+    // Topics can be shared by several quests. Resolve a reply through the
+    // quest that owns that INFO record, in the topic's authored response
+    // order, and ignore quests that have not started.
+    std::set<QuestDriver*> tried;
+    for (const auto& response : topic->responses) {
+        auto* quest = find_form(response.quest);
+        if (!quest || started_.count(quest) == 0 || !tried.insert(quest).second) continue;
+        const auto run = quest->run_topic(*topic, context, distance);
+        if (!run.reply) continue;
+        append_tick(tick, run.tick);
+        // The line is recorded as spoken, so the scene can show it: its text, speaker, reply form and quest.
+        ScriptAction speech;
+        speech.command = "speech";
+        speech.target = std::string(topic_editor_id);
+        speech.arguments.push_back(ScriptValue::from_text(run.reply->text));
+        speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(speaker)));
+        speech.arguments.push_back(ScriptValue::from_number(static_cast<double>(run.reply->form_id)));
+        speech.arguments.push_back(ScriptValue::from_text(quest->quest().editor_id));
+        tick.actions.push_back(std::move(speech));
+        if (speech_length_) {
+            if (const auto seconds = speech_length_(speaker, quest->quest().editor_id, topic->editor_id,
+                                                    run.reply->form_id, run.reply->text))
+                return *seconds;
+        }
+        return speech_seconds(run.reply->text);
     }
-    return speech_seconds(run.reply->text);
+    return 0.0;
 }
 
 namespace {
