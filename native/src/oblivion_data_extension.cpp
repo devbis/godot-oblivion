@@ -933,6 +933,14 @@ public:
         return value ? *value : -1.0;
     }
 
+    // Runs an event of an object's script (OnTrigger with the player as the detail) in the world.
+    Dictionary run_object_event(const String& script_editor_id, const String& event, const String& detail, const Callable& distance) {
+        const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
+        const auto* script = game ? game->find_script(utf8_value(script_editor_id)) : nullptr;
+        if (!script) return Dictionary();
+        return tick_to_dictionary(world_->run_object_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
+    }
+
     // Registers an NPC whose script's GameMode runs on every tick. False when the NPC or its script is missing.
     bool add_actor(const String& npc_editor_id) {
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
@@ -948,6 +956,22 @@ public:
     void set_reference_base(const String& reference_name, const String& npc_editor_id) {
         const auto* game = owner_.is_valid() ? owner_->game_data() : nullptr;
         world_->set_reference_base(utf8_value(reference_name), game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u);
+    }
+
+    // The length of a spoken reply, from the voice file the scene has for it (nothing when it has none).
+    void set_speech_length(const Callable& length) {
+        if (length.is_null() || !length.is_valid()) {
+            world_->set_speech_length(nullptr);
+            return;
+        }
+        world_->set_speech_length([length](std::uint32_t speaker, std::string_view quest, std::string_view topic, std::uint32_t reply,
+                                           std::string_view text) -> std::optional<double> {
+            const Variant value = length.call(static_cast<int64_t>(speaker), utf8_text(std::string(quest)), utf8_text(std::string(topic)),
+                                              static_cast<int64_t>(reply), utf8_text(std::string(text)));
+            if (value.get_type() == Variant::FLOAT) return static_cast<double>(value);
+            if (value.get_type() == Variant::INT) return static_cast<double>(static_cast<int64_t>(value));
+            return std::nullopt;
+        });
     }
 
     // The player as a dialogue listener: the race (by editor ID) and sex that topic conditions read.
@@ -998,8 +1022,10 @@ public:
         ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestWorld::tick);
         ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
         ClassDB::bind_method(D_METHOD("add_actor", "npc_editor_id"), &OblivionQuestWorld::add_actor);
+        ClassDB::bind_method(D_METHOD("run_object_event", "script_editor_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("set_speech_length", "length"), &OblivionQuestWorld::set_speech_length);
         ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_editor_id"), &OblivionQuestWorld::set_reference_base);
         ClassDB::bind_method(D_METHOD("select_package", "quest_editor_id", "npc_editor_id"), &OblivionQuestWorld::select_package);
         ClassDB::bind_method(D_METHOD("run_actor_event", "quest_editor_id", "npc_editor_id", "event", "detail", "distance"),

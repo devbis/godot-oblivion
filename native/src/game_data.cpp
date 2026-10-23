@@ -90,10 +90,13 @@ void GameData::open(const std::filesystem::path& data_directory, LoadProfile pro
     });
     const auto discovered_archive_count = bsa_paths.size();
     if (visual_runtime) {
-        constexpr std::array<std::string_view, 3> visual_archives = {
+        // The voices are read for the lines the scene speaks (their length), so the voice archives are kept too.
+        constexpr std::array<std::string_view, 5> visual_archives = {
             "oblivion - meshes.bsa",
             "oblivion - textures - compressed.bsa",
             "oblivion - misc.bsa",
+            "oblivion - voices1.bsa",
+            "oblivion - voices2.bsa",
         };
         std::erase_if(bsa_paths, [&visual_archives](const auto& path) {
             const auto filename = lower_ascii(path.filename().string());
