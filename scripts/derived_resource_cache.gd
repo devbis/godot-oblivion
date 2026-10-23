@@ -2,7 +2,7 @@ extends RefCounted
 ## Stores generated Godot resources in a cache directory: the ignored project cache when the game runs from the editor,
 ## and the user data directory in an exported build (res:// is read-only there).
 
-const CONVERTER_VERSION := "openob-resource-v4"
+const CONVERTER_VERSION := "openob-resource-v5"
 const EDITOR_CACHE_ROOT := "res://.godot/openob/cache/"
 const USER_CACHE_ROOT := "user://openob/cache/"
 ## Files beyond this total size are removed, oldest first, when the cache is first used in a run.
@@ -54,7 +54,7 @@ static func load_or_build_digest(source_digest: String, resource_kind: String, b
 	var built: Resource = builder.call()
 	if built == null:
 		return null
-	var save_error := ResourceSaver.save(built, cache_path)
+	var save_error := ResourceSaver.save(built, cache_path, ResourceSaver.FLAG_COMPRESS)
 	if save_error != OK and not _warned_write:
 		_warned_write = true
 		push_warning("Could not write derived resource cache %s: %s" % [cache_path, error_string(save_error)])

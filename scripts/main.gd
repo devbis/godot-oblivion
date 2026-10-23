@@ -3226,8 +3226,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
-	# The cell's zones, navigation and quest are set up once per cell, not after every streamed NPC, and only by the load
-	# that still belongs to the current cell.
+	await _setup_cell_once(stream_generation)
+
+## The cell's zones, navigation and quest are set up once per cell, not after every streamed NPC, and only by the load
+## that still belongs to the current cell. Cells without NPCs run it from the streaming update.
+func _setup_cell_once(stream_generation: int) -> void:
 	if _cell_setup_done or stream_generation != _npc_stream_generation:
 		return
 	_cell_setup_done = true
@@ -3485,9 +3488,19 @@ func _update_npc_streaming() -> void:
 			selected_priority = priority
 			selected_reference_id = reference_id
 	if selected_reference_id < 0:
+		if not _cell_setup_done and not current_cell.is_empty():
+			_npc_stream_busy = true
+			_setup_cell_without_npc.call_deferred(_npc_stream_generation)
 		return
 	_npc_stream_busy = true
 	_load_next_streamed_npc.call_deferred(current_cell, selected_reference_id, _npc_stream_generation)
+
+func _setup_cell_without_npc(stream_generation: int) -> void:
+	if stream_generation != _npc_stream_generation:
+		return
+	await _setup_cell_once(stream_generation)
+	if stream_generation == _npc_stream_generation:
+		_npc_stream_busy = false
 
 func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generation: int) -> void:
 	if stream_generation != _npc_stream_generation:
