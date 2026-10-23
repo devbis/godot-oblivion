@@ -855,8 +855,8 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			route_path = director.navigation_path((root as Node3D).global_position, position, _actor_collision_radius(root as Node3D))
 			for point: Vector3 in route_path:
 				waypoints.push_back({"position": point, "speed_mps": speed})
-	# A route that starts ends the idle: the actor walks.
-	if not waypoints.is_empty():
+	# A route that starts ends a whole-body idle: the actor walks. An upper-body idle (pointing, arms crossed) plays on over the walk.
+	if not waypoints.is_empty() and bool(actor.get("idle_active", false)) and not bool(actor.get("idle_upper_body", false)):
 		_end_npc_idle(actor)
 	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance)
 	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
@@ -3252,8 +3252,10 @@ func _update_npc_actors(delta: float) -> void:
 		var distance_to_player := actor_root.global_position.distance_to(player.global_position)
 		if distance_to_player > NPC_ANIMATION_DISTANCE_M:
 			continue
+		# A scripted idle keeps running out of view, so a gesture is not lost when the actor is looked at again.
 		if (
 			distance_to_player > NPC_ANIMATION_ALWAYS_NEAR_M
+			and not bool(actor.get("idle_active", false))
 			and camera != null
 			and not camera.is_position_in_frustum(actor_root.global_position + Vector3.UP)
 		):
@@ -3265,10 +3267,16 @@ func _update_npc_actors(delta: float) -> void:
 		var horizontal_speed := Vector2(actor_root.velocity.x, actor_root.velocity.z).length()
 		var requested_animation := "Idle"
 		var animations: Dictionary = actor.get("animations", {})
+		var base_name := "Idle"
+		var upper_body_idle := bool(actor.get("idle_active", false)) and bool(actor.get("idle_upper_body", false))
 		if walking:
 			requested_animation = "FastForward" if horizontal_speed > 2.2 else "Forward"
-			_end_npc_idle(actor)
-		elif bool(actor.get("idle_active", false)):
+			if animations.get(requested_animation, {}).is_empty():
+				requested_animation = "Forward"
+			base_name = requested_animation
+			if not upper_body_idle:
+				_end_npc_idle(actor)
+		if bool(actor.get("idle_active", false)):
 			var idle_animation: Dictionary = animations.get(NPC_IDLE_KEY, {})
 			# A clip that plays once ends at its last key and the actor returns to its default idle.
 			if idle_animation.is_empty() or (
@@ -3303,7 +3311,9 @@ func _update_npc_actors(delta: float) -> void:
 				if pose_value is Dictionary:
 					pose_from.push_back(pose_value)
 		_apply_animation_pose(
-			skeleton, animation, float(actor["animation_time"]), bool(animation.get("loops", true)), pose_from, blend_weight
+			skeleton, animation, float(actor["animation_time"]), bool(animation.get("loops", true)), pose_from, blend_weight,
+			animations.get(base_name, {}) if requested_animation == NPC_IDLE_KEY else {},
+			requested_animation == NPC_IDLE_KEY and walking
 		)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
@@ -3348,6 +3358,11 @@ func _start_npc_idle(actor: Dictionary, kf_path: String, idle_id: String) -> voi
 	var animations: Dictionary = actor.get("animations", {})
 	animations[NPC_IDLE_KEY] = animation
 	actor["idle_active"] = true
+	# The IDLE record's group flag is not a reliable marker (PointForward is group 4, "special idle"), and gestures such as
+	# PointDownward or HoldUp key a few leg bones too. A clip that plays once is a gesture: it plays on over the walk (leg
+	# tracks skipped, the walk cycle underneath) instead of ending when the actor starts walking. Looping clips are states
+	# (praying, sitting) and end when the actor walks.
+	actor["idle_upper_body"] = not bool(animation.get("loops", true))
 	# The pose to blend from is captured when the requested clip changes (see _update_npc_actors); a clip replaced by
 	# another starts from the first clip's pose, so force the change.
 	if str(actor.get("active_animation", "")) == NPC_IDLE_KEY:
@@ -3356,11 +3371,15 @@ func _start_npc_idle(actor: Dictionary, kf_path: String, idle_id: String) -> voi
 		str(actor.get("reference_name", "")), idle_id, kf_path, "loops" if bool(animation.loops) else "once"
 	])
 
+func _is_leg_bone_name(bone_name: String) -> bool:
+	return bone_name.contains("Thigh") or bone_name.contains("Calf") or bone_name.contains("Foot") or bone_name.contains("Toe") or bone_name.contains("Pelvis")
+
 func _end_npc_idle(actor: Dictionary) -> void:
 	actor["idle_request"] = int(actor.get("idle_request", 0)) + 1
 	if not bool(actor.get("idle_active", false)):
 		return
 	actor["idle_active"] = false
+	actor["idle_upper_body"] = false
 	(actor.get("animations", {}) as Dictionary).erase(NPC_IDLE_KEY)
 	print("OpenOB npc idle: %s returns to its default idle" % str(actor.get("reference_name", "")))
 
@@ -3572,7 +3591,8 @@ func _update_player_animation(delta: float) -> void:
 		_animation_time,
 		_active_animation not in ["JumpStart", "JumpLand"] and bool(animation.get("loops", true)),
 		_player_animation_from_pose,
-		blend_weight
+		blend_weight,
+		_player_animations.get("Idle", {}) if _active_animation == GESTURE_KEY else {}
 	)
 	if blend_weight >= 1.0:
 		_player_animation_from_pose.clear()
@@ -3795,13 +3815,17 @@ func _capture_skeleton_pose(skeleton: Skeleton3D) -> Array[Dictionary]:
 		}
 	return pose
 
+## `base_animation` is played under the clip: many original idles (pointing, arms crossed, the CharGen gestures) only
+## key the upper body, and without a base the unkeyed bones would stay in the bind pose (a T-pose).
 func _apply_animation_pose(
 	skeleton: Skeleton3D,
 	animation: Dictionary,
 	time: float,
 	looping: bool = true,
 	pose_from: Array[Dictionary] = [],
-	blend_weight := 1.0
+	blend_weight := 1.0,
+	base_animation: Dictionary = {},
+	skip_leg_tracks := false
 ) -> void:
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
@@ -3810,22 +3834,13 @@ func _apply_animation_pose(
 		return
 	var sample_time := start_time + fposmod(time - start_time, duration) if looping else clampf(time, start_time, stop_time)
 	skeleton.reset_bone_poses()
-	for track_value: Variant in animation.get("tracks", []):
-		var track: Dictionary = track_value
-		var bone_index := int(track.get("bone_index", -1))
-		if bone_index < 0:
-			continue
-		var bone_name := str(track.get("node_name", ""))
-		var translations: PackedFloat32Array = track.get("translations", PackedFloat32Array())
-		if translations.size() >= 4 and bone_name != "Bip01":
-			skeleton.set_bone_pose_position(bone_index, _sample_vector_keys(translations, 4, sample_time))
-		var rotations: PackedFloat32Array = track.get("rotations", PackedFloat32Array())
-		if rotations.size() >= 5:
-			skeleton.set_bone_pose_rotation(bone_index, _sample_quaternion_keys(rotations, sample_time))
-		var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
-		if scales.size() >= 2:
-			var scale_value := _sample_scalar_keys(scales, sample_time)
-			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * scale_value)
+	if not base_animation.is_empty():
+		var base_start := float(base_animation.get("start_time", 0.0))
+		var base_duration := float(base_animation.get("stop_time", base_start)) - base_start
+		if base_duration > 0.0:
+			var base_time := base_start + fposmod(float(Time.get_ticks_msec()) * 0.001, base_duration)
+			_apply_animation_tracks(skeleton, base_animation, base_time)
+	_apply_animation_tracks(skeleton, animation, sample_time, skip_leg_tracks)
 	if pose_from.size() != skeleton.get_bone_count() or blend_weight >= 1.0:
 		return
 	var weight := clampf(blend_weight, 0.0, 1.0)
@@ -3843,6 +3858,26 @@ func _apply_animation_pose(
 			bone_index,
 			Vector3(source_pose.scale).lerp(skeleton.get_bone_pose_scale(bone_index), weight)
 		)
+
+func _apply_animation_tracks(skeleton: Skeleton3D, animation: Dictionary, sample_time: float, skip_legs := false) -> void:
+	for track_value: Variant in animation.get("tracks", []):
+		var track: Dictionary = track_value
+		var bone_index := int(track.get("bone_index", -1))
+		if bone_index < 0:
+			continue
+		var bone_name := str(track.get("node_name", ""))
+		if skip_legs and _is_leg_bone_name(bone_name):
+			continue
+		var translations: PackedFloat32Array = track.get("translations", PackedFloat32Array())
+		if translations.size() >= 4 and bone_name != "Bip01":
+			skeleton.set_bone_pose_position(bone_index, _sample_vector_keys(translations, 4, sample_time))
+		var rotations: PackedFloat32Array = track.get("rotations", PackedFloat32Array())
+		if rotations.size() >= 5:
+			skeleton.set_bone_pose_rotation(bone_index, _sample_quaternion_keys(rotations, sample_time))
+		var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
+		if scales.size() >= 2:
+			var scale_value := _sample_scalar_keys(scales, sample_time)
+			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * scale_value)
 
 func _sample_vector_keys(keys: PackedFloat32Array, stride: int, time: float) -> Vector3:
 	var key_count := keys.size() / stride
