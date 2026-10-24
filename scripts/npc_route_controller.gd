@@ -24,6 +24,8 @@ signal route_finished
 
 var waypoints: Array[Vector3] = []
 var waypoint_speeds: Array[float] = []
+var waypoint_is_teleport: Array[bool] = []
+var waypoint_teleport_destinations: Array[Vector3] = []
 var waypoint_index := 0
 var final_arrival_distance := 0.08
 var loops_route := false
@@ -63,6 +65,8 @@ func teleport_to(destination: Vector3) -> void:
 	_yield_waypoint_index = 0
 	waypoints.clear()
 	waypoint_speeds.clear()
+	waypoint_is_teleport.clear()
+	waypoint_teleport_destinations.clear()
 	waypoint_index = 0
 	_route_blocked_elapsed = 0.0
 	_route_blocked_reported = false
@@ -78,9 +82,15 @@ func configure_route(
 	_yield_waypoint_index = 0
 	waypoints.clear()
 	waypoint_speeds.clear()
+	waypoint_is_teleport.clear()
+	waypoint_teleport_destinations.clear()
 	for waypoint: Dictionary in route:
 		waypoints.push_back(waypoint.get("position", global_position))
 		waypoint_speeds.push_back(float(waypoint.get("speed_mps", walk_speed_mps)))
+		var teleport_destination: Variant = waypoint.get("teleport_to")
+		var is_teleport := teleport_destination is Vector3
+		waypoint_is_teleport.push_back(is_teleport)
+		waypoint_teleport_destinations.push_back(teleport_destination if is_teleport else Vector3.ZERO)
 	loops_route = should_loop
 	follow_authored_route_height = use_authored_route_height
 	final_arrival_distance = maxf(arrival_distance, final_arrival_distance_m) if final_arrival_distance_m >= 0.0 else arrival_distance
@@ -221,6 +231,9 @@ func get_collision_radius() -> float:
 func is_yielding() -> bool:
 	return not _yield_path.is_empty() or _yield_cooldown_remaining > 0.0
 
+func is_teleport_waypoint(index: int) -> bool:
+	return index >= 0 and index < waypoint_is_teleport.size() and waypoint_is_teleport[index]
+
 func set_dialogue_paused(paused: bool) -> void:
 	dialogue_paused = paused
 	if paused:
@@ -262,6 +275,12 @@ func _physics_process(delta: float) -> void:
 		if not loops_route and waypoint_index == waypoints.size() - 1:
 			waypoint_arrival_distance = final_arrival_distance
 		if offset.length() <= waypoint_arrival_distance:
+			if is_teleport_waypoint(waypoint_index):
+				global_position = waypoint_teleport_destinations[waypoint_index]
+				velocity = Vector3.ZERO
+				if grounding_enabled:
+					_last_grounded_position = global_position
+					_has_last_grounded_position = true
 			_advance_waypoint()
 		else:
 			var direction := offset.normalized()

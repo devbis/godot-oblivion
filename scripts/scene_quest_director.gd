@@ -59,6 +59,7 @@ func in_door_box(point: Vector3) -> bool:
 const NAVIGATION_TILE_SIZE_M := 25.6
 const NAVIGATION_TILE_OVERLAP_M := 2.0
 const MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M := 2.5
+const MAX_TELEPORT_EXIT_SNAP_DISTANCE_M := 2.5
 const PREFERRED_PATHGRID_ENDPOINT_SNAP_DISTANCE_M := 0.75
 const PATHGRID_NAVIGATION_LAYER := 2
 const NPC_NAVIGATION_LAYERS := 1 | PATHGRID_NAVIGATION_LAYER
@@ -68,12 +69,18 @@ const PATHGRID_LINK_ENDPOINT_TOLERANCE_M := 0.15
 var navigation_tiles: Node3D = null
 var pathgrid_links_root: Node3D = null
 var pathgrid_cell_form_id := 0
+var navigation_cell_form_id := 0
+var game_units_to_meters := 0.01
 var pathgrid_points: PackedVector3Array = PackedVector3Array()
 var pathgrid_neighbors: Array = []
 var last_navigation_path_uses_pathgrid := false
+## Indices in the most recent route path where an actor crosses a linked door, and their XTEL arrival positions.
+var last_navigation_path_teleports: Dictionary = {}
 
-func set_pathgrid(pathgrid: Dictionary, game_units_to_meters: float) -> void:
+func set_pathgrid(pathgrid: Dictionary, game_units_scale: float, cell_form_id: int = 0) -> void:
 	clear_pathgrid()
+	navigation_cell_form_id = cell_form_id
+	game_units_to_meters = game_units_scale
 	var source_points: PackedVector3Array = pathgrid.get("points", PackedVector3Array())
 	var edges: PackedInt32Array = pathgrid.get("edges", PackedInt32Array())
 	if source_points.is_empty() or edges.is_empty():
@@ -125,6 +132,8 @@ func clear_pathgrid() -> void:
 	pathgrid_points.clear()
 	pathgrid_neighbors.clear()
 	last_navigation_path_uses_pathgrid = false
+	navigation_cell_form_id = 0
+	last_navigation_path_teleports.clear()
 
 func _pathgrid_world_position(game_position: Vector3, game_units_to_meters: float) -> Vector3:
 	return Vector3(game_position.x, game_position.z, -game_position.y) * game_units_to_meters
@@ -248,9 +257,11 @@ func _collect_static_bodies(node: Node, bodies: Array) -> void:
 ## Finds a path over the navigation tiles. If a closed door split the baked mesh,
 ## join reachable paths on both sides through that door's actual opening.
 func navigation_path(
-	from: Vector3, to: Vector3, actor_radius: float = 0.18, prefer_authored_pathgrid: bool = false
+	from: Vector3, to: Vector3, actor_radius: float = 0.18, prefer_authored_pathgrid: bool = false,
+	destination_arrival_distance: float = 0.35
 ) -> PackedVector3Array:
 	last_navigation_path_uses_pathgrid = false
+	last_navigation_path_teleports.clear()
 	if prefer_authored_pathgrid:
 		var authored_path := _pathgrid_route(from, to, PREFERRED_PATHGRID_ENDPOINT_SNAP_DISTANCE_M)
 		if not authored_path.is_empty():
@@ -263,9 +274,15 @@ func navigation_path(
 		if not disconnected_path.is_empty():
 			last_navigation_path_uses_pathgrid = true
 			return disconnected_path
+		var teleport_path := _teleport_route(
+			navigation_map, from, to, actor_radius, destination_arrival_distance
+		)
+		if not teleport_path.is_empty():
+			last_navigation_path_uses_pathgrid = _path_uses_pathgrid_link(teleport_path)
+			return teleport_path
 		return PackedVector3Array([to])
 	var goal_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, to)
-	if _path_reaches(path, goal_on_mesh):
+	if _path_reaches_target(path, to, goal_on_mesh, actor_radius, destination_arrival_distance):
 		last_navigation_path_uses_pathgrid = _path_uses_pathgrid_link(path)
 		return path
 	var best_path := PackedVector3Array()
@@ -286,7 +303,9 @@ func navigation_path(
 		var departure := NavigationServer3D.map_get_path(
 			navigation_map, far_point, to, true, NPC_NAVIGATION_LAYERS
 		)
-		if departure.is_empty() or not _path_reaches(departure, goal_on_mesh):
+		if departure.is_empty() or not _path_reaches_target(
+			departure, to, goal_on_mesh, actor_radius, destination_arrival_distance
+		):
 			continue
 		var candidate := PackedVector3Array()
 		for point: Vector3 in approach:
@@ -309,7 +328,172 @@ func navigation_path(
 	if not pathgrid_path.is_empty():
 		last_navigation_path_uses_pathgrid = true
 		return pathgrid_path
+	var teleport_path := _teleport_route(
+		navigation_map, from, to, actor_radius, destination_arrival_distance
+	)
+	if not teleport_path.is_empty():
+		last_navigation_path_uses_pathgrid = _path_uses_pathgrid_link(teleport_path)
+		return teleport_path
 	return best_path if not best_path.is_empty() else path
+
+## Finds a navmesh route that crosses one or more linked doors in this cell. An XTEL
+## link changes position discontinuously, so its entry and exit must not be joined
+## by a walkable navmesh segment.
+func _teleport_route(
+	navigation_map: RID, from: Vector3, to: Vector3, actor_radius: float,
+	destination_arrival_distance: float
+) -> PackedVector3Array:
+	if navigation_cell_form_id == 0 or door_references.is_empty():
+		return PackedVector3Array()
+	var doors_by_id: Dictionary = {}
+	for door: Dictionary in door_references:
+		var reference: Dictionary = door.get("reference", {})
+		var reference_id := int(reference.get("form_id", 0))
+		if reference_id != 0:
+			doors_by_id[reference_id] = door
+	var goal_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, to)
+	var pending: Array[Dictionary] = [{
+		"node_id": 0,
+		"position": from,
+		"cost": 0.0,
+		"path": PackedVector3Array(),
+		"teleports": {},
+		"used_doors": {},
+	}]
+	var best_cost_by_node: Dictionary = {0: 0.0}
+	var best_path := PackedVector3Array()
+	var best_teleports: Dictionary = {}
+	var best_total_cost := INF
+	while not pending.is_empty():
+		var current_index := 0
+		for index in range(1, pending.size()):
+			if float(pending[index].get("cost", INF)) < float(pending[current_index].get("cost", INF)):
+				current_index = index
+		var current: Dictionary = pending.pop_at(current_index)
+		var current_cost := float(current.get("cost", INF))
+		if current_cost >= best_total_cost:
+			continue
+		var current_position: Vector3 = current.get("position", from)
+		var current_path: PackedVector3Array = current.get("path", PackedVector3Array())
+		var direct_path := NavigationServer3D.map_get_path(
+			navigation_map, current_position, to, true, NPC_NAVIGATION_LAYERS
+		)
+		var direct_reaches_goal := _path_reaches_target(
+			direct_path, to, goal_on_mesh, actor_radius, destination_arrival_distance
+		)
+		if not direct_reaches_goal:
+			var authored_direct_path := _pathgrid_route(current_position, to)
+			if not authored_direct_path.is_empty():
+				direct_path = authored_direct_path
+				direct_reaches_goal = true
+		if direct_reaches_goal:
+			var completed_path := current_path.duplicate()
+			for point: Vector3 in direct_path:
+				_append_path_point(completed_path, point)
+			var total_cost := current_cost + _path_length(direct_path)
+			if total_cost < best_total_cost:
+				best_total_cost = total_cost
+				best_path = completed_path
+				best_teleports = (current.get("teleports", {}) as Dictionary).duplicate()
+		for door: Dictionary in door_references:
+			var reference: Dictionary = door.get("reference", {})
+			var reference_id := int(reference.get("form_id", 0))
+			var target_reference_id := int(reference.get("teleport_ref_id", 0))
+			if reference_id == 0 or target_reference_id == 0 \
+					or int(reference.get("teleport_cell_id", 0)) != navigation_cell_form_id \
+					or int(reference.get("lock_level", 0)) > 0:
+				continue
+			var used_doors: Dictionary = current.get("used_doors", {})
+			if used_doors.has(reference_id):
+				continue
+			var exit_door: Dictionary = doors_by_id.get(target_reference_id, {})
+			if exit_door.is_empty():
+				continue
+			var teleport_position: PackedFloat32Array = reference.get("teleport_position", PackedFloat32Array())
+			if teleport_position.size() < 3:
+				continue
+			var exit_position := Vector3(
+				teleport_position[0], teleport_position[2], -teleport_position[1]
+			) * game_units_to_meters
+			var exit_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, exit_position)
+			if exit_position.distance_to(exit_on_mesh) > MAX_TELEPORT_EXIT_SNAP_DISTANCE_M:
+				continue
+			var approach_options := _door_approach_paths(
+				navigation_map, current_position, door, actor_radius
+			)
+			for approach: Dictionary in approach_options:
+				var approach_path: PackedVector3Array = approach.get("path", PackedVector3Array())
+				if approach_path.is_empty():
+					continue
+				var next_path := current_path.duplicate()
+				for point: Vector3 in approach_path:
+					_append_path_point(next_path, point)
+				if next_path.is_empty():
+					continue
+				var event_index := next_path.size() - 1
+				var next_teleports: Dictionary = (current.get("teleports", {}) as Dictionary).duplicate()
+				next_teleports[event_index] = {"destination": exit_position, "reference_id": reference_id}
+				var next_used_doors: Dictionary = used_doors.duplicate()
+				next_used_doors[reference_id] = true
+				_append_path_point(next_path, exit_position)
+				var next_cost := current_cost + _path_length(approach_path) + 0.2
+				var exit_node_id := target_reference_id
+				if next_cost >= float(best_cost_by_node.get(exit_node_id, INF)):
+					continue
+				best_cost_by_node[exit_node_id] = next_cost
+				pending.push_back({
+					"node_id": exit_node_id,
+					"position": exit_position,
+					"cost": next_cost,
+					"path": next_path,
+					"teleports": next_teleports,
+					"used_doors": next_used_doors,
+				})
+	if best_path.is_empty():
+		return PackedVector3Array()
+	last_navigation_path_teleports = best_teleports
+	return best_path
+
+## Returns approach paths from the current navmesh island to either side of a door.
+func _door_approach_paths(
+	navigation_map: RID, from: Vector3, door: Dictionary, actor_radius: float
+) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var local_box: AABB = door.get("local_box", AABB())
+	var reference_transform: Transform3D = door.get("transform", Transform3D.IDENTITY)
+	if local_box.size.x <= 0.0 or local_box.size.z <= 0.0:
+		return result
+	var normal_axis := 0 if local_box.size.x <= local_box.size.z else 2
+	var normal_basis: Vector3 = reference_transform.basis.x if normal_axis == 0 else reference_transform.basis.z
+	var normal_scale := normal_basis.length()
+	if normal_scale <= 0.0001:
+		return result
+	var horizontal_normal := Vector3(normal_basis.x, 0.0, normal_basis.z).normalized()
+	if horizontal_normal.length_squared() <= 0.0001:
+		return result
+	var center_local := local_box.position + local_box.size * 0.5
+	var center := reference_transform * center_local
+	center.y = from.y
+	var half_thickness := local_box.size[normal_axis] * 0.5 * normal_scale
+	for side: float in [-1.0, 1.0]:
+		var approach_position: Vector3 = center + horizontal_normal * side * maxf(0.0, half_thickness + actor_radius - 0.08)
+		var approach_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, approach_position)
+		if approach_position.distance_to(approach_on_mesh) > actor_radius + 0.3:
+			continue
+		var path := NavigationServer3D.map_get_path(
+			navigation_map, from, approach_position, true, NPC_NAVIGATION_LAYERS
+		)
+		if not _path_reaches(path, approach_on_mesh):
+			continue
+		var duplicate := false
+		for existing: Dictionary in result:
+			var existing_on_mesh: Vector3 = existing.get("position", Vector3.ZERO)
+			if existing_on_mesh.distance_squared_to(approach_on_mesh) <= 0.01:
+				duplicate = true
+				break
+		if not duplicate:
+			result.push_back({"position": approach_on_mesh, "path": path})
+	return result
 
 func _pathgrid_route(
 	from: Vector3, to: Vector3, max_endpoint_snap_distance: float = MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M
@@ -440,6 +624,17 @@ func _path_reaches(path: PackedVector3Array, destination: Vector3) -> bool:
 		return false
 	var end := path[path.size() - 1]
 	return end.distance_to(destination) <= 0.35
+
+func _path_reaches_target(
+	path: PackedVector3Array, target: Vector3, target_on_mesh: Vector3, actor_radius: float,
+	destination_arrival_distance: float
+) -> bool:
+	if target.distance_to(target_on_mesh) > maxf(actor_radius, destination_arrival_distance) or path.is_empty():
+		return false
+	if _path_reaches(path, target_on_mesh):
+		return true
+	var end := path[path.size() - 1]
+	return Vector2(end.x - target.x, end.z - target.z).length() <= destination_arrival_distance
 
 ## Navigation links only describe connectivity. NPC locomotion must follow the authored PGRD
 ## elevations on a link, or horizontal steering can carry the actor off a stair landing.
