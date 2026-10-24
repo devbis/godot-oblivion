@@ -183,7 +183,11 @@ func _release_grab(throw_object: bool) -> void:
 			)
 			var throw_velocity := -camera.global_basis.z * throw_speed
 			var player_velocity := Vector3(player.velocity.x, 0.0, player.velocity.z)
+			# The throw replaces the speed the hold spring gave the body instead of adding to it.
+			body.linear_velocity = Vector3.ZERO
 			body.apply_central_impulse((throw_velocity + player_velocity * carried_player_velocity_factor) * body.mass)
+		else:
+			body.linear_velocity *= drop_velocity_factor
 	else:
 		body.linear_velocity *= drop_velocity_factor
 
