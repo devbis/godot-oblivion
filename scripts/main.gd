@@ -37,6 +37,9 @@ const PLAYER_JUMP_KFS := {
 }
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const ANIMATION_BLEND_DURATION := 0.18
+## A gesture eases in over its first moments and eases back out into the stance, instead of snapping at the default blend.
+const GESTURE_BLEND_IN_S := 0.3
+const GESTURE_BLEND_OUT_S := 0.8
 ## Original idle and gesture clips (pointing, saluting, praying and so on), enumerated from the game archives at runtime.
 const PLAYER_GESTURE_PREFIX := "meshes/characters/_male/idleanims"
 const GESTURE_KEY := "Gesture"
@@ -175,6 +178,7 @@ var _gesture_list: VBoxContainer
 var _animation_time := 0.0
 var _player_animation_from_pose: Array[Dictionary] = []
 var _player_animation_blend_elapsed := ANIMATION_BLEND_DURATION
+var _player_blend_duration := ANIMATION_BLEND_DURATION
 var _player_was_on_floor := true
 var _npc_actors: Array[Dictionary] = []
 ## Idles the idle manager chose for NPCs that are not in the scene yet, by lowercase reference name; played when they load.
@@ -3236,11 +3240,16 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 	actor["face_talk_weight"] = talk_weight
 	_set_actor_face_shape(actor, "BigAah", talk_weight)
 
-## A gesture that plays once holds its final pose at least this long, and as long as the actor is still speaking: the
-## original special idles (pointing, halting) raise the arm in under a second and hold it.
-const NPC_GESTURE_MIN_HOLD_S := 2.5
+## A gesture that plays once holds its final pose at least this long, and while the actor is still speaking up to the
+## maximum: the original special idles (pointing, halting) raise the arm in under a second and hold it, then ease back.
+const NPC_GESTURE_MIN_HOLD_S := 1.5
+const NPC_GESTURE_MAX_HOLD_S := 3.0
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
+
+func _gesture_hold_over(actor: Dictionary, audio_manager: Node) -> bool:
+	var held := float(Time.get_ticks_msec() - int(actor.get("idle_started_ms", 0))) * 0.001
+	return held >= NPC_GESTURE_MAX_HOLD_S or (held >= NPC_GESTURE_MIN_HOLD_S and not _actor_is_speaking(audio_manager, actor))
 
 func _actor_is_speaking(audio_manager: Node, actor: Dictionary) -> bool:
 	return is_instance_valid(audio_manager) and audio_manager.has_method("is_dialogue_playing") \
@@ -3289,8 +3298,7 @@ func _update_npc_actors(delta: float) -> void:
 			if idle_animation.is_empty() or (
 				not bool(idle_animation.get("loops", true)) and str(actor.get("active_animation", "")) == NPC_IDLE_KEY
 				and float(actor.get("animation_time", 0.0)) >= float(idle_animation.get("stop_time", 0.0))
-				and float(Time.get_ticks_msec() - int(actor.get("idle_started_ms", 0))) * 0.001 >= NPC_GESTURE_MIN_HOLD_S
-				and not _actor_is_speaking(audio_manager, actor)
+				and _gesture_hold_over(actor, audio_manager)
 			):
 				_end_npc_idle(actor)
 			else:
@@ -3304,15 +3312,16 @@ func _update_npc_actors(delta: float) -> void:
 		if requested_animation != str(actor.get("active_animation", "")):
 			actor["animation_from_pose"] = _capture_skeleton_pose(skeleton)
 			actor["animation_blend_elapsed"] = 0.0
+			actor["blend_duration"] = _blend_duration_between(str(actor.get("active_animation", "")), requested_animation)
 			actor["active_animation"] = requested_animation
 			actor["animation_time"] = float(animation.get("start_time", 0.0))
 		actor["animation_time"] = float(actor.get("animation_time", 0.0)) + delta
 		var blend_elapsed := minf(
 			float(actor.get("animation_blend_elapsed", ANIMATION_BLEND_DURATION)) + delta,
-			ANIMATION_BLEND_DURATION
+			float(actor.get("blend_duration", ANIMATION_BLEND_DURATION))
 		)
 		actor["animation_blend_elapsed"] = blend_elapsed
-		var blend_weight := blend_elapsed / ANIMATION_BLEND_DURATION
+		var blend_weight := blend_elapsed / float(actor.get("blend_duration", ANIMATION_BLEND_DURATION))
 		var pose_from: Array[Dictionary] = []
 		var pose_from_value: Variant = actor.get("animation_from_pose", [])
 		if pose_from_value is Array:
@@ -3587,14 +3596,14 @@ func _update_player_animation(delta: float) -> void:
 	_animation_time += delta
 	_player_animation_blend_elapsed = minf(
 		_player_animation_blend_elapsed + delta,
-		ANIMATION_BLEND_DURATION
+		_player_blend_duration
 	)
 	var start_time := float(animation.get("start_time", 0.0))
 	var stop_time := float(animation.get("stop_time", start_time))
 	var duration := stop_time - start_time
 	if duration <= 0.0:
 		return
-	var blend_weight := _player_animation_blend_elapsed / ANIMATION_BLEND_DURATION
+	var blend_weight := _player_animation_blend_elapsed / _player_blend_duration
 	_apply_animation_pose(
 		_player_skeleton,
 		animation,
@@ -3636,6 +3645,13 @@ func _player_locomotion_animation(horizontal_speed: float) -> String:
 		return "Sneak" + direction_name
 	return ("Fast" + direction_name) if is_fast else direction_name
 
+func _blend_duration_between(from_animation: String, to_animation: String) -> float:
+	if from_animation == GESTURE_KEY or from_animation == NPC_IDLE_KEY:
+		return GESTURE_BLEND_OUT_S
+	if to_animation == GESTURE_KEY or to_animation == NPC_IDLE_KEY:
+		return GESTURE_BLEND_IN_S
+	return ANIMATION_BLEND_DURATION
+
 func _set_player_animation(animation_name: String) -> void:
 	var animation: Dictionary = _player_animations.get(animation_name, {})
 	if animation.is_empty() or animation_name == _active_animation:
@@ -3643,6 +3659,7 @@ func _set_player_animation(animation_name: String) -> void:
 	if _player_skeleton != null:
 		_player_animation_from_pose = _capture_skeleton_pose(_player_skeleton)
 		_player_animation_blend_elapsed = 0.0
+		_player_blend_duration = _blend_duration_between(_active_animation, animation_name)
 	_active_animation = animation_name
 	_animation_time = float(animation.get("start_time", 0.0))
 
