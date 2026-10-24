@@ -832,18 +832,21 @@ func _update_dynamic_target_routes() -> void:
 		actor.erase("follow_hold_target_form_id")
 		actor["route_target"] = destination
 		var waypoints: Array[Dictionary] = []
-		var route_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
+		var route_path := director.navigation_path(
+			root.global_position, destination, _actor_collision_radius(root), true
+		)
 		var route_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
 		var flags := int(package.get("flags", 0))
 		var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 		for point: Vector3 in route_path:
 			waypoints.push_back({"position": point, "speed_mps": speed})
 		root.call("configure_route", waypoints, false, 0.0, arrival_distance, route_uses_pathgrid)
-		print("OpenOB AI route update: %s from=%s destination=%s at=%s path=%s" % [
+		print("OpenOB AI route update: %s from=%s destination=%s at=%s authored_height=%s path=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(root.global_position),
 			_package_location_label(destination_form_id),
 			str(destination),
+			str(route_uses_pathgrid),
 			str(route_path),
 		])
 
@@ -1114,7 +1117,9 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 				actor.erase("route_target")
 			var flags := int(package.get("flags", 0))
 			var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
-			route_path = director.navigation_path((root as Node3D).global_position, destination, _actor_collision_radius(root as Node3D))
+			route_path = director.navigation_path(
+				(root as Node3D).global_position, destination, _actor_collision_radius(root as Node3D), true
+			)
 			route_uses_pathgrid = bool(director.get("last_navigation_path_uses_pathgrid"))
 			if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT and not route_path.is_empty():
 				var path_endpoint: Vector3 = route_path[route_path.size() - 1]
@@ -1129,12 +1134,13 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if not waypoints.is_empty() and bool(actor.get("idle_active", false)) and not bool(actor.get("idle_upper_body", false)):
 		_end_npc_idle(actor)
 	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance, route_uses_pathgrid)
-	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
+	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s authored_height=%s path=%s" % [
 		str(actor.get("reference_name", actor.get("name", "NPC"))),
 		str(package.get("editor_id", "<none>")),
 		_package_location_label(destination_form_id),
 		str(_package_destination_position(package)),
 		str((root as Node3D).global_position),
+		str(route_uses_pathgrid),
 		str(route_path),
 	])
 	if not root.has_meta("route_finished_connected"):
@@ -1168,7 +1174,9 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			if horizontal_distance > arrival_radius:
 				# A partial NavigationServer path is not package completion. Replan from the
 				# actor's current position, and leave OnPackageDone for actual arrival.
-				var retry_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
+				var retry_path := director.navigation_path(
+					root.global_position, destination, _actor_collision_radius(root), true
+				)
 				var retry_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
 				if not retry_path.is_empty():
 					var retry_end: Vector3 = retry_path[retry_path.size() - 1]
@@ -4418,6 +4426,10 @@ func _setup_cell_once(stream_generation: int) -> void:
 		director.set_pathgrid(
 			data_reader.find_pathgrid(int(current_cell.get("form_id", 0))), game_units_to_meters
 		)
+		await get_tree().physics_frame
+		await get_tree().physics_frame
+		if stream_generation != _npc_stream_generation:
+			return
 	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
 	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):

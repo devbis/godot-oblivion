@@ -17,6 +17,7 @@ const YIELD_RETRY_COOLDOWN_S := 0.8
 const YIELD_BLOCKED_WAIT_S := 0.65
 const YIELD_REQUEST_COOLDOWN_S := 1.0
 const ROUTE_BLOCKED_REPORT_S := 0.8
+const NPC_NAVIGATION_LAYERS := 3
 
 ## Emitted once when the route reaches its last waypoint and does not loop.
 signal route_finished
@@ -175,7 +176,9 @@ func _yield_path_for_direction(navigation_map: RID, direction: Vector3, distance
 	var target_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, target)
 	if Vector2(target_on_mesh.x - target.x, target_on_mesh.z - target.z).length() > 0.35:
 		return PackedVector3Array()
-	var path := NavigationServer3D.map_get_path(navigation_map, global_position, target_on_mesh, true)
+	var path := NavigationServer3D.map_get_path(
+		navigation_map, global_position, target_on_mesh, true, NPC_NAVIGATION_LAYERS
+	)
 	if path.size() < 2:
 		return PackedVector3Array()
 	var path_end := path[path.size() - 1]
