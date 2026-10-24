@@ -276,7 +276,8 @@ func _physics_process(delta: float) -> void:
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
 	var previous_position := global_position
 	if (
-		(is_on_floor() or _stepper.is_stepping())
+		not did_jump
+		and (is_on_floor() or _stepper.is_stepping())
 		and _stepper.try_step_up(self, horizontal_motion, max_step_height_m, floor_max_angle)
 	):
 		_update_footstep_audio(previous_position)
