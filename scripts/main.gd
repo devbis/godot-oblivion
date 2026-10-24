@@ -765,6 +765,8 @@ func _update_dynamic_target_routes() -> void:
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")):
 			continue
+		if root.has_method("is_yielding") and bool(root.call("is_yielding")):
+			continue
 		var destination_value: Variant = _package_destination_position(package)
 		if destination_value == null:
 			continue

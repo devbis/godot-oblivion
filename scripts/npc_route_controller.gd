@@ -12,6 +12,12 @@ extends CharacterBody3D
 @export var max_route_drop_m := 0.55
 @export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
 
+const YIELD_CLEARANCE_PAUSE_S := 0.45
+const YIELD_RETRY_COOLDOWN_S := 0.8
+const YIELD_BLOCKED_WAIT_S := 0.65
+const YIELD_REQUEST_COOLDOWN_S := 1.0
+const ROUTE_BLOCKED_REPORT_S := 0.8
+
 ## Emitted once when the route reaches its last waypoint and does not loop.
 signal route_finished
 
@@ -33,6 +39,10 @@ var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
 var _yield_path := PackedVector3Array()
 var _yield_waypoint_index := 0
+var _yield_cooldown_remaining := 0.0
+var _route_blocked_elapsed := 0.0
+var _route_blocked_reported := false
+var _yield_request_cooldown_remaining := 0.0
 var _stepper := CharacterStepper.new()
 var _footstep_distance_m := 0.0
 
@@ -55,38 +65,121 @@ func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause:
 	waypoint_index = 0
 	velocity = Vector3.ZERO
 	is_walking = false
+	_route_blocked_elapsed = 0.0
+	_route_blocked_reported = false
 	if grounding_enabled:
 		_last_grounded_position = global_position
 		_has_last_grounded_position = true
 	set_physics_process(not inactive and (grounding_enabled or not waypoints.is_empty()))
 
-## A routed actor can ask a stationary NPC to clear a collision in a narrow passage.
-## The yielding actor takes a short navmesh route away from the approaching actor.
-func request_yield(away_direction: Vector3, distance_m: float) -> bool:
-	if inactive:
+## A routed actor can ask another actor to make room. The blocker keeps its package route and briefly
+## follows a navmesh sidestep; its original waypoint route resumes once the yield path is complete.
+func request_yield(
+	away_direction: Vector3, approach_direction: Vector3, requester_position: Vector3, distance_m: float
+) -> bool:
+	if inactive or dialogue_paused or not _yield_path.is_empty() or _yield_cooldown_remaining > 0.0:
 		return false
-	if not _yield_path.is_empty() or (not waypoints.is_empty() and waypoint_index < waypoints.size()):
+	var has_active_route := not waypoints.is_empty() and waypoint_index < waypoints.size()
+	if has_active_route and _route_blocked_elapsed < YIELD_BLOCKED_WAIT_S and _pause_remaining <= 0.0:
 		return false
-	away_direction.y = 0.0
-	if away_direction.length_squared() <= 0.0001:
+	var away := away_direction
+	away.y = 0.0
+	var approach := approach_direction
+	approach.y = 0.0
+	var route_direction := _current_route_direction()
+	var axes: Array[Vector3] = []
+	if approach.length_squared() > 0.0001:
+		axes.push_back(approach.normalized())
+	if route_direction.length_squared() > 0.0001:
+		var duplicate_axis := false
+		for axis: Vector3 in axes:
+			if absf(axis.dot(route_direction)) > 0.9:
+				duplicate_axis = true
+				break
+		if not duplicate_axis:
+			axes.push_back(route_direction)
+	if axes.is_empty() and away.length_squared() > 0.0001:
+		axes.push_back(away.normalized())
+	if axes.is_empty():
 		return false
-	var target := global_position + away_direction.normalized() * distance_m
+
+	var directions: Array[Vector3] = []
+	var requester_offset := requester_position - global_position
+	requester_offset.y = 0.0
+	for axis: Vector3 in axes:
+		var side := Vector3(-axis.z, 0.0, axis.x)
+		var side_dot := side.dot(requester_offset)
+		var preferred_side: Vector3
+		if absf(side_dot) > 0.05:
+			preferred_side = -side if side_dot > 0.0 else side
+		elif absf(side.dot(away)) > 0.15:
+			preferred_side = side if side.dot(away) > 0.0 else -side
+		else:
+			preferred_side = side if get_instance_id() % 2 == 0 else -side
+		_append_yield_direction(directions, preferred_side)
+		_append_yield_direction(directions, -preferred_side)
+		_append_yield_direction(directions, (preferred_side * 0.8 + axis * 0.6).normalized())
+		_append_yield_direction(directions, (preferred_side * 0.8 - axis * 0.6).normalized())
+		_append_yield_direction(directions, axis)
+		_append_yield_direction(directions, -axis)
+	if away.length_squared() > 0.0001:
+		_append_yield_direction(directions, away.normalized())
+
 	var navigation_map := get_world_3d().navigation_map
+	for direction: Vector3 in directions:
+		var path := _yield_path_for_direction(navigation_map, direction, distance_m)
+		if path.is_empty():
+			continue
+		_yield_path = path
+		break
+	if _yield_path.is_empty():
+		return false
+	_yield_waypoint_index = 0
+	_route_blocked_elapsed = 0.0
+	_route_blocked_reported = false
+	set_physics_process(true)
+	print("OpenOB AI avoidance: %s yields from=%s to=%s" % [
+		name, str(global_position), str(_yield_path[_yield_path.size() - 1])
+	])
+	return true
+
+func _current_route_direction() -> Vector3:
+	if waypoints.is_empty() or waypoint_index >= waypoints.size():
+		return Vector3.ZERO
+	var direction := waypoints[waypoint_index] - global_position
+	direction.y = 0.0
+	if direction.length_squared() <= 0.0001 and waypoint_index + 1 < waypoints.size():
+		direction = waypoints[waypoint_index + 1] - global_position
+		direction.y = 0.0
+	return direction.normalized() if direction.length_squared() > 0.0001 else Vector3.ZERO
+
+func _append_yield_direction(directions: Array[Vector3], direction: Vector3) -> void:
+	var flat_direction := direction
+	flat_direction.y = 0.0
+	if flat_direction.length_squared() <= 0.0001:
+		return
+	flat_direction = flat_direction.normalized()
+	for existing: Vector3 in directions:
+		if existing.dot(flat_direction) > 0.98:
+			return
+	directions.push_back(flat_direction)
+
+func _yield_path_for_direction(navigation_map: RID, direction: Vector3, distance_m: float) -> PackedVector3Array:
+	var target := global_position + direction * distance_m
 	var target_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, target)
 	if Vector2(target_on_mesh.x - target.x, target_on_mesh.z - target.z).length() > 0.35:
-		return false
+		return PackedVector3Array()
 	var path := NavigationServer3D.map_get_path(navigation_map, global_position, target_on_mesh, true)
 	if path.size() < 2:
-		return false
+		return PackedVector3Array()
 	var path_end := path[path.size() - 1]
 	if Vector2(path_end.x - target_on_mesh.x, path_end.z - target_on_mesh.z).length() > 0.35:
-		return false
-	if Vector2(path_end.x - global_position.x, path_end.z - global_position.z).length() < 0.25:
-		return false
-	_yield_path = path
-	_yield_waypoint_index = 0
-	set_physics_process(true)
-	return true
+		return PackedVector3Array()
+	var achieved_offset := path_end - global_position
+	achieved_offset.y = 0.0
+	if achieved_offset.length() < 0.25 or achieved_offset.normalized().dot(direction) < 0.25:
+		return PackedVector3Array()
+	return path
 
 func get_collision_radius() -> float:
 	for child: Node in get_children():
@@ -99,6 +192,9 @@ func get_collision_radius() -> float:
 			return (collision.shape as SphereShape3D).radius + collision.shape.margin
 	return 0.18
 
+func is_yielding() -> bool:
+	return not _yield_path.is_empty() or _yield_cooldown_remaining > 0.0
+
 func set_dialogue_paused(paused: bool) -> void:
 	dialogue_paused = paused
 	if paused:
@@ -106,6 +202,8 @@ func set_dialogue_paused(paused: bool) -> void:
 		is_walking = false
 
 func _physics_process(delta: float) -> void:
+	_yield_cooldown_remaining = maxf(0.0, _yield_cooldown_remaining - delta)
+	_yield_request_cooldown_remaining = maxf(0.0, _yield_request_cooldown_remaining - delta)
 	if inactive:
 		set_physics_process(false)
 		return
@@ -124,6 +222,9 @@ func _physics_process(delta: float) -> void:
 			if _yield_waypoint_index >= _yield_path.size():
 				_yield_path.clear()
 				_yield_waypoint_index = 0
+				_rejoin_route_after_yield()
+				_yield_cooldown_remaining = YIELD_RETRY_COOLDOWN_S
+				_pause_remaining = maxf(_pause_remaining, YIELD_CLEARANCE_PAUSE_S)
 		else:
 			var direction := offset.normalized()
 			_face_route_direction(direction, delta)
@@ -178,9 +279,29 @@ func _physics_process(delta: float) -> void:
 			global_position = _last_grounded_position
 			velocity = Vector3.ZERO
 			_pause_remaining = maxf(_pause_remaining, waypoint_pause_seconds)
+	var horizontal_displacement := global_position - previous_position
+	horizontal_displacement.y = 0.0
+	if not _yield_path.is_empty():
+		_route_blocked_elapsed = 0.0
+	elif desired_horizontal_velocity.length_squared() > 0.0001:
+		var expected_progress := desired_horizontal_velocity.length() * delta
+		var actual_progress := horizontal_displacement.dot(desired_horizontal_velocity.normalized())
+		if actual_progress < expected_progress * 0.35:
+			_route_blocked_elapsed += delta
+			if _route_blocked_elapsed >= ROUTE_BLOCKED_REPORT_S and not _route_blocked_reported:
+				var target := waypoints[waypoint_index] if waypoint_index < waypoints.size() else global_position
+				print("OpenOB AI route blocked: %s at=%s waypoint=%d/%d target=%s" % [
+					name, str(global_position), waypoint_index, waypoints.size(), str(target)
+				])
+				_route_blocked_reported = true
+		else:
+			_route_blocked_elapsed = 0.0
+			_route_blocked_reported = false
+	else:
+		_route_blocked_elapsed = 0.0
+		_route_blocked_reported = false
 	is_walking = (
-		desired_horizontal_velocity.length_squared() > 0.0001
-		and Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length_squared() > 0.0001
+		desired_horizontal_velocity.length_squared() > 0.0001 and horizontal_displacement.length_squared() > 0.0001
 	)
 	if is_walking:
 		_footstep_distance_m += Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length()
@@ -189,9 +310,13 @@ func _physics_process(delta: float) -> void:
 			var audio_manager := get_tree().root.get_node_or_null("AudioManager")
 			if audio_manager != null:
 				audio_manager.call("play_footstep", self, desired_horizontal_velocity.length() > 1.8)
+	if not grounding_enabled and waypoints.is_empty() and _yield_path.is_empty() \
+			and _yield_cooldown_remaining <= 0.0:
+		set_physics_process(false)
 
 func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> void:
-	if desired_horizontal_velocity.length_squared() <= 0.0001 or waypoints.is_empty() or waypoint_index >= waypoints.size():
+	if _yield_request_cooldown_remaining > 0.0 or desired_horizontal_velocity.length_squared() <= 0.0001 \
+			or waypoints.is_empty() or waypoint_index >= waypoints.size():
 		return
 	for collision_index in range(get_slide_collision_count()):
 		var collision := get_slide_collision(collision_index)
@@ -207,9 +332,24 @@ func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> vo
 			continue
 		var blocker_radius := float(blocker.call("get_collision_radius")) if blocker.has_method("get_collision_radius") else get_collision_radius()
 		var clearance := get_collision_radius() + blocker_radius + 0.2
-		if bool(blocker.call("request_yield", away_direction, clearance)):
+		if bool(blocker.call("request_yield", away_direction, desired_horizontal_velocity, global_position, clearance)):
+			_yield_request_cooldown_remaining = YIELD_REQUEST_COOLDOWN_S
 			print("OpenOB AI avoidance: %s asked %s to yield by %.2fm" % [name, blocker.name, clearance])
 			return
+
+func _rejoin_route_after_yield() -> void:
+	if waypoints.is_empty() or waypoint_index >= waypoints.size():
+		return
+	var position := global_position
+	var nearest_index := waypoint_index
+	var nearest_distance := INF
+	for index in range(waypoint_index, waypoints.size()):
+		var waypoint: Vector3 = waypoints[index]
+		var distance := position.distance_squared_to(waypoint)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest_index = index
+	waypoint_index = nearest_index
 
 func _face_route_direction(movement_direction: Vector3, delta: float) -> void:
 	var desired_yaw := atan2(-movement_direction.x, -movement_direction.z)
