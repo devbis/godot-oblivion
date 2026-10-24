@@ -214,7 +214,7 @@ func _notification(what: int) -> void:
 func _apply_camera_orbit() -> void:
 	if is_instance_valid(camera_pivot):
 		if not face_preview_enabled:
-			camera_pivot.position = _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
+			camera_pivot.position = _crouched_camera_pivot_position()
 		camera_pivot.rotation = Vector3(_camera_pitch, PI if face_preview_enabled else 0.0, 0.0)
 		if is_first_person:
 			camera.position = Vector3.ZERO
@@ -306,8 +306,11 @@ func _update_crouch(delta: float) -> void:
 		_collision_shape.position.y = height * 0.5
 	_crouch_blend = move_toward(_crouch_blend, 1.0 if is_crouching else 0.0, crouch_blend_speed * delta)
 	if not face_preview_enabled:
-		var base := _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
-		camera_pivot.position = base - Vector3(0.0, crouch_camera_drop_m * _crouch_blend, 0.0)
+		camera_pivot.position = _crouched_camera_pivot_position()
+
+func _crouched_camera_pivot_position() -> Vector3:
+	var base := _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
+	return base - Vector3(0.0, crouch_camera_drop_m * _crouch_blend, 0.0)
 
 func _can_stand_up() -> bool:
 	var standing := CapsuleShape3D.new()
