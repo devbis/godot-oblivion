@@ -76,6 +76,8 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			return _set_open_state(target, arguments, references, world, label)
 		"lock", "unlock":
 			return _set_lock_state(target, command, arguments, references, world, label)
+		"stoplook":
+			return _stop_look(target, world, label)
 		"playgroup":
 			return _play_group(target, arguments, references, world, label)
 		"speech":
@@ -156,6 +158,17 @@ func _look_at(target: String, arguments: Array, world: Node3D, label: String) ->
 	if result.is_empty():
 		return "not applied: %s, actor or look target is not loaded" % label
 	return "%s looks at %s" % [target, str(arguments[0])]
+
+
+func _stop_look(target: String, world: Node3D, label: String) -> String:
+	if target.is_empty():
+		return "not applied: %s needs an actor" % label
+	if not world.has_method("stop_npc_look_target"):
+		return "not applied: %s, the scene cannot stop actor gaze" % label
+	var result := str(world.call("stop_npc_look_target", target))
+	if result.is_empty():
+		return "not applied: %s, actor is not loaded" % label
+	return "%s stops looking" % target
 
 
 func _move_to(target: String, arguments: Array, references: Dictionary, world: Node3D, transform_of: Callable, label: String) -> String:

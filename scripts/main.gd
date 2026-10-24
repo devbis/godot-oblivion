@@ -4414,18 +4414,17 @@ func _update_npc_actors(delta: float) -> void:
 		# Animating a skeleton and morphing a face costs the main thread every frame: an NPC that is far away, or out of
 		# view and not close, keeps its last pose until it is seen again.
 		var distance_to_player := actor_root.global_position.distance_to(player.global_position)
-		var has_look_target := is_instance_valid(actor.get("look_target") as Node3D)
-		if distance_to_player > NPC_ANIMATION_DISTANCE_M and not has_look_target:
+		if distance_to_player > NPC_ANIMATION_DISTANCE_M:
 			continue
 		# A scripted idle keeps running out of view, so a gesture is not lost when the actor is looked at again.
 		if (
 			distance_to_player > NPC_ANIMATION_ALWAYS_NEAR_M
 			and not bool(actor.get("idle_active", false))
-			and not has_look_target
 			and camera != null
 			and not camera.is_position_in_frustum(actor_root.global_position + Vector3.UP)
 		):
 			continue
+		var look_target_active := _npc_look_target_is_active(actor)
 		_update_face_blink(actor, delta)
 		_update_face_expression(actor, delta)
 		_update_face_talk(actor, delta, audio_manager)
@@ -4458,7 +4457,7 @@ func _update_npc_actors(delta: float) -> void:
 			requested_animation = "Forward"
 			animation = animations.get(requested_animation, {})
 		if animation.is_empty():
-			_update_npc_head_look(actor, skeleton, delta)
+			_update_npc_head_look(actor, skeleton, delta, look_target_active)
 			continue
 		if requested_animation != str(actor.get("active_animation", "")):
 			actor["animation_from_pose"] = _capture_skeleton_pose(skeleton)
@@ -4486,7 +4485,7 @@ func _update_npc_actors(delta: float) -> void:
 		)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
-		_update_npc_head_look(actor, skeleton, delta)
+		_update_npc_head_look(actor, skeleton, delta, look_target_active)
 
 
 func set_npc_look_target(reference_name: String, target_reference: String) -> String:
@@ -4504,6 +4503,18 @@ func set_npc_look_target(reference_name: String, target_reference: String) -> St
 		return ""
 	actor["look_target"] = target
 	actor["look_blend"] = 0.0
+	return str(actor.get("reference_name", reference_name))
+
+
+func stop_npc_look_target(reference_name: String) -> String:
+	var actor := _npc_actor_by_reference(reference_name.to_lower())
+	if actor.is_empty():
+		return ""
+	actor["look_target"] = null
+	actor["look_blend"] = 0.0
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	if is_instance_valid(skeleton):
+		_restore_npc_head_pose(actor, skeleton)
 	return str(actor.get("reference_name", reference_name))
 
 
@@ -4550,7 +4561,28 @@ func _player_gaze_target_world_position() -> Vector3:
 	return player.global_position + Vector3.UP * 1.45
 
 
-func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float) -> void:
+func _npc_look_target_is_active(actor: Dictionary) -> bool:
+	var target := actor.get("look_target") as Node3D
+	var actor_root := actor.get("root") as Node3D
+	if not is_instance_valid(target) or not is_instance_valid(actor_root):
+		return false
+	var from_position := _dialogue_head_position(actor)
+	var to_position := _look_target_world_position(target)
+	var offset := to_position - from_position
+	var distance := offset.length()
+	if distance <= 0.06:
+		return true
+	var direction := offset / distance
+	var query := PhysicsRayQueryParameters3D.create(
+		from_position + direction * 0.04, to_position - direction * 0.04, 2, [actor_root.get_rid()]
+	)
+	query.collide_with_areas = false
+	return get_world_3d().direct_space_state.intersect_ray(query).is_empty()
+
+
+func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float, look_target_active: bool) -> void:
+	if not look_target_active:
+		return
 	var target := actor.get("look_target") as Node3D
 	if not is_instance_valid(target):
 		return
