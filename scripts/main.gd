@@ -713,7 +713,11 @@ func _open_doors_on_npc_routes() -> void:
 			if report.begins_with("applied:"):
 				print("OpenOB door: " + report)
 			else:
-				push_warning("OpenOB AI door: " + report)
+				# The route is checked every physics frame: warn once per door, not sixty times a second.
+				var warned_key := "door_warned_%08x" % int(reference.get("form_id", 0))
+				if not has_meta(warned_key):
+					set_meta(warned_key, true)
+					push_warning("OpenOB AI door: " + report)
 
 func _actor_collision_radius(actor: Node3D) -> float:
 	for child: Node in actor.get_children():
