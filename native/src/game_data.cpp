@@ -194,6 +194,10 @@ const RaceFaceGenRecord* GameData::find_race_face_gen(std::uint32_t form_id) con
     return esm_.find_race_face_gen(form_id);
 }
 
+const std::string* GameData::find_race_voice_folder(std::uint32_t form_id, bool female) const {
+    return esm_.find_race_voice_folder(form_id, female);
+}
+
 const OutfitRecord* GameData::find_outfit(std::uint32_t form_id) const {
     return esm_.find_outfit(form_id);
 }

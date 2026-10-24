@@ -315,6 +315,17 @@ const RaceFaceGenRecord* Esm4Database::find_race_face_gen(std::uint32_t form_id)
     return it == race_face_gen_by_id_.end() ? nullptr : &it->second;
 }
 
+const std::string* Esm4Database::find_race_voice_folder(std::uint32_t form_id, bool female) const {
+    const auto race = race_face_gen_by_id_.find(form_id);
+    if (race == race_face_gen_by_id_.end()) return nullptr;
+    const auto voice_form_id = female ? race->second.voice_form_id_female : race->second.voice_form_id_male;
+    const auto voice_race = race_face_gen_by_id_.find(voice_form_id != 0 ? voice_form_id : form_id);
+    if (voice_race != race_face_gen_by_id_.end() && !voice_race->second.display_name.empty())
+        return &voice_race->second.display_name;
+    if (voice_form_id != 0 && !race->second.display_name.empty()) return &race->second.display_name;
+    return nullptr;
+}
+
 const OutfitRecord* Esm4Database::find_outfit(std::uint32_t form_id) const {
     const auto it = outfit_by_id_.find(form_id);
     return it == outfit_by_id_.end() ? nullptr : &it->second;
@@ -691,6 +702,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_npc_base) {
             npc.name = read_zstring(value, subrecord_size);
             record_display_name_by_id_[form_id] = npc.name;
+        } else if (tag == "FULL" && is_race) {
+            race_face_gen.display_name = lower_ascii(read_zstring(value, subrecord_size));
+            record_display_name_by_id_[form_id] = race_face_gen.display_name;
         } else if (tag == "FULL" && (is_item_model || is_spell)) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
@@ -808,6 +822,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             }
         } else if (tag == "RNAM" && is_npc_base && subrecord_size >= 4) {
             npc.race_form_id = u32(value);
+        } else if (tag == "VNAM" && is_race && subrecord_size >= 8) {
+            race_face_gen.voice_form_id_male = u32(value);
+            race_face_gen.voice_form_id_female = u32(value + 4);
         } else if (tag == "CNAM" && is_npc_base && subrecord_size >= 4) {
             npc.class_form_id = u32(value);
         } else if (tag == "DATA" && is_npc_base && subrecord_size >= 33) {

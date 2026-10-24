@@ -787,14 +787,26 @@ func _hold_dynamic_follow_route(actor: Dictionary, root: Node3D, target_form_id:
 const VOICE_FOLDERS := ["argonian", "breton", "dark seducer", "dremora", "golden saint", "high elf", "imperial", "nord", "redguard", "sheogorath"]
 var _speech_length_cache: Dictionary = {}
 
-func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, line_number: int, _text: String) -> Variant:
+func _speech_seconds(speaker: int, quest: String, topic: String, reply: int, line_number: int, _text: String) -> Variant:
 	var file_name := "%s_%s_%08x_%d.mp3" % [quest.to_lower(), topic.to_lower(), reply, maxi(1, line_number)]
-	if _speech_length_cache.has(file_name):
-		return _speech_length_cache[file_name]
+	var cache_key := "%d:%s" % [speaker, file_name]
+	if _speech_length_cache.has(cache_key):
+		return _speech_length_cache[cache_key]
+	var speaker_npc: Dictionary = data_reader.find_npc_base(speaker) if speaker > 0 else {}
+	var sex := "f" if bool(speaker_npc.get("female", false)) else "m"
+	var voice_folder_key := "voice_folder_female" if sex == "f" else "voice_folder_male"
+	var voice_folder := str(speaker_npc.get(voice_folder_key, "")).strip_edges().to_lower()
+	var folders: Array[String] = []
+	if not voice_folder.is_empty():
+		folders.push_back(voice_folder)
+	else:
+		for folder: String in VOICE_FOLDERS:
+			folders.push_back(folder)
 	var length: Variant = null
-	for folder: String in VOICE_FOLDERS:
-		for sex: String in ["m", "f"]:
-			var bytes: PackedByteArray = data_reader.read_asset("sound\\voice\\oblivion.esm\\%s\\%s\\%s" % [folder, sex, file_name])
+	var sexes := [sex] if not speaker_npc.is_empty() else ["m", "f"]
+	for folder: String in folders:
+		for voice_sex: String in sexes:
+			var bytes: PackedByteArray = data_reader.read_asset("sound\\voice\\oblivion.esm\\%s\\%s\\%s" % [folder, voice_sex, file_name])
 			if bytes.is_empty():
 				continue
 			var stream := AudioStreamMP3.new()
@@ -803,7 +815,7 @@ func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, li
 			break
 		if length != null:
 			break
-	_speech_length_cache[file_name] = length
+	_speech_length_cache[cache_key] = length
 	return length
 
 var _player_route_timer := 0.0

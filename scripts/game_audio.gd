@@ -103,13 +103,18 @@ func play_dialogue(
 	var npc: Dictionary = reader.call("find_npc_base", speaker_form_id)
 	var race_form_id := int(npc.get("race_form_id", 0))
 	var race_editor_id := str(reader.call("find_editor_id", race_form_id)).to_lower()
-	var voice_group := _voice_group(race_editor_id)
 	var sex := "f" if bool(npc.get("female", false)) else "m"
+	var voice_group_key := "voice_folder_female" if sex == "f" else "voice_folder_male"
+	var mapped_voice_group := str(npc.get(voice_group_key, "")).strip_edges().to_lower()
+	var voice_group := mapped_voice_group if not mapped_voice_group.is_empty() else _voice_group(race_editor_id)
 	var file_name := "%s_%s_%08x_%d.mp3" % [quest.to_lower(), topic.to_lower(), reply_form_id, maxi(1, line_number)]
 	var groups_to_try: Array[String] = [voice_group]
-	for group: String in VOICE_GROUPS:
-		if group != voice_group:
-			groups_to_try.push_back(group)
+	# A valid VNAM mapping names the exact voice type; only probe the archive's other
+	# folders for races that lack VNAM data in the loaded records.
+	if mapped_voice_group.is_empty():
+		for group: String in VOICE_GROUPS:
+			if group != voice_group:
+				groups_to_try.push_back(group)
 	var selected_stream: AudioStream
 	var selected_group := ""
 	var selected_asset_path := ""

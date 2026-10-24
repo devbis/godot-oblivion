@@ -471,6 +471,10 @@ public:
         result["skills"] = skills;
         result["female"] = (npc->flags & 0x000001) != 0;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
+        const auto* male_voice_folder = data_->find_race_voice_folder(npc->race_form_id, false);
+        const auto* female_voice_folder = data_->find_race_voice_folder(npc->race_form_id, true);
+        result["voice_folder_male"] = male_voice_folder ? as_string(*male_voice_folder) : String();
+        result["voice_folder_female"] = female_voice_folder ? as_string(*female_voice_folder) : String();
         result["hair_form_id"] = static_cast<int64_t>(npc->hair_form_id);
         result["eye_form_id"] = static_cast<int64_t>(npc->eye_form_id);
         result["default_outfit_form_id"] = static_cast<int64_t>(npc->default_outfit_form_id);
