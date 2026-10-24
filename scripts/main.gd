@@ -4965,7 +4965,6 @@ func set_npc_look_target(reference_name: String, target_reference: String) -> St
 	if not is_instance_valid(target):
 		return ""
 	actor["look_target"] = target
-	actor["look_blend"] = 0.0
 	return str(actor.get("reference_name", reference_name))
 
 
@@ -4974,7 +4973,7 @@ func stop_npc_look_target(reference_name: String) -> String:
 	if actor.is_empty():
 		return ""
 	actor["look_target"] = null
-	actor["look_blend"] = 0.0
+	actor["look_offset"] = Quaternion.IDENTITY
 	var skeleton := actor.get("skeleton") as Skeleton3D
 	if is_instance_valid(skeleton):
 		_restore_npc_head_pose(actor, skeleton)
@@ -5044,10 +5043,10 @@ func _npc_look_target_is_active(actor: Dictionary) -> bool:
 
 
 func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float, look_target_active: bool) -> void:
-	if not look_target_active:
-		return
 	var target := actor.get("look_target") as Node3D
-	if not is_instance_valid(target):
+	if not look_target_active or not is_instance_valid(target):
+		# The head shows the animation's pose again, so a later look starts from there.
+		actor["look_offset"] = Quaternion.IDENTITY
 		return
 	var bone_index := int(actor.get("look_bone_index", -1))
 	if bone_index < 0:
@@ -5090,11 +5089,13 @@ func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float
 	var blend := 1.0 - exp(-5.0 * delta)
 	actor["look_base_pose_rotation"] = base_rotation
 	actor["look_pose_applied"] = true
-	actor["look_blend"] = minf(1.0, float(actor.get("look_blend", 0.0)) + blend)
-	skeleton.set_bone_pose_rotation(
-		bone_index,
-	base_rotation.slerp(desired_pose_rotation, float(actor["look_blend"]))
-	)
+	# The turn away from the animation's pose is eased on its own: a new target continues from where the head already
+	# is, instead of dropping back to the animation's pose and turning from there.
+	var desired_offset := base_rotation.inverse() * desired_pose_rotation
+	var offset: Quaternion = actor.get("look_offset", Quaternion.IDENTITY)
+	offset = offset.slerp(desired_offset, blend)
+	actor["look_offset"] = offset
+	skeleton.set_bone_pose_rotation(bone_index, base_rotation * offset)
 
 ## The idle manager's PickIdle for one NPC (see QuestWorld.pick_idle): plays the chosen original clip on the actor
 ## with the reference name. An empty path means no idle matched: the actor returns to its default idle. An actor that
