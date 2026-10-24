@@ -665,6 +665,8 @@ func _find_trigger_zones(generation: int) -> void:
 ## an upcoming route segment crosses a door and the actor is close to it, open
 ## that actual DOOR reference before the actor reaches its collision body.
 const DOOR_APPROACH_MARGIN_M := 0.5
+## How far a speaking or gazing NPC turns its head toward its target, from the pose its animation gives.
+const NPC_HEAD_LOOK_MAX_ANGLE := deg_to_rad(48.0)
 
 func _open_doors_on_npc_routes() -> void:
 	for actor: Dictionary in _npc_actors:
@@ -3737,8 +3739,10 @@ func _dialogue_head_position(actor: Dictionary) -> Vector3:
 	return player.global_position + Vector3.UP * 1.5
 
 
-## The horizontal direction the actor's face points, so the dialogue camera frames the face the actor speaks with. A
-## turned head decides it; the body's facing is the fallback when the head cannot be read or points up or down.
+## The horizontal direction the actor's face will point while it talks, so the dialogue camera goes there once and stays.
+## The head turns toward the player during dialogue (see _update_npc_head_look), so reading the current pose would send the
+## camera one way and then drag it to the other as that turn blends in. Instead the head's own pose, before the gaze
+## is applied, is turned toward the player by the same limited angle the gaze uses. The body's facing is the fallback.
 func _dialogue_face_forward(actor: Dictionary, actor_root: Node3D) -> Vector3:
 	var body_forward := -actor_root.global_basis.z
 	body_forward.y = 0.0
@@ -3746,14 +3750,43 @@ func _dialogue_face_forward(actor: Dictionary, actor_root: Node3D) -> Vector3:
 		body_forward = player.global_position - actor_root.global_position
 		body_forward.y = 0.0
 	body_forward = body_forward.normalized() if body_forward.length_squared() > 0.001 else Vector3.FORWARD
-	var head_forward := head_forward_on_skeleton(actor.get("skeleton") as Skeleton3D, body_forward)
-	return head_forward if head_forward.length_squared() > 0.0 else body_forward
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	if not is_instance_valid(skeleton):
+		return body_forward
+	var head_index := skeleton.find_bone("Bip01 Head")
+	if head_index < 0:
+		return body_forward
+	var base_rotation := skeleton.get_bone_pose_rotation(head_index)
+	if bool(actor.get("look_pose_applied", false)) and int(actor.get("look_bone_index", -1)) == head_index:
+		base_rotation = actor.get("look_base_pose_rotation", base_rotation)
+	var head_forward := head_forward_vector(skeleton, body_forward, base_rotation)
+	if head_forward.length_squared() < 0.001:
+		return body_forward
+	var gaze_target := actor.get("look_target") as Node3D
+	if not is_instance_valid(gaze_target):
+		gaze_target = player
+	var to_target := _look_target_world_position(gaze_target) - _dialogue_head_position(actor)
+	if to_target.length_squared() > 0.0001:
+		head_forward = turn_toward_limited(head_forward.normalized(), to_target.normalized(), NPC_HEAD_LOOK_MAX_ANGLE)
+	head_forward.y = 0.0
+	if head_forward.length_squared() < 0.04:
+		return body_forward
+	return head_forward.normalized()
 
 
-## The horizontal direction "Bip01 Head" points, given the direction the body faces at rest (zero when the skeleton has
-## no head or the head points up or down). Bone axes differ between rigs, so the forward axis is whatever points along
-## the body's facing in the rest pose.
-static func head_forward_on_skeleton(skeleton: Skeleton3D, body_forward: Vector3) -> Vector3:
+## `forward` turned toward `target` by at most `max_angle` radians.
+static func turn_toward_limited(forward: Vector3, target: Vector3, max_angle: float) -> Vector3:
+	var delta := Quaternion(forward, target)
+	var angle := delta.get_angle()
+	if angle > max_angle:
+		delta = Quaternion.IDENTITY.slerp(delta, max_angle / angle)
+	return delta * forward
+
+
+## The direction "Bip01 Head" points in world space with its local pose rotation set to `pose_rotation`, given the direction the
+## body faces at rest (zero when the skeleton has no head). Bone axes differ between rigs, so the forward axis is
+## whatever points along the body's facing in the rest pose.
+static func head_forward_vector(skeleton: Skeleton3D, body_forward: Vector3, pose_rotation: Quaternion) -> Vector3:
 	if not is_instance_valid(skeleton):
 		return Vector3.ZERO
 	var head_index := skeleton.find_bone("Bip01 Head")
@@ -3762,12 +3795,13 @@ static func head_forward_on_skeleton(skeleton: Skeleton3D, body_forward: Vector3
 	var skeleton_basis := skeleton.global_transform.basis
 	var rest_head_basis := skeleton_basis * skeleton.get_bone_global_rest(head_index).basis
 	var forward_in_bone := rest_head_basis.orthonormalized().inverse() * body_forward
-	var head_basis := skeleton_basis * skeleton.get_bone_global_pose(head_index).basis
-	var head_forward := head_basis.orthonormalized() * forward_in_bone
-	head_forward.y = 0.0
-	if head_forward.length_squared() < 0.04:
-		return Vector3.ZERO
-	return head_forward.normalized()
+	var parent_index := skeleton.get_bone_parent(head_index)
+	var parent_basis := skeleton_basis
+	if parent_index >= 0:
+		parent_basis = skeleton_basis * skeleton.get_bone_global_pose(parent_index).basis
+	# Godot keeps a bone's pose as its local rotation (reset_bone_poses copies the rest into it).
+	var head_basis := parent_basis * Basis(pose_rotation)
+	return head_basis.orthonormalized() * forward_in_bone
 
 
 func _update_dialogue_camera(delta: float) -> void:
@@ -5041,7 +5075,7 @@ func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float
 	target_direction = target_direction.normalized()
 	var current_forward := -head_transform.basis.z.normalized()
 	var world_delta := Quaternion(current_forward, target_direction)
-	var max_angle := deg_to_rad(48.0)
+	var max_angle := NPC_HEAD_LOOK_MAX_ANGLE
 	var angle := world_delta.get_angle()
 	if angle > max_angle:
 		world_delta = Quaternion.IDENTITY.slerp(world_delta, max_angle / angle)
