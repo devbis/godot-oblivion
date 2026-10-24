@@ -425,8 +425,9 @@ private:
             expr.line = token.line;
             const auto signature = allow_arguments ? command_signature(token.text) : std::nullopt;
             // With a lookup, a known command is a call even without arguments (`getsecondspassed`);
-            // without one, a name is a call only when arguments follow it.
-            const bool is_call = signature && (lookup_ ? true : starts_argument(token.line));
+            // without one, a name is a call only when arguments follow it. A `-` after the name is a subtraction
+            // there (`fTimer - 1`), not a negative first argument.
+            const bool is_call = signature && (lookup_ ? true : starts_plain_argument(token.line));
             if (is_call) {
                 expr.kind = ScriptExprKind::Call;
                 expr.text = token.text;
