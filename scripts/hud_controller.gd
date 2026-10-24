@@ -271,8 +271,11 @@ func load_assets(assets: Object) -> void:
 	if _compass_face.texture != null:
 		_compass_face.size.y = float(_compass_face.texture.get_height())
 		_compass_face.position.y = (_compass_window.size.y - _compass_face.size.y) * 0.5
-	_weapon_icon.texture = _weapon_default_texture
-	_magic_icon.texture = _magic_default_texture
+	# An equipped item's own icon may already have loaded while these awaits ran.
+	if _weapon_icon.texture == null:
+		_weapon_icon.texture = _weapon_default_texture
+	if _magic_icon.texture == null:
+		_magic_icon.texture = _magic_default_texture
 	var small_icons: Texture2D = await assets.texture_for_path(SMALL_ICONS_PATH)
 	if small_icons != null:
 		var lock_texture := AtlasTexture.new()
