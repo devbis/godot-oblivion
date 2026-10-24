@@ -1037,12 +1037,14 @@ public:
         return value ? *value : -1.0;
     }
 
-    // Runs an event of an object's script (OnTrigger with the player as the detail) in the world.
-    Dictionary run_object_event(int64_t script_form_id, const String& event, const String& detail, const Callable& distance) {
+    // Runs an event of an object's script in the world, with an optional self and action reference.
+    Dictionary run_object_event(int64_t script_form_id, const String& event, const String& detail, const Callable& distance,
+                                const String& object_reference = String(), const String& action_reference = String()) {
         const auto* game = game_.get();
         const auto* script = game ? game->find_script(static_cast<std::uint32_t>(script_form_id)) : nullptr;
         if (!script || !world_) return Dictionary();
-        return tick_to_dictionary(world_->run_object_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance)));
+        return tick_to_dictionary(world_->run_object_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance),
+                                                           utf8_value(object_reference), utf8_value(action_reference)));
     }
 
     // Registers an NPC whose script's GameMode runs on every tick. False when the NPC or its script is missing.
@@ -1233,7 +1235,8 @@ public:
         ClassDB::bind_method(D_METHOD("add_actor", "npc_form_id", "reference_name"), &OblivionQuestWorld::add_actor);
         ClassDB::bind_method(D_METHOD("set_actor_package", "reference_name", "package_form_id"), &OblivionQuestWorld::set_actor_package);
         ClassDB::bind_method(D_METHOD("clear_actors"), &OblivionQuestWorld::clear_actors);
-        ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
+        ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance", "object_reference", "action_reference"),
+                             &OblivionQuestWorld::run_object_event, DEFVAL(String()), DEFVAL(String()));
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
         ClassDB::bind_method(D_METHOD("begin_dialogue", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),

@@ -6,6 +6,7 @@ const START_MARKER_FORM_ID := 0x00032AB5
 const PLAYER_REFERENCE_FORM_ID := 0x00000014
 const AI_PACKAGE_TYPE_AMBUSH := 9
 const AI_PACKAGE_TYPE_FOLLOW := 1
+const AI_PACKAGE_TYPE_USE_ITEM_AT := 8
 const AI_PACKAGE_TARGET_REFERENCE := 0
 const AI_PACKAGE_FLAG_ALWAYS_RUN := 0x2000
 const DIALOGUE_REPLY_FLAG_GOODBYE := 0x01
@@ -760,7 +761,8 @@ func _update_dynamic_target_routes() -> void:
 		var destination_form_id := _package_destination_form_id(package)
 		var follows_player := destination_form_id == PLAYER_REFERENCE_FORM_ID
 		var follows_actor := _is_dynamic_follow_package(package)
-		if (not follows_player and not follows_actor) or bool(actor.get("package_done", false)):
+		var uses_target := int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT
+		if (not follows_player and not follows_actor and not uses_target) or bool(actor.get("package_done", false)):
 			continue
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")):
@@ -772,15 +774,19 @@ func _update_dynamic_target_routes() -> void:
 			continue
 		var destination: Vector3 = destination_value
 		var arrival_distance := _package_destination_arrival_distance(package, root)
+		if uses_target:
+			arrival_distance = float(actor.get("package_arrival_distance", arrival_distance))
 		var destination_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
 		if destination_distance <= arrival_distance:
 			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 			if not active_route.is_empty():
 				var stopped_route: Array[Dictionary] = []
 				root.call("configure_route", stopped_route, false, 0.0, arrival_distance)
-			# A moving target can enter the authored radius between route waypoints. Stopping the route does not emit
-			# route_finished, so complete the package explicitly when the leader or player is already in range.
+			# A moving target can enter its authored radius between waypoints. Use Item At packages can also reach their
+			# location without the route controller emitting its final waypoint signal after collision resolution.
 			_on_actor_route_finished(int(actor.get("reference_id", 0)))
+			continue
+		if uses_target:
 			continue
 		var target: Vector3 = actor.get("route_target", Vector3.INF)
 		var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
@@ -1018,6 +1024,8 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	# A new package starts a new activation: its OnPackageDone may run once when its route ends.
 	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
 		actor["package_done"] = false
+		actor["package_target_activated"] = false
+		actor.erase("package_arrival_distance")
 	if int(package.get("form_id", 0)) != int(previous.get("form_id", 0)):
 		actor.erase("npc_greet_attempted_package_id")
 		actor.erase("npc_greet_last_attempt_msec")
@@ -1042,13 +1050,21 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			])
 		else:
 			final_arrival_distance = _package_destination_arrival_distance(package, root as Node3D)
+			var destination: Vector3 = position
 			if destination_form_id == PLAYER_REFERENCE_FORM_ID or _is_dynamic_follow_package(package):
-				actor["route_target"] = position
+				actor["route_target"] = destination
 			else:
 				actor.erase("route_target")
 			var flags := int(package.get("flags", 0))
 			var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
-			route_path = director.navigation_path((root as Node3D).global_position, position, _actor_collision_radius(root as Node3D))
+			route_path = director.navigation_path((root as Node3D).global_position, destination, _actor_collision_radius(root as Node3D))
+			if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT and not route_path.is_empty():
+				var path_endpoint: Vector3 = route_path[route_path.size() - 1]
+				var navmesh_snap_distance := Vector2(path_endpoint.x - destination.x, path_endpoint.z - destination.z).length()
+				# The navmesh can project a scripted marker to the nearest walkable edge. Include that projection
+				# in the package arrival range, bounded by the actor's collision radius.
+				final_arrival_distance += minf(navmesh_snap_distance, _actor_collision_radius(root as Node3D))
+			actor["package_arrival_distance"] = final_arrival_distance
 			for point: Vector3 in route_path:
 				waypoints.push_back({"position": point, "speed_mps": speed})
 	# A route that starts ends a whole-body idle: the actor walks. An upper-body idle (pointing, arms crossed) plays on over the walk.
@@ -1067,7 +1083,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		root.set_meta("route_finished_connected", true)
 		root.route_finished.connect(_on_actor_route_finished.bind(int(actor.get("reference_id", 0))))
 
-## The NPC reached the end of its package's route: run OnPackageDone on its script.
+## The NPC reached its package destination: perform any target activation, then run OnPackageDone.
 func _on_actor_route_finished(actor_reference_id: int) -> void:
 	if _dialogue_active or _dialogue_exit_transition:
 		if not _pending_dialogue_route_finished_actor_ids.has(actor_reference_id):
@@ -1088,7 +1104,9 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			var destination: Vector3 = location
 			var horizontal_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
 			var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
-			var arrival_radius := _package_destination_arrival_distance(package, root)
+			var arrival_radius := float(actor.get(
+				"package_arrival_distance", _package_destination_arrival_distance(package, root)
+			))
 			if horizontal_distance > arrival_radius:
 				# A partial NavigationServer path is not package completion. Replan from the
 				# actor's current position, and leave OnPackageDone for actual arrival.
@@ -1100,6 +1118,12 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 						var flags := int(package.get("flags", 0))
 						var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 						var waypoints: Array[Dictionary] = []
+						if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT:
+							var endpoint: Vector3 = retry_path[retry_path.size() - 1]
+							var snap_distance := Vector2(endpoint.x - destination.x, endpoint.z - destination.z).length()
+							arrival_radius = _package_destination_arrival_distance(package, root) \
+								+ minf(snap_distance, _actor_collision_radius(root))
+							actor["package_arrival_distance"] = arrival_radius
 						for point: Vector3 in retry_path:
 							waypoints.push_back({"position": point, "speed_mps": speed})
 						root.call("configure_route", waypoints, false, 0.0, arrival_radius)
@@ -1114,6 +1138,10 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			str(package.get("editor_id", "")),
 			_package_location_label(destination_form_id),
 		])
+		if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT \
+				and not bool(actor.get("package_target_activated", false)):
+			actor["package_target_activated"] = true
+			_activate_ai_package_target(actor, package)
 		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
@@ -1121,6 +1149,43 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		if _needs_route_refresh(result):
 			_refresh_npc_routes()
 		return
+
+
+## Use Item At packages first route the actor to their authored location, then activate their target reference.
+func _activate_ai_package_target(actor: Dictionary, package: Dictionary) -> void:
+	var target_form_id := int(package.get("target_form_id", 0))
+	var target_reference := _placed_reference_by_form_id(target_form_id)
+	if target_reference.is_empty():
+		push_warning("OpenOB AI package %s for %s reached its location, but target %s is not in this cell" % [
+			str(package.get("editor_id", "")), str(actor.get("reference_name", "NPC")), _package_location_label(target_form_id)
+		])
+		return
+	var script_form_id := int(target_reference.get("script_form_id", 0))
+	if script_form_id <= 0:
+		push_warning("OpenOB AI package %s for %s reached target %s, but it has no object script" % [
+			str(package.get("editor_id", "")), str(actor.get("reference_name", "NPC")), _package_location_label(target_form_id)
+		])
+		return
+	var target_name := str(target_reference.get("reference_name", "")).strip_edges()
+	if target_name.is_empty():
+		target_name = "0x%08X" % target_form_id
+	var actor_name := str(actor.get("reference_name", actor.get("name", "")))
+	print("OpenOB AI use item: %s activates %s via package=%s" % [actor_name, target_name, str(package.get("editor_id", ""))])
+	var result: Dictionary = quest_world.run_object_event(
+		script_form_id, "OnActivate", "", Callable(self, "_quest_distance"), target_name, actor_name
+	)
+	for line: String in _apply_driver_result(result):
+		print("OpenOB use item: " + line)
+	if _needs_route_refresh(result):
+		_refresh_npc_routes()
+
+
+func _placed_reference_by_form_id(form_id: int) -> Dictionary:
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if int(reference.get("form_id", 0)) == form_id:
+			return reference
+	return {}
 
 
 ## An active Ambush package aimed at the player starts the eligible NPC greeting at its authored target distance.
@@ -1442,6 +1507,9 @@ func _load_cell_geometry(
 			director.register_door_reference(reference, meshes, _reference_transform(reference))
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
+		var animation_sequences: Array = physics_metadata.get("animations", [])
+		var has_nif_animations := not animation_sequences.is_empty()
+		var animate_reference := is_door or has_nif_animations
 		if _supports_imported_nif_physics(physics_metadata, meshes):
 			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
 				int(reference.get("form_id", 0)), reference_transform, model_path, meshes, physics_metadata
@@ -1469,14 +1537,14 @@ func _load_cell_geometry(
 		if should_collide:
 			_exterior_collision_attempted_ids[int(reference.get("form_id", 0))] = true
 			assets.ensure_collision_shape(model_path)
-		var door_animation_root: Node3D = null
-		var door_node_hosts: Dictionary = {}
-		if is_door:
-			door_animation_root = Node3D.new()
-			door_animation_root.name = "Door_%08X" % int(reference.get("form_id", 0))
-			door_animation_root.set_meta("reference_id", int(reference.get("form_id", 0)))
-			door_animation_root.transform = reference_transform
-			cell_visual_root.add_child(door_animation_root)
+		var animated_reference_root: Node3D = null
+		var animated_node_hosts: Dictionary = {}
+		if animate_reference:
+			animated_reference_root = Node3D.new()
+			animated_reference_root.name = "AnimatedReference_%08X" % int(reference.get("form_id", 0))
+			animated_reference_root.set_meta("reference_id", int(reference.get("form_id", 0)))
+			animated_reference_root.transform = reference_transform
+			cell_visual_root.add_child(animated_reference_root)
 		var item_mesh_instances: Array[MeshInstance3D] = []
 		for mesh_index in range(meshes.size()):
 			var mesh_entry: Dictionary = meshes[mesh_index]
@@ -1484,7 +1552,7 @@ func _load_cell_geometry(
 			var can_batch := (
 				is_exterior
 				and not is_pickup_item
-				and not is_door
+				and not animate_reference
 				and not _is_debug_service_model(model_path)
 				and not bool(mesh_entry.get("alpha_blend", false))
 			)
@@ -1540,16 +1608,16 @@ func _load_cell_geometry(
 				)
 				if generation != _cell_load_generation:
 					return false
-				if is_door:
+				if animate_reference:
 					var parent_node_name := str(mesh_entry.get("parent_node_name", ""))
-					var node_host := door_node_hosts.get(parent_node_name) as Node3D
+					var node_host := animated_node_hosts.get(parent_node_name) as Node3D
 					if node_host == null:
 						node_host = Node3D.new()
-						node_host.name = "NifNode_%d" % door_node_hosts.size()
+						node_host.name = "NifNode_%d" % animated_node_hosts.size()
 						node_host.set_meta("nif_node_name", parent_node_name)
 						node_host.set_meta("reference_id", int(reference.get("form_id", 0)))
-						door_animation_root.add_child(node_host)
-						door_node_hosts[parent_node_name] = node_host
+						animated_reference_root.add_child(node_host)
+						animated_node_hosts[parent_node_name] = node_host
 					instance.transform = Transform3D.IDENTITY
 					node_host.add_child(instance)
 				else:
@@ -1558,8 +1626,8 @@ func _load_cell_geometry(
 				if is_pickup_item:
 					item_mesh_instances.push_back(instance)
 				instance_count += 1
-		if door_animation_root != null and not door_node_hosts.is_empty():
-			_install_door_nif_animations(door_animation_root, physics_metadata, door_node_hosts)
+		if animated_reference_root != null and not animated_node_hosts.is_empty():
+			_install_nif_animations(animated_reference_root, physics_metadata, animated_node_hosts)
 		if is_pickup_item and not item_mesh_instances.is_empty():
 			var reference_id := int(reference.get("form_id", 0))
 			var item_display_name := str(reference.get("reference_name", "")).strip_edges()
@@ -4589,10 +4657,10 @@ func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void
 	if skeleton == _player_skeleton:
 		print("OpenOB aligned avatar mesh origin to rig root: root_height=%.3fm" % rig_root_height)
 
-## Rebuilds door animation tracks from the NIF's own NiControllerSequence data.
+## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
-func _install_door_nif_animations(door_root: Node3D, metadata: Dictionary, node_hosts: Dictionary) -> void:
+func _install_nif_animations(animated_root: Node3D, metadata: Dictionary, node_hosts: Dictionary) -> void:
 	var sequences: Array = metadata.get("animations", [])
 	var nodes: Array = metadata.get("nodes", [])
 	if sequences.is_empty() or nodes.is_empty():
@@ -4604,9 +4672,9 @@ func _install_door_nif_animations(door_root: Node3D, metadata: Dictionary, node_
 		if not node_name.is_empty():
 			node_map[node_name] = node
 	var animation_player := AnimationPlayer.new()
-	animation_player.name = "NifDoorAnimationPlayer"
+	animation_player.name = "NifAnimationPlayer"
 	animation_player.root_node = NodePath("..")
-	animation_player.set_meta("reference_id", int(door_root.get_meta("reference_id", 0)))
+	animation_player.set_meta("reference_id", int(animated_root.get_meta("reference_id", 0)))
 	var library := AnimationLibrary.new()
 	var animation_count := 0
 	for sequence_value: Variant in sequences:
@@ -4664,7 +4732,7 @@ func _install_door_nif_animations(door_root: Node3D, metadata: Dictionary, node_
 			animation_count += 1
 	if animation_count == 0:
 		return
-	door_root.add_child(animation_player)
+	animated_root.add_child(animation_player)
 	animation_player.add_animation_library("", library)
 
 func _nif_node_global_rest(node_name: String, node_map: Dictionary, cache: Dictionary) -> Transform3D:

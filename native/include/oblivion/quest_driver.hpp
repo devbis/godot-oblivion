@@ -219,9 +219,11 @@ public:
     // Stage-result evaluation uses this return value before it executes the recorded SayTo action.
     double speech_duration(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener) const;
 
-    // Runs an event of an object's script (OnTrigger with the player as the detail) in the world, as an actor's would run.
+    // Runs an event of an object's script in the world. Optional references provide the script's self reference and
+    // IsActionRef context for events such as OnActivate.
     QuestTick run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
-                               const DistanceFunction& distance = {});
+                               const DistanceFunction& distance = {}, std::string_view object_reference = {},
+                               std::string_view action_reference = {});
 
     // The NPC base a placed reference of the scene stands for, so that SayTo to the reference names its base.
     void set_reference_base(std::string_view reference, std::uint32_t base);

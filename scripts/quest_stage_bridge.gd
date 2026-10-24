@@ -74,6 +74,8 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			return _deactivate(target, command, world, label)
 		"setopenstate":
 			return _set_open_state(target, arguments, references, world, label)
+		"playgroup":
+			return _play_group(target, arguments, references, world, label)
 		"speech":
 			# A resolved Say/SayTo reply, with the speaker's installed voice, face animation and subtitle.
 			var line := str(arguments[0]) if not arguments.is_empty() else ""
@@ -213,8 +215,8 @@ func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D,
 	var state_key := "door_open_%08x" % reference_id
 	if world.has_meta(state_key) and bool(world.get_meta(state_key)) == is_open:
 		return "applied: %s (%s)" % [label, "open" if is_open else "closed"]
-	var animation_player := _door_animation_player(reference_id, world)
-	var sequence_name := _door_animation_name(animation_player, "Open" if is_open else "Close")
+	var animation_player := _reference_animation_player(reference_id, world)
+	var sequence_name := _reference_animation_name(animation_player, "Open" if is_open else "Close")
 	var body_count := _door_body_count(reference_id, world)
 	if animation_player != null and not sequence_name.is_empty():
 		world.set_meta(state_key, is_open)
@@ -238,7 +240,31 @@ func _play_door_audio(reference: Dictionary, is_open: bool, world: Node3D) -> vo
 		audio_manager.call("play_door_state", reference, is_open, world)
 
 
-func _door_animation_player(reference_id: int, world: Node3D) -> AnimationPlayer:
+func _play_group(target: String, arguments: Array, references: Dictionary, world: Node3D, label: String) -> String:
+	if target.is_empty() or arguments.is_empty():
+		return "not applied: %s needs an object and an animation group" % label
+	var reference: Dictionary = references.get(target, {})
+	if reference.is_empty():
+		return "not applied: %s, %s is not in this cell" % [label, target]
+	var reference_id := int(reference.get("form_id", 0))
+	var animation_player := _reference_animation_player(reference_id, world)
+	var sequence_name := _reference_animation_name(animation_player, str(arguments[0]))
+	if animation_player == null or sequence_name.is_empty():
+		return "not applied: %s has no NIF animation group '%s'" % [label, str(arguments[0])]
+	var group_name := str(arguments[0]).to_lower()
+	if group_name in ["forward", "open"]:
+		animation_player.animation_finished.connect(
+			_finish_reference_animation.bind(reference_id, false, world), CONNECT_ONE_SHOT
+		)
+	elif group_name in ["backward", "close"]:
+		animation_player.animation_finished.connect(
+			_finish_reference_animation.bind(reference_id, true, world), CONNECT_ONE_SHOT
+		)
+	animation_player.play(sequence_name)
+	return "applied: %s (%s animation)" % [label, sequence_name]
+
+
+func _reference_animation_player(reference_id: int, world: Node3D) -> AnimationPlayer:
 	for node: Node in world.find_children("*", "AnimationPlayer", true, false):
 		var animation_player := node as AnimationPlayer
 		if animation_player != null and int(animation_player.get_meta("reference_id", 0)) == reference_id:
@@ -246,7 +272,7 @@ func _door_animation_player(reference_id: int, world: Node3D) -> AnimationPlayer
 	return null
 
 
-func _door_animation_name(animation_player: AnimationPlayer, requested_name: String) -> String:
+func _reference_animation_name(animation_player: AnimationPlayer, requested_name: String) -> String:
 	if animation_player == null:
 		return ""
 	for animation_name: StringName in animation_player.get_animation_list():
@@ -273,11 +299,23 @@ func _finish_door_animation(_animation_name: StringName, reference_id: int, is_o
 
 
 func _set_door_collision(reference_id: int, is_open: bool, world: Node3D) -> void:
+	_set_reference_collision_enabled(reference_id, not is_open, world)
+
+
+func _finish_reference_animation(_animation_name: StringName, reference_id: int, collision_enabled: bool, world: Node3D) -> void:
+	if not is_instance_valid(world):
+		return
+	_set_reference_collision_enabled(reference_id, collision_enabled, world)
+
+
+## Generated collision is a static mesh snapshot. When an authored NIF sequence moves an object, leaving that
+## snapshot in place creates an invisible blocker, so forward/open groups disable it and reverse/close restore it.
+func _set_reference_collision_enabled(reference_id: int, collision_enabled: bool, world: Node3D) -> void:
 	for node: Node in world.find_children("*", "PhysicsBody3D", true, false):
 		var body := node as PhysicsBody3D
 		if body == null or int(body.get_meta("reference_id", 0)) != reference_id:
 			continue
-		if is_open:
+		if not collision_enabled:
 			if not body.has_meta("closed_layer"):
 				body.set_meta("closed_layer", body.collision_layer)
 				body.set_meta("closed_mask", body.collision_mask)

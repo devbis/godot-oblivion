@@ -836,9 +836,10 @@ namespace {
 class ActorTickHost final : public ScriptHost {
 public:
     ActorTickHost(QuestWorld& world, std::uint32_t speaker, std::string speaker_reference, QuestTick& tick, double seconds,
-                  const DistanceFunction& distance, std::function<void()> take_writes)
+                  const DistanceFunction& distance, std::function<void()> take_writes,
+                  std::string action_reference = {})
         : world_(world), speaker_(speaker), speaker_reference_(std::move(speaker_reference)), tick_(tick), seconds_(seconds), distance_(distance),
-          take_writes_(std::move(take_writes)) {}
+          take_writes_(std::move(take_writes)), action_reference_(lower(action_reference)) {}
 
     std::optional<ScriptValue> call_command(std::string_view name, const ScriptValue* target,
                                             const std::vector<ScriptValue>& arguments) override {
@@ -850,6 +851,8 @@ public:
         }
         const auto command = lower(name);
         const auto* quest = !arguments.empty() && arguments[0].is_text ? world_.find(arguments[0].text) : nullptr;
+        if (command == "isactionref" && !arguments.empty() && arguments[0].is_text)
+            return ScriptValue::from_number(lower(arguments[0].text) == action_reference_ ? 1.0 : 0.0);
         if (command == "getsecondspassed") return ScriptValue::from_number(seconds_);
         if (command == "getstage" && quest) return ScriptValue::from_number(quest->stage());
         if (command == "getstagedone" && quest && arguments.size() >= 2) {
@@ -921,6 +924,7 @@ private:
     double seconds_;
     const DistanceFunction& distance_;
     std::function<void()> take_writes_;
+    std::string action_reference_;
 };
 
 } // namespace
@@ -1005,7 +1009,8 @@ void QuestWorld::run_actor_game_mode(ActorState& actor, QuestTick& tick, double 
 }
 
 QuestTick QuestWorld::run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
-                                       const DistanceFunction& distance) {
+                                       const DistanceFunction& distance, std::string_view object_reference,
+                                       std::string_view action_reference) {
     QuestTick tick;
     RunGuard guard(*this);
     // Parsed once; the variables the script's earlier events left are the ones this event starts with.
@@ -1015,8 +1020,10 @@ QuestTick QuestWorld::run_object_event(const ScriptRecord& script, std::string_v
     ScriptInterpreter interpreter(cached.ast);
     interpreter.set_trace(false);
     for (const auto& [key, value] : cached.variables) interpreter.set_variable(key, ScriptValue::from_number(value));
-    ActorTickHost host(*this, 0, {}, tick, 0.0, distance, [] {});
-    interpreter.run_event(event, detail, host);
+    const auto effective_action_reference = action_reference.empty() ? detail : action_reference;
+    ActorTickHost host(*this, 0, {}, tick, 0.0, distance, [] {}, std::string(effective_action_reference));
+    const auto object_target = ScriptValue::from_text(std::string(object_reference));
+    interpreter.run_event(event, detail, host, object_reference.empty() ? nullptr : &object_target);
     for (const auto& [key, value] : interpreter.variables()) {
         if (value.is_text) continue;
         if (key.find('.') != std::string::npos) write_foreign_variable(this, key, value.number);
