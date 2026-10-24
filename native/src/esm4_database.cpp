@@ -172,6 +172,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
     spell_by_id_.clear();
+    weapon_by_id_.clear();
     magic_effect_by_code_.clear();
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
@@ -296,6 +297,11 @@ const NpcBaseRecord* Esm4Database::find_npc_base(std::uint32_t form_id) const {
 const SpellRecord* Esm4Database::find_spell(std::uint32_t form_id) const {
     const auto it = spell_by_id_.find(form_id);
     return it == spell_by_id_.end() ? nullptr : &it->second;
+}
+
+const WeaponRecord* Esm4Database::find_weapon(std::uint32_t form_id) const {
+    const auto it = weapon_by_id_.find(form_id);
+    return it == weapon_by_id_.end() ? nullptr : &it->second;
 }
 
 std::optional<float> Esm4Database::find_float_game_setting(std::string_view name) const {
@@ -775,6 +781,14 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "MOD4" && (type == "ARMO" || type == "CLOT")) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) female_world_item_model_by_id_[form_id] = path;
+        } else if (tag == "DATA" && type == "WEAP" && subrecord_size >= 30) {
+            WeaponRecord weapon;
+            weapon.weapon_type = u32(value);
+            weapon.speed = f32(value + 4);
+            weapon.reach = f32(value + 8);
+            weapon.flags = u32(value + 12);
+            weapon.damage = u16(value + 28);
+            weapon_by_id_[form_id] = weapon;
         } else if (tag == "BMDT" && (type == "ARMO" || type == "CLOT") && subrecord_size >= 2) {
             item_biped_slots_by_id_[form_id] = u16(value);
         } else if (tag == "INAM" && is_outfit && subrecord_size >= 4) {

@@ -64,6 +64,16 @@ struct SpellEffectRecord {
     float base_cost = 0.0f;
 };
 
+// The WEAP DATA subrecord: how the weapon is held (and so which first-person clips play) and how fast and far it swings.
+struct WeaponRecord {
+    // 0 blade one hand, 1 blade two hand, 2 blunt one hand, 3 blunt two hand, 4 staff, 5 bow.
+    std::uint32_t weapon_type = 0;
+    float speed = 1.0f;
+    float reach = 1.0f;
+    std::uint32_t flags = 0;
+    std::uint16_t damage = 0;
+};
+
 struct SpellRecord {
     std::uint32_t form_id = 0;
     std::uint8_t spell_type = 0;
@@ -184,6 +194,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
+    [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
@@ -235,6 +246,7 @@ private:
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
+    std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;

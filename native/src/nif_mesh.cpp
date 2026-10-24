@@ -16,6 +16,7 @@
 
 #include <Geometry.hpp>
 #include <Animation.hpp>
+#include <ExtraData.hpp>
 #include <bhk.hpp>
 #include <ExtraData.hpp>
 #include <Nodes.hpp>
@@ -514,6 +515,9 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         animation.start_time = sequence->startTime;
         animation.stop_time = sequence->stopTime;
         animation.cycle_type = static_cast<std::uint32_t>(sequence->cycleType);
+        if (auto* text_keys = file.GetHeader().GetBlock<nifly::NiTextKeyExtraData>(sequence->textKeyRef)) {
+            for (const auto& key : text_keys->textKeys) animation.text_keys.emplace_back(key.time, key.value.get());
+        }
         for (const auto& link : sequence->controlledBlocks) {
             if (auto* spline = file.GetHeader().GetBlock<nifly::NiBSplineTransformInterpolator>(link.interpolatorRef)) {
                 NifAnimationTrackData track;

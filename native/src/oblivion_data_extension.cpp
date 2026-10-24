@@ -554,6 +554,20 @@ public:
         return result;
     }
 
+    Dictionary find_weapon(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* weapon = data_->find_weapon(form_id_arg(form_id));
+        if (!weapon) return {};
+        Dictionary result;
+        result["weapon_type"] = static_cast<int64_t>(weapon->weapon_type);
+        result["speed"] = weapon->speed;
+        result["reach"] = weapon->reach;
+        result["flags"] = static_cast<int64_t>(weapon->flags);
+        result["damage"] = static_cast<int64_t>(weapon->damage);
+        return result;
+    }
+
     double get_float_game_setting(const String& name, double default_value = 0.0) const {
         const CharString utf8 = name.utf8();
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -900,6 +914,14 @@ public:
             animation_item["start_time"] = animation.start_time;
             animation_item["stop_time"] = animation.stop_time;
             animation_item["cycle_type"] = static_cast<int64_t>(animation.cycle_type);
+            Array text_keys;
+            for (const auto& [key_time, key_name] : animation.text_keys) {
+                Dictionary text_key;
+                text_key["time"] = key_time;
+                text_key["name"] = String::utf8(key_name.c_str());
+                text_keys.push_back(text_key);
+            }
+            animation_item["text_keys"] = text_keys;
             Array tracks;
             for (const auto& track : animation.tracks) {
                 Dictionary track_item;
@@ -950,6 +972,7 @@ protected:
         ClassDB::bind_method(D_METHOD("find_pathgrid", "cell_form_id"), &OblivionData::find_pathgrid);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
+        ClassDB::bind_method(D_METHOD("find_weapon", "form_id"), &OblivionData::find_weapon);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
                              &OblivionData::get_float_game_setting, DEFVAL(0.0));
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);

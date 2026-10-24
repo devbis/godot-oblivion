@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <NifFile.hpp>
@@ -97,6 +98,8 @@ struct NifAnimationData {
     float stop_time = 0.0f;
     // NiControllerSequence cycle type: 0 loop, 1 reverse, 2 clamp.
     std::uint32_t cycle_type = 0;
+    // The sequence's NiTextKeyExtraData entries: gameplay markers such as an attack's "hit" or a bow's "release".
+    std::vector<std::pair<float, std::string>> text_keys;
     std::vector<NifAnimationTrackData> tracks;
 };
 
