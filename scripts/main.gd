@@ -47,6 +47,7 @@ const GESTURE_KEY := "Gesture"
 const NPC_IDLE_KEY := "ScriptIdle"
 const GESTURE_MOVE_ACTIONS := ["move_forward", "move_back", "move_left", "move_right"]
 const InteractionTargeting := preload("res://scripts/interaction_targeting.gd")
+const PhysicsObjectGrabber := preload("res://scripts/physics_object_grabber.gd")
 const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_HEAD_CULL_MARGIN := ActorFactory.PLAYER_HEAD_CULL_MARGIN
 const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
@@ -164,6 +165,7 @@ var _inventory_open := false
 var _placed_items: Dictionary = {}
 var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
 var targeting := InteractionTargeting.new()
+var physics_grabber := PhysicsObjectGrabber.new()
 var _container_reference_cache: Dictionary = {}
 var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
@@ -189,6 +191,7 @@ var _fallback_support: StaticBody3D
 
 func _ready() -> void:
 	_setup_targeting()
+	physics_grabber.configure(player, self)
 	player.set_physics_process(false)
 	face_view_button.disabled = true
 	face_view_button.pressed.connect(_toggle_face_view)
@@ -235,6 +238,8 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
+	if (_world_loading or _inventory_open or player.face_preview_enabled) and physics_grabber.is_holding_object():
+		physics_grabber.release_without_throw()
 	_update_hud()
 	if Input.is_action_just_released("interact"):
 		_interact_ready = true
@@ -275,7 +280,13 @@ func _process(_delta: float) -> void:
 ## and only an event no control took (a click on the world, the mouse motion that looks around) reaches the camera.
 func _unhandled_input(event: InputEvent) -> void:
 	if is_instance_valid(player):
-		player.handle_camera_input(event)
+		var grabber_handled_input := false
+		if not _world_loading and not _inventory_open and not player.face_preview_enabled:
+			grabber_handled_input = physics_grabber.handle_input(event)
+		else:
+			physics_grabber.release_without_throw()
+		if not grabber_handled_input:
+			player.handle_camera_input(event)
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 	if event.keycode == KEY_F9:
@@ -497,6 +508,7 @@ func _log_runtime_spawn_positions() -> void:
 	])
 
 func _physics_process(delta: float) -> void:
+	physics_grabber.physics_update(delta)
 	if not _world_loading and not _inventory_open and not player.face_preview_enabled:
 		_aimed_target = targeting.acquire()
 	else:
@@ -990,6 +1002,7 @@ func _load_cell_geometry(
 	var generation := _cell_load_generation
 	_set_cell_environment(cell)
 	if clear_existing:
+		physics_grabber.release_without_throw()
 		_exterior_collision_stream_enabled = false
 		_exterior_collision_stream_busy = false
 		_exterior_collision_busy_generation = -1
@@ -1018,6 +1031,7 @@ func _load_cell_geometry(
 	var culled_reference_count := 0
 	var skipped_gate_count := 0
 	var tree_reference_count := 0
+	var pending_dynamic_bodies: Array[RigidBody3D] = []
 	var exterior_batches: Dictionary = {}
 	var exterior_batch_materials: Dictionary = {}
 	var exterior_tree_batches: Dictionary = {}
@@ -1131,6 +1145,13 @@ func _load_cell_geometry(
 			)
 			if generation != _cell_load_generation:
 				return false
+			if not physics_result.is_empty():
+				if is_pickup_item:
+					_register_imported_physics_pickup(reference, base_form_id, base_type, reference_transform, physics_result)
+			for body_value: Variant in physics_result.get("dynamic_bodies", []):
+				var dynamic_body := body_value as RigidBody3D
+				if is_instance_valid(dynamic_body):
+					pending_dynamic_bodies.push_back(dynamic_body)
 			if not physics_result.is_empty():
 				instance_count += int(physics_result.get("mesh_count", 0))
 				collision_count += int(physics_result.get("body_count", 0))
@@ -1291,13 +1312,24 @@ func _load_cell_geometry(
 
 	if generation != _cell_load_generation:
 		return false
+	if not pending_dynamic_bodies.is_empty():
+		# Let this cell's static and terrain colliders enter the physics space before dynamic props wake up.
+		await get_tree().physics_frame
+		if generation != _cell_load_generation:
+			return false
+		for dynamic_body: RigidBody3D in pending_dynamic_bodies:
+			if not is_instance_valid(dynamic_body):
+				continue
+			if bool(dynamic_body.get_meta("resolve_spawn_penetration", false)):
+				_resolve_initial_dynamic_body_penetration(dynamic_body)
+			dynamic_body.freeze = false
 	if clear_existing and has_node("TestFloor/MeshInstance3D"):
 		$TestFloor/MeshInstance3D.visible = collision_count == 0
 		$TestFloor/CollisionShape3D.disabled = collision_count > 0
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nSpace interact · Y fly · I inventory · M/,/. gestures · R camera · N face · U face view · G/F expression · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nHold Mouse1 to grab · release to drop · Mouse2 to throw · wheel adjusts distance · Space interact · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
@@ -1585,7 +1617,7 @@ func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool
 	var bodies: Array = metadata.get("physics_bodies", [])
 	var constraints: Array = metadata.get("physics_constraints", [])
 	var source_bytes: PackedByteArray = metadata.get("source_bytes", PackedByteArray())
-	if bodies.is_empty() or constraints.is_empty() or source_bytes.is_empty():
+	if bodies.is_empty() or source_bytes.is_empty():
 		return false
 	var meshes_by_node: Dictionary = {}
 	for mesh_value: Variant in meshes:
@@ -1617,6 +1649,32 @@ func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool
 		if not body_names.has(str(constraint.get("body_b_node_name", ""))):
 			return false
 	return true
+
+func _register_imported_physics_pickup(
+	reference: Dictionary,
+	base_form_id: int,
+	base_type: String,
+	reference_transform: Transform3D,
+	physics_result: Dictionary
+) -> void:
+	var reference_id := int(reference.get("form_id", 0))
+	var item_display_name := str(reference.get("reference_name", "")).strip_edges()
+	var editor_id := str(data_reader.find_editor_id(base_form_id))
+	if item_display_name.is_empty():
+		item_display_name = editor_id
+	if item_display_name.is_empty():
+		item_display_name = "Item"
+	_placed_items[reference_id] = {
+		"reference_id": reference_id,
+		"base_form_id": base_form_id,
+		"record_type": base_type,
+		"editor_id": editor_id,
+		"display_name": item_display_name,
+		"position": reference_transform.origin,
+		"mesh_instances": physics_result.get("mesh_instances", []),
+		"physics_root": physics_result.get("physics_root"),
+		"target_area": null,
+	}
 
 func _create_imported_havok_shapes(shape_data: Dictionary) -> Array[CollisionShape3D]:
 	var collisions: Array[CollisionShape3D] = []
@@ -1660,6 +1718,37 @@ func _create_imported_havok_shapes(shape_data: Dictionary) -> Array[CollisionSha
 		collisions.push_back(collision)
 	return collisions
 
+func _resolve_initial_dynamic_body_penetration(body: RigidBody3D) -> void:
+	var space_state := get_world_3d().direct_space_state
+	var excluded_rids: Array[RID] = [body.get_rid(), player.get_rid()]
+	var reference_id := int(body.get_meta("reference_id", 0))
+	for sibling: Node in body.get_parent().get_children():
+		var sibling_body := sibling as PhysicsBody3D
+		if sibling_body != null and int(sibling_body.get_meta("reference_id", 0)) == reference_id:
+			excluded_rids.push_back(sibling_body.get_rid())
+	var required_lift := 0.0
+	for child: Node in body.get_children():
+		var collision := child as CollisionShape3D
+		if collision == null or collision.disabled or collision.shape == null:
+			continue
+		var query := PhysicsShapeQueryParameters3D.new()
+		query.shape = collision.shape
+		query.transform = collision.global_transform
+		query.collision_mask = 2
+		query.exclude = excluded_rids
+		query.collide_with_areas = false
+		query.collide_with_bodies = true
+		if space_state.intersect_shape(query, 1).is_empty():
+			continue
+		query.transform.origin += Vector3.UP * 1.5
+		query.motion = Vector3.DOWN * 1.5
+		var fractions := space_state.cast_motion(query)
+		if fractions.size() == 2 and fractions[0] < 1.0:
+			required_lift = maxf(required_lift, 1.5 * (1.0 - fractions[0]) + 0.01)
+	if required_lift > 0.0:
+		body.global_position += Vector3.UP * required_lift
+		body.force_update_transform()
+
 func _instantiate_imported_nif_physics(
 	reference_id: int,
 	reference_transform: Transform3D,
@@ -1670,12 +1759,14 @@ func _instantiate_imported_nif_physics(
 	var bodies: Array = metadata.get("physics_bodies", [])
 	var constraints: Array = metadata.get("physics_constraints", [])
 	var body_nodes: Dictionary = {}
+	var dynamic_bodies: Array[RigidBody3D] = []
 	var physics_root := Node3D.new()
 	physics_root.name = "ImportedHavokPhysics"
 	physics_root.set_meta("reference_id", reference_id)
 	cell_visual_root.add_child(physics_root)
 	var body_count := 0
 	var dynamic_count := 0
+	var articulated := not constraints.is_empty()
 	for body_value: Variant in bodies:
 		var body_data: Dictionary = body_value
 		var node_name := str(body_data.get("node_name", ""))
@@ -1692,15 +1783,18 @@ func _instantiate_imported_nif_physics(
 			rigid_body.angular_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
 			rigid_body.linear_damp = float(body_data.get("linear_damping", 0.0))
 			rigid_body.angular_damp = float(body_data.get("angular_damping", 0.0))
-			# Keep chain links on a dedicated layer so they collide with the world
-			# and player without colliding with every other link in the same chain.
+			# Layer 16 marks movable bodies for grabbing. Standalone props collide
+			# with one another; articulated chains retain their tuned world/player mask.
 			rigid_body.collision_layer = 16
-			rigid_body.collision_mask = 3
+			rigid_body.collision_mask = 3 if articulated else 19
 			var physics_material := PhysicsMaterial.new()
 			physics_material.friction = float(body_data.get("friction", 0.3))
 			physics_material.bounce = float(body_data.get("restitution", 0.0))
 			rigid_body.physics_material_override = physics_material
 			physics_body = rigid_body
+			rigid_body.set_meta("grab_enabled", true)
+			rigid_body.set_meta("resolve_spawn_penetration", constraints.is_empty())
+			dynamic_bodies.push_back(rigid_body)
 			dynamic_count += 1
 		else:
 			var static_body := StaticBody3D.new()
@@ -1729,6 +1823,7 @@ func _instantiate_imported_nif_physics(
 		body_count += 1
 
 	var mesh_count := 0
+	var visual_mesh_instances: Array[MeshInstance3D] = []
 	for mesh_index in range(meshes.size()):
 		var mesh_entry: Dictionary = meshes[mesh_index]
 		var node_name := str(mesh_entry.get("parent_node_name", ""))
@@ -1748,6 +1843,7 @@ func _instantiate_imported_nif_physics(
 			)
 			static_mesh.transform = reference_transform
 			physics_root.add_child(static_mesh)
+			visual_mesh_instances.push_back(static_mesh)
 			mesh_count += 1
 			continue
 		var physical_mesh := assets.physics_mesh_for_entry(model_path, mesh_index, mesh_entry)
@@ -1771,6 +1867,7 @@ func _instantiate_imported_nif_physics(
 			int(mesh_entry.get("alpha_threshold", 128))
 		)
 		physics_body.add_child(visual)
+		visual_mesh_instances.push_back(visual)
 		mesh_count += 1
 
 	# Register complete bodies with Jolt only after their colliders and visuals
@@ -1820,15 +1917,16 @@ func _instantiate_imported_nif_physics(
 		joint.transform = Transform3D(Basis(x_axis, y_axis, z_axis), (world_anchor_a + world_anchor_b) * 0.5)
 		physics_root.add_child(joint)
 
-	for body_entry: Dictionary in body_nodes.values():
-		var imported_body := body_entry.get("node") as PhysicsBody3D
-		if imported_body is RigidBody3D:
-			(imported_body as RigidBody3D).freeze = false
-
 	print("OpenOB imported original Havok NIF physics: %s (%d bodies, %d dynamic, %d ragdoll joints; largest initial anchor mismatch %.4fm)" % [
 		model_path.get_file(), body_count, dynamic_count, constraints.size(), largest_initial_anchor_error
 	])
-	return {"body_count": body_count, "mesh_count": mesh_count}
+	return {
+		"body_count": body_count,
+		"mesh_count": mesh_count,
+		"physics_root": physics_root,
+		"mesh_instances": visual_mesh_instances,
+		"dynamic_bodies": dynamic_bodies,
+	}
 
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
 	var model_key := model_path.to_lower().replace("\\", "/")
@@ -2535,15 +2633,20 @@ var _picked_up_reference_ids: Dictionary = {}
 
 func _pick_up_placed_item(item: Dictionary) -> void:
 	var reference_id := int(item.get("reference_id", 0))
+	physics_grabber.release_reference(reference_id)
 	_picked_up_reference_ids[reference_id] = true
 	_placed_items.erase(reference_id)
 	var target_area := item.get("target_area") as Area3D
 	if is_instance_valid(target_area):
 		target_area.queue_free()
-	for mesh_value: Variant in item.get("mesh_instances", []):
-		var mesh_instance := mesh_value as MeshInstance3D
-		if is_instance_valid(mesh_instance):
-			mesh_instance.queue_free()
+	var physics_root := item.get("physics_root") as Node3D
+	if is_instance_valid(physics_root):
+		physics_root.queue_free()
+	else:
+		for mesh_value: Variant in item.get("mesh_instances", []):
+			var mesh_instance := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh_instance):
+				mesh_instance.queue_free()
 	var form_id := int(item.get("base_form_id", 0))
 	var item_name := str(item.get("editor_id", "item"))
 	_add_inventory_item(form_id)
