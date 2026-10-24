@@ -393,6 +393,22 @@ public:
         result["editor_id"] = as_string(npc->editor_id);
         result["name"] = as_string(npc->name);
         result["flags"] = static_cast<int64_t>(npc->flags);
+        result["class_form_id"] = static_cast<int64_t>(npc->class_form_id);
+        result["base_magicka"] = npc->base_magicka;
+        result["base_fatigue"] = npc->base_fatigue;
+        result["level_or_offset"] = npc->level_or_offset;
+        result["base_health"] = npc->base_health;
+        result["has_actor_values"] = npc->has_actor_values;
+        PackedInt64Array attributes;
+        attributes.resize(static_cast<int64_t>(npc->attributes.size()));
+        for (int64_t i = 0; i < static_cast<int64_t>(npc->attributes.size()); ++i)
+            attributes.set(i, npc->attributes[static_cast<std::size_t>(i)]);
+        result["attributes"] = attributes;
+        PackedInt64Array skills;
+        skills.resize(static_cast<int64_t>(npc->skills.size()));
+        for (int64_t i = 0; i < static_cast<int64_t>(npc->skills.size()); ++i)
+            skills.set(i, npc->skills[static_cast<std::size_t>(i)]);
+        result["skills"] = skills;
         result["female"] = (npc->flags & 0x000001) != 0;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
         result["hair_form_id"] = static_cast<int64_t>(npc->hair_form_id);
@@ -436,6 +452,11 @@ public:
             inventory.push_back(entry);
         }
         result["inventory"] = inventory;
+        PackedInt64Array spells;
+        spells.resize(static_cast<int64_t>(npc->spell_form_ids.size()));
+        for (int64_t i = 0; i < static_cast<int64_t>(npc->spell_form_ids.size()); ++i)
+            spells.set(i, static_cast<int64_t>(npc->spell_form_ids[static_cast<std::size_t>(i)]));
+        result["spell_form_ids"] = spells;
         PackedInt64Array ai_packages;
         ai_packages.resize(static_cast<int64_t>(npc->ai_package_form_ids.size()));
         for (int64_t i = 0; i < static_cast<int64_t>(npc->ai_package_form_ids.size()); ++i)
@@ -503,6 +524,20 @@ public:
         if (!data_) return {};
         const auto* record_type = data_->find_record_type(static_cast<std::uint32_t>(form_id));
         return record_type ? as_string(*record_type) : String{};
+    }
+
+    String find_record_display_name(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* display_name = data_->find_record_display_name(static_cast<std::uint32_t>(form_id));
+        return display_name ? as_string(*display_name) : String{};
+    }
+
+    String find_record_icon_path(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* icon_path = data_->find_record_icon_path(static_cast<std::uint32_t>(form_id));
+        return icon_path ? as_string(*icon_path) : String{};
     }
 
     PackedStringArray list_assets(const String& prefix) const {
@@ -819,6 +854,8 @@ protected:
         ClassDB::bind_method(D_METHOD("find_form_id_by_editor_id", "editor_id"), &OblivionData::find_form_id_by_editor_id);
         ClassDB::bind_method(D_METHOD("find_editor_id", "form_id"), &OblivionData::find_editor_id);
         ClassDB::bind_method(D_METHOD("find_record_type", "form_id"), &OblivionData::find_record_type);
+        ClassDB::bind_method(D_METHOD("find_record_display_name", "form_id"), &OblivionData::find_record_display_name);
+        ClassDB::bind_method(D_METHOD("find_record_icon_path", "form_id"), &OblivionData::find_record_icon_path);
         ClassDB::bind_method(D_METHOD("list_assets", "prefix"), &OblivionData::list_assets);
         ClassDB::bind_method(D_METHOD("read_asset", "asset_path"), &OblivionData::read_asset);
         ClassDB::bind_method(D_METHOD("apply_facegen_texture_data", "image_data", "width", "height",
@@ -1015,6 +1052,29 @@ public:
         world_->set_listener(game ? game->find_form_id_by_editor_id(utf8_value(race_editor_id)) : 0u, female);
     }
 
+    void set_player_actor_values(const Dictionary& values) {
+        if (!world_) return;
+        oblivion::PlayerActorValueSnapshot snapshot;
+        const Dictionary health = values.get("health", Dictionary());
+        const Dictionary magicka = values.get("magicka", Dictionary());
+        const Dictionary fatigue = values.get("fatigue", Dictionary());
+        const auto read_pair = [](const Dictionary& vital, const char* key, double& output) {
+            if (!vital.has(key)) return false;
+            output = static_cast<double>(vital.get(key, 0.0));
+            return true;
+        };
+        snapshot.available = read_pair(health, "current", snapshot.health)
+            && read_pair(health, "max", snapshot.base_health)
+            && read_pair(magicka, "current", snapshot.magicka)
+            && read_pair(magicka, "max", snapshot.base_magicka)
+            && read_pair(fatigue, "current", snapshot.fatigue)
+            && read_pair(fatigue, "max", snapshot.base_fatigue);
+        world_->set_answer([snapshot](std::string_view command, const oblivion::ScriptValue* target,
+                                      const std::vector<oblivion::ScriptValue>& arguments) {
+            return oblivion::answer_player_actor_values(command, target, arguments, snapshot);
+        });
+    }
+
     // The package an NPC starts now, judged with the stage of the quest. Empty when none holds.
     Dictionary select_package(const String& quest_editor_id, const String& npc_editor_id) {
         Dictionary result;
@@ -1065,6 +1125,7 @@ public:
         ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("set_player_actor_values", "values"), &OblivionQuestWorld::set_player_actor_values);
         ClassDB::bind_method(D_METHOD("set_speech_length", "length"), &OblivionQuestWorld::set_speech_length);
         ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_form_id"), &OblivionQuestWorld::set_reference_base);
         ClassDB::bind_method(D_METHOD("select_package", "quest_editor_id", "npc_editor_id"), &OblivionQuestWorld::select_package);

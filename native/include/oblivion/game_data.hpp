@@ -35,6 +35,8 @@ public:
     [[nodiscard]] std::vector<std::uint32_t> find_form_ids_by_editor_id_prefix(std::string_view prefix) const;
     [[nodiscard]] const std::string* find_editor_id(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
+    [[nodiscard]] const std::string* find_record_display_name(std::uint32_t form_id) const;
+    [[nodiscard]] const std::string* find_record_icon_path(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const { return esm_.find_global_value(form_id); }

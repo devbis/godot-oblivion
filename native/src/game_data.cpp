@@ -234,6 +234,14 @@ const std::string* GameData::find_record_type(std::uint32_t form_id) const {
     return esm_.find_record_type(form_id);
 }
 
+const std::string* GameData::find_record_display_name(std::uint32_t form_id) const {
+    return esm_.find_record_display_name(form_id);
+}
+
+const std::string* GameData::find_record_icon_path(std::uint32_t form_id) const {
+    return esm_.find_record_icon_path(form_id);
+}
+
 const ScriptRecord* GameData::find_script(std::uint32_t form_id) const {
     return esm_.find_script(form_id);
 }

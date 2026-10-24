@@ -141,8 +141,22 @@ private:
     QuestWorld* world_ = nullptr;
 };
 
-// The player's values in a fresh game, as far as the quests read them: full health, magicka and fatigue.
-// Other values stay unanswered. A game with a real player state answers these itself.
+// Actor values supplied by the running game scene for GetAV/GetBaseAV on Player.
+struct PlayerActorValueSnapshot {
+    bool available = false;
+    double health = 0.0;
+    double base_health = 0.0;
+    double magicka = 0.0;
+    double base_magicka = 0.0;
+    double fatigue = 0.0;
+    double base_fatigue = 0.0;
+};
+
+std::optional<ScriptValue> answer_player_actor_values(std::string_view command, const ScriptValue* target,
+                                                      const std::vector<ScriptValue>& arguments,
+                                                      const PlayerActorValueSnapshot& values);
+
+// Used by offline inspection when no live Player actor-value snapshot exists. Unknown values stay unanswered.
 std::optional<ScriptValue> answer_fresh_player(std::string_view command, const ScriptValue* target,
                                                const std::vector<ScriptValue>& arguments);
 

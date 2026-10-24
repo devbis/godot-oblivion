@@ -145,7 +145,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
-        std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"),
+        std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
         std::string_view("HAIR"), std::string_view("EYES"), std::string_view("ALCH"),
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
@@ -163,6 +163,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     cell_by_editor_id_.clear();
     base_model_by_id_.clear();
     base_editor_id_by_id_.clear();
+    record_display_name_by_id_.clear();
+    record_icon_path_by_id_.clear();
     script_form_id_by_id_.clear();
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
@@ -347,6 +349,16 @@ const std::string* Esm4Database::find_editor_id(std::uint32_t form_id) const {
 const std::string* Esm4Database::find_record_type(std::uint32_t form_id) const {
     const auto it = record_type_by_id_.find(form_id);
     return it == record_type_by_id_.end() ? nullptr : &record_type_names_[it->second];
+}
+
+const std::string* Esm4Database::find_record_display_name(std::uint32_t form_id) const {
+    const auto it = record_display_name_by_id_.find(form_id);
+    return it == record_display_name_by_id_.end() ? nullptr : &it->second;
+}
+
+const std::string* Esm4Database::find_record_icon_path(std::uint32_t form_id) const {
+    const auto it = record_icon_path_by_id_.find(form_id);
+    return it == record_icon_path_by_id_.end() ? nullptr : &it->second;
 }
 
 std::size_t Esm4Database::intern_record_type(std::string_view type) {
@@ -537,6 +549,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     const bool is_global = type == "GLOB";
     bool is_npc_base = type == "NPC_";
     bool is_race = type == "RACE";
+    bool is_spell = type == "SPEL";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
     const bool is_idle = type == "IDLE";
@@ -627,6 +640,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             cell.display_name = read_zstring(value, subrecord_size);
         } else if (tag == "FULL" && is_npc_base) {
             npc.name = read_zstring(value, subrecord_size);
+            record_display_name_by_id_[form_id] = npc.name;
+        } else if (tag == "FULL" && (is_item_model || is_spell)) {
+            const auto display_name = read_zstring(value, subrecord_size);
+            if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
         } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
             const std::uint16_t cell_flags = subrecord_size >= 2 ? u16(value) : value[0];
             cell.interior = (cell_flags & 0x0001) != 0;
@@ -640,6 +657,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "ICON" && is_land_texture) {
             const auto texture_path = read_zstring(value, subrecord_size);
             if (!texture_path.empty()) land_texture_path_by_id_[form_id] = texture_path;
+        } else if (tag == "ICON" && (is_item_model || is_spell)) {
+            const auto icon_path = read_zstring(value, subrecord_size);
+            if (!icon_path.empty()) record_icon_path_by_id_[form_id] = icon_path;
         } else if (tag == "DNAM" && is_worldspace && subrecord_size >= 8) {
             worldspace_water_level_by_id_[form_id] = f32(value + 4);
         } else if (tag == "VHGT" && is_land && subrecord_size >= 4 + 33 * 33) {
@@ -696,8 +716,20 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             reference.base_form_id = u32(value);
         } else if (tag == "ACBS" && is_npc_base && subrecord_size >= 4) {
             npc.flags = u32(value);
+            if (subrecord_size >= 12) {
+                npc.base_magicka = u16(value + 4);
+                npc.base_fatigue = u16(value + 6);
+                npc.level_or_offset = static_cast<std::int16_t>(u16(value + 10));
+            }
         } else if (tag == "RNAM" && is_npc_base && subrecord_size >= 4) {
             npc.race_form_id = u32(value);
+        } else if (tag == "CNAM" && is_npc_base && subrecord_size >= 4) {
+            npc.class_form_id = u32(value);
+        } else if (tag == "DATA" && is_npc_base && subrecord_size >= 33) {
+            std::copy_n(value, npc.skills.size(), npc.skills.begin());
+            npc.base_health = u32(value + npc.skills.size());
+            std::copy_n(value + npc.skills.size() + 4, npc.attributes.size(), npc.attributes.begin());
+            npc.has_actor_values = true;
         } else if (tag == "HNAM" && is_npc_base && subrecord_size >= 4) {
             npc.hair_form_id = u32(value);
         } else if (tag == "ENAM" && is_npc_base && subrecord_size >= 4) {
@@ -763,6 +795,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             npc.default_outfit_form_id = u32(value);
         } else if (tag == "CNTO" && is_npc_base && subrecord_size >= 8) {
             npc.inventory.push_back({u32(value), static_cast<std::int32_t>(u32(value + 4))});
+        } else if (tag == "SPLO" && is_npc_base && subrecord_size >= 4) {
+            npc.spell_form_ids.push_back(u32(value));
         } else if (tag == "PKID" && is_npc_base && subrecord_size >= 4) {
             npc.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {

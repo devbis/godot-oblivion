@@ -9,6 +9,7 @@ const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
 const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
+const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
@@ -52,15 +53,8 @@ const PLAYER_FACE_HEAD_MODEL := "Characters/Imperial/headhuman.nif"
 const PLAYER_HEAD_CULL_MARGIN := ActorFactory.PLAYER_HEAD_CULL_MARGIN
 const PLAYER_HAIR_MODEL := "Characters/Imperial/male/hair01.nif"
 const PLAYER_FACE_DETAIL_PARTS := ActorFactory.PLAYER_FACE_DETAIL_PARTS
-const PLAYER_STARTING_CLOTHING := ["LowerShirt05", "LowerPants05"]
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const PICKUP_TARGET_COLLISION_LAYER := 8
-## Provisional: there is no actor-value system yet, so the HUD ribbons show full vitals.
-const PROVISIONAL_PLAYER_VITALS := {
-	"health": {"current": 1.0, "max": 1.0},
-	"magic": {"current": 1.0, "max": 1.0},
-	"fatigue": {"current": 1.0, "max": 1.0},
-}
 const FIRST_PERSON_HIDDEN_EQUIPMENT_SLOTS := 0x002F
 const EXTERIOR_CELL_SIZE := 4096.0
 const EXTERIOR_STREAM_RADIUS := 9
@@ -161,6 +155,11 @@ var _player_inventory: Dictionary = {}
 var _player_equipment: Dictionary = {}
 var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
+var _player_base_record: Dictionary = {}
+var _player_spell_form_ids: Array[int] = []
+var _player_selected_spell_form_id := 0
+var _player_actor_values := PlayerActorValues.new()
+var _player_actor_values_ready := false
 var _inventory_open := false
 var _placed_items: Dictionary = {}
 var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
@@ -303,6 +302,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _gesture_panel_open():
 			_toggle_gesture_panel()
 		_toggle_inventory()
+	elif event.keycode == KEY_Q:
+		_cycle_player_spell()
 	elif event.keycode == KEY_M:
 		_toggle_gesture_panel()
 	elif event.keycode == KEY_COMMA:
@@ -347,6 +348,7 @@ func _load_game_data() -> void:
 		if current_cell.is_empty():
 			status_label.text = "Loaded game data, but %s was not found." % START_CELL_ID
 			return
+	_initialize_player_game_state()
 	await hud.load_assets(assets)
 
 	var summary: Dictionary = data_reader.get_summary()
@@ -381,6 +383,34 @@ func _load_game_data() -> void:
 	player.capture_mouse()
 	_start_deferred_cell_loading()
 	_log_runtime_spawn_positions()
+
+func _initialize_player_game_state() -> void:
+	var player_form_id := int(data_reader.find_form_id_by_editor_id("Player"))
+	if player_form_id <= 0:
+		push_warning("The installed game data has no Player base record; player vitals and starting equipment are unavailable")
+		return
+	_player_base_record = data_reader.find_npc_base(player_form_id)
+	if _player_base_record.is_empty():
+		push_warning("Could not read actor values and inventory from the installed game's Player base record")
+		return
+	_player_actor_values_ready = _player_actor_values.initialize_from_base(_player_base_record)
+	if not _player_actor_values_ready:
+		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
+	for spell_value: Variant in _player_base_record.get("spell_form_ids", PackedInt64Array()):
+		var spell_form_id := int(spell_value)
+		if spell_form_id > 0 and str(data_reader.find_record_type(spell_form_id)) == "SPEL":
+			if not _player_spell_form_ids.has(spell_form_id):
+				_player_spell_form_ids.push_back(spell_form_id)
+	if not _player_spell_form_ids.is_empty():
+		# The base record's first SPLO is the data-defined initial selection; Q and the inventory select other known spells.
+		_player_selected_spell_form_id = _player_spell_form_ids[0]
+	_refresh_inventory_hud()
+	print("OpenOB player record %s: actor_values=%s known_spells=%d starting_items=%d" % [
+		str(_player_base_record.get("name", "Player")),
+		str(_player_actor_values.snapshot()),
+		_player_spell_form_ids.size(),
+		_player_base_record.get("inventory", []).size(),
+	])
 
 func _sewer_exit_start_data() -> Dictionary:
 	var sewer_cell: Dictionary = data_reader.find_cell("ImperialSewers03")
@@ -515,6 +545,7 @@ func _physics_process(delta: float) -> void:
 		_aimed_target = InteractionTargeting.empty_snapshot()
 	if quest_world == null:
 		return
+	_sync_player_actor_values_to_quest_world()
 	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
@@ -689,6 +720,7 @@ func _fire_trigger_zones() -> void:
 		zone["inside"] = inside
 		if not inside or was_inside:
 			continue
+		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_object_event(int(zone.get("script_form_id", 0)), "onTrigger", "player", Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB trigger: " + line)
@@ -715,12 +747,14 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
 		# character creation's race and sex are read.
 		quest_world.set_listener("Argonian", false)
+		_sync_player_actor_values_to_quest_world()
 		for actor: Dictionary in _npc_actors:
 			_register_quest_actor(actor)
 	if quest_world.get_stage(quest_editor_id) < 0:
 		return PackedStringArray(["quest %s has no script" % quest_editor_id])
 	if route_quest_editor_id.is_empty():
 		route_quest_editor_id = quest_editor_id
+	_sync_player_actor_values_to_quest_world()
 	var report := _apply_driver_result(quest_world.start(quest_editor_id, stage, Callable(self, "_quest_distance")))
 	_refresh_npc_routes()
 	return report
@@ -739,6 +773,12 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	if not pending.is_empty():
 		_pending_idles.erase(reference_name.to_lower())
 		_start_npc_idle(actor, str(pending.path), str(pending.idle_id))
+
+## Keeps GetAV/GetBaseAV in loaded quest scripts tied to the same current/base values drawn on the HUD.
+func _sync_player_actor_values_to_quest_world() -> void:
+	if quest_world == null or not _player_actor_values_ready:
+		return
+	quest_world.set_player_actor_values(_player_actor_values.snapshot())
 
 ## Names the speaker of each spoken line (its base form is the second argument) before the bridge prints it.
 func _name_speakers(result: Dictionary) -> void:
@@ -924,6 +964,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 						])
 				return
 		actor["package_done"] = true
+		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
@@ -1329,7 +1370,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nHold Mouse1 to grab · release to drop · Mouse2 to throw · wheel adjusts distance · Space interact · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nQ cycle spell · I inventory · Hold Mouse1 to grab · release to drop · Mouse2 throw · wheel adjusts distance · Space interact · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
@@ -2220,17 +2261,17 @@ func _load_player_avatar() -> void:
 	_apply_face_expression(_player_face_state)
 	_refresh_player_face_profile_hint()
 	print("OpenOB player FaceGen expressions: %s" % str(_player_face_state.expression_cycle))
-	var clothing_count := await _load_player_starting_clothing(avatar)
+	var starting_gear_count := await _load_player_starting_gear()
 	_active_animation = ""
 	_player_was_on_floor = true
 	if part_count > 0:
 		var body_proxy := player.get_node_or_null("BodyProxy") as MeshInstance3D
 		if body_proxy != null:
 			body_proxy.visible = false
-		print("OpenOB loaded original Imperial actor: %d body/head shapes, %d rig bones, %d base-game clothing pieces, idle=%s, KF sequences=%s" % [
+		print("OpenOB loaded original Imperial actor: %d body/head shapes, %d rig bones, %d Player-record gear pieces, idle=%s, KF sequences=%s" % [
 			part_count,
 			_player_skeleton.get_bone_count() if _player_skeleton != null else 0,
-			clothing_count,
+			starting_gear_count,
 			str(not _player_animations.get("Idle", {}).is_empty()),
 			", ".join(loaded_animation_names)
 		])
@@ -2452,18 +2493,23 @@ func _refresh_player_face_profile_hint() -> void:
 		expression if not expression.is_empty() else "Neutral",
 	]
 
-func _load_player_starting_clothing(avatar: Node3D) -> int:
-	var loaded_count := 0
-	for editor_id: String in PLAYER_STARTING_CLOTHING:
-		var form_id := int(data_reader.find_form_id_by_editor_id(editor_id))
-		if form_id == 0:
-			push_warning("Player starting clothing record %s was not found" % editor_id)
+func _load_player_starting_gear() -> int:
+	var equipped_count := 0
+	for item_value: Variant in _player_base_record.get("inventory", []):
+		var item: Dictionary = item_value
+		var form_id := int(item.get("form_id", 0))
+		var count := maxi(int(item.get("count", 0)), 1)
+		if form_id <= 0:
 			continue
-		if await _equip_player_item(form_id):
-			_add_inventory_item(form_id)
-			loaded_count += 1
-	print("OpenOB equipped player with %d base-game CLOT clothing meshes" % loaded_count)
-	return loaded_count
+		_add_inventory_item(form_id, count)
+		var item_type := str(data_reader.find_record_type(form_id))
+		if item_type in ["ARMO", "CLOT"] and await _equip_player_item(form_id):
+			equipped_count += 1
+	print("OpenOB loaded %d equipped armor/clothing pieces and %d base inventory forms from the Player record" % [
+		equipped_count, _player_base_record.get("inventory", []).size()
+	])
+	_refresh_inventory_hud()
+	return equipped_count
 
 func _equip_player_item(form_id: int) -> bool:
 	if _player_avatar == null or _player_skeleton == null:
@@ -2596,12 +2642,41 @@ func _door_reference_by_id(reference_id: int) -> Dictionary:
 
 func _update_hud() -> void:
 	var visible_hud: bool = not _world_loading and not _inventory_open and not player.face_preview_enabled
-	hud.set_snapshot(_aimed_target, PROVISIONAL_PLAYER_VITALS, visible_hud)
+	var vital_snapshot: Dictionary = _player_actor_values.snapshot() if _player_actor_values_ready else {}
+	hud.set_snapshot(_aimed_target, vital_snapshot, _player_loadout_snapshot(), _player_compass_heading_degrees(), visible_hud)
 	if not visible_hud:
 		interaction_hint_label.visible = false
 	else:
 		interaction_hint_label.text = _interaction_toast_text
 		interaction_hint_label.visible = _interaction_toast_remaining > 0.0
+
+func _player_loadout_snapshot() -> Dictionary:
+	var weapon_name := "Unarmed"
+	var weapon_icon_path := ""
+	if _player_weapon_form_id > 0:
+		weapon_name = _record_display_name(_player_weapon_form_id)
+		if weapon_name.is_empty():
+			weapon_name = "Weapon"
+		weapon_icon_path = str(data_reader.find_record_icon_path(_player_weapon_form_id))
+	var spell_name := "No spell selected"
+	var spell_icon_path := ""
+	if _player_selected_spell_form_id > 0:
+		spell_name = _record_display_name(_player_selected_spell_form_id)
+		if spell_name.is_empty():
+			spell_name = "Spell"
+		spell_icon_path = str(data_reader.find_record_icon_path(_player_selected_spell_form_id))
+	return {
+		"weapon_form_id": _player_weapon_form_id,
+		"weapon_name": weapon_name,
+		"weapon_icon_path": weapon_icon_path,
+		"spell_form_id": _player_selected_spell_form_id,
+		"spell_name": spell_name,
+		"spell_icon_path": spell_icon_path,
+	}
+
+func _player_compass_heading_degrees() -> float:
+	var forward := -player.global_basis.z
+	return fposmod(rad_to_deg(atan2(forward.x, -forward.z)), 360.0)
 
 ## Executes the action of one target snapshot; the HUD displays the same snapshot.
 func _activate_target(target: Dictionary) -> void:
@@ -2675,7 +2750,7 @@ func _refresh_inventory_hud() -> void:
 		inventory_form_ids.push_back(int(form_id_value))
 	inventory_form_ids.sort()
 	for form_id: int in inventory_form_ids:
-		var item_name := str(data_reader.find_editor_id(form_id)) if data_reader != null else ""
+		var item_name := _record_display_name(form_id)
 		if item_name.is_empty():
 			item_name = "Item %08X" % form_id
 		var item_type := str(data_reader.find_record_type(form_id)) if data_reader != null else ""
@@ -2693,7 +2768,46 @@ func _refresh_inventory_hud() -> void:
 		var empty_label := Label.new()
 		empty_label.text = "Empty"
 		inventory_items_container.add_child(empty_label)
-	inventory_label.text = "Inventory: %d items · %d types" % [item_count, _player_inventory.size()]
+	if not _player_spell_form_ids.is_empty():
+		var spells_label := Label.new()
+		spells_label.text = "Known spells"
+		inventory_items_container.add_child(spells_label)
+		for spell_form_id: int in _player_spell_form_ids:
+			var spell_button := Button.new()
+			var spell_name := _record_display_name(spell_form_id)
+			if spell_name.is_empty():
+				spell_name = "Spell %08X" % spell_form_id
+			var selected_suffix := " · selected" if spell_form_id == _player_selected_spell_form_id else ""
+			spell_button.text = "SPEL  %s%s" % [spell_name, selected_suffix]
+			spell_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			spell_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			spell_button.pressed.connect(_select_player_spell.bind(spell_form_id))
+			inventory_items_container.add_child(spell_button)
+	inventory_label.text = "Inventory: %d items · %d types · %d spells" % [
+		item_count, _player_inventory.size(), _player_spell_form_ids.size()
+	]
+
+func _record_display_name(form_id: int) -> String:
+	if data_reader == null or form_id <= 0:
+		return ""
+	var display_name := str(data_reader.find_record_display_name(form_id)).strip_edges()
+	if display_name.is_empty():
+		display_name = str(data_reader.find_editor_id(form_id)).strip_edges()
+	return display_name
+
+func _select_player_spell(form_id: int) -> void:
+	if not _player_spell_form_ids.has(form_id):
+		return
+	_player_selected_spell_form_id = form_id
+	_refresh_inventory_hud()
+
+func _cycle_player_spell() -> void:
+	if _player_spell_form_ids.is_empty():
+		_show_interaction_toast("No known spells")
+		return
+	var current_index := _player_spell_form_ids.find(_player_selected_spell_form_id)
+	var next_index := (current_index + 1) % _player_spell_form_ids.size()
+	_select_player_spell(_player_spell_form_ids[next_index])
 
 func _equip_inventory_item(form_id: int) -> void:
 	if _world_loading or not _inventory_open:
@@ -3002,6 +3116,7 @@ func _run_debug_stages() -> void:
 		if quest_world == null:
 			return
 		print("OpenOB debug stage: entering %s stage %s" % [parts[0], parts[1]])
+		_sync_player_actor_values_to_quest_world()
 		for line: String in _apply_driver_result(quest_world.start(parts[0], int(parts[1]), Callable(self, "_quest_distance"))):
 			print("OpenOB quest: " + line)
 		_refresh_npc_routes()

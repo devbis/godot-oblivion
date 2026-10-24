@@ -891,14 +891,23 @@ void QuestWorld::begin(std::string_view editor_id, QuestTick& tick, const Distan
     driver->enter_stage(0, tick, distance, depth);
 }
 
-std::optional<ScriptValue> answer_fresh_player(std::string_view command, const ScriptValue* target,
-                                               const std::vector<ScriptValue>& arguments) {
+std::optional<ScriptValue> answer_player_actor_values(std::string_view command, const ScriptValue* target,
+                                                      const std::vector<ScriptValue>& arguments,
+                                                      const PlayerActorValueSnapshot& values) {
     if ((command != "getav" && command != "getbaseav") || !target || !target->is_text || lower(target->text) != "player")
         return std::nullopt;
-    if (arguments.empty() || !arguments[0].is_text) return std::nullopt;
+    if (!values.available || arguments.empty() || !arguments[0].is_text) return std::nullopt;
     const auto value = lower(arguments[0].text);
-    if (value == "health" || value == "magicka" || value == "fatigue") return ScriptValue::from_number(100.0);
+    const bool base = command == "getbaseav";
+    if (value == "health") return ScriptValue::from_number(base ? values.base_health : values.health);
+    if (value == "magicka") return ScriptValue::from_number(base ? values.base_magicka : values.magicka);
+    if (value == "fatigue") return ScriptValue::from_number(base ? values.base_fatigue : values.fatigue);
     return std::nullopt;
+}
+
+std::optional<ScriptValue> answer_fresh_player(std::string_view command, const ScriptValue* target,
+                                               const std::vector<ScriptValue>& arguments) {
+    return answer_player_actor_values(command, target, arguments, {});
 }
 
 } // namespace oblivion

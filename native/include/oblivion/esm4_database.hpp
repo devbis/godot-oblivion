@@ -55,9 +55,17 @@ struct NpcInventoryEntry {
 struct NpcBaseRecord {
     std::uint32_t form_id = 0;
     std::uint32_t script_form_id = 0;  // SCRI: the script attached to every actor of this base
+    std::uint32_t class_form_id = 0;
     std::string editor_id;
     std::string name;
     std::uint32_t flags = 0;
+    std::uint16_t base_magicka = 0;
+    std::uint16_t base_fatigue = 0;
+    std::int16_t level_or_offset = 0;
+    std::uint32_t base_health = 0;
+    std::array<std::uint8_t, 21> skills{};
+    std::array<std::uint8_t, 8> attributes{};
+    bool has_actor_values = false;
     std::uint32_t race_form_id = 0;
     std::uint32_t hair_form_id = 0;
     std::uint32_t eye_form_id = 0;
@@ -68,6 +76,7 @@ struct NpcBaseRecord {
     std::vector<float> face_texture_coefficients;
     std::vector<std::uint8_t> face_texture;
     std::vector<NpcInventoryEntry> inventory;
+    std::vector<std::uint32_t> spell_form_ids;
     std::vector<std::uint32_t> ai_package_form_ids;
 };
 
@@ -157,6 +166,8 @@ public:
     [[nodiscard]] std::vector<std::uint32_t> find_form_ids_by_editor_id_prefix(std::string_view prefix) const;
     [[nodiscard]] const std::string* find_editor_id(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_record_type(std::uint32_t form_id) const;
+    [[nodiscard]] const std::string* find_record_display_name(std::uint32_t form_id) const;
+    [[nodiscard]] const std::string* find_record_icon_path(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
@@ -183,6 +194,8 @@ private:
     std::map<std::uint32_t, std::size_t> cell_by_id_;
     std::map<std::uint32_t, std::string> base_model_by_id_;
     std::map<std::uint32_t, std::string> base_editor_id_by_id_;
+    std::map<std::uint32_t, std::string> record_display_name_by_id_;
+    std::map<std::uint32_t, std::string> record_icon_path_by_id_;
     std::map<std::uint32_t, std::uint32_t> script_form_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
