@@ -3615,24 +3615,6 @@ func _clear_scripted_speech_subtitle() -> void:
 		_scripted_dialogue_layer.visible = false
 
 
-func _npc_actor_by_base_form_id(base_form_id: int) -> Dictionary:
-	if base_form_id <= 0:
-		return {}
-	var nearest: Dictionary = {}
-	var nearest_distance := INF
-	for actor: Dictionary in _npc_actors:
-		if int(actor.get("base_form_id", 0)) != base_form_id:
-			continue
-		var actor_root := actor.get("root") as Node3D
-		if not is_instance_valid(actor_root):
-			continue
-		var distance := actor_root.global_position.distance_squared_to(player.global_position)
-		if distance < nearest_distance:
-			nearest = actor
-			nearest_distance = distance
-	return nearest
-
-
 func _refresh_dialogue_topics(response: Dictionary = {}) -> void:
 	if not _dialogue_active or quest_world == null:
 		return

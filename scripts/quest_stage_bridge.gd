@@ -6,13 +6,9 @@ extends RefCounted
 
 ## Stats and flags set by stage scripts, keyed by reference name ("" for global).
 var actor_state: Dictionary = {}
-## Names of actors a script killed or disabled. They stay so for the session: the scene does not build them again when
-## their cell is loaded again.
-var dead_actors: Dictionary = {}
-var disabled_actors: Dictionary = {}
 
-
-## Reference ids of the removed actors; the name is not unique (guards share a base editor id).
+## Reference ids of the actors a script killed or disabled. They stay so for the session: the scene does not build them
+## again when their cell is loaded again. The name is not unique (guards share a base editor id), so the id is the key.
 var removed_reference_ids: Dictionary = {}
 
 
@@ -226,10 +222,6 @@ func _deactivate(target: String, command: String, references: Dictionary, world:
 	if "inactive" in actor:
 		actor.set("inactive", true)
 	removed_reference_ids[int(actor.get_meta("reference_id", 0))] = true
-	if command == "kill":
-		dead_actors[target] = true
-	else:
-		disabled_actors[target] = true
 	return "applied: %s" % label
 
 
