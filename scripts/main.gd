@@ -3737,6 +3737,39 @@ func _dialogue_head_position(actor: Dictionary) -> Vector3:
 	return player.global_position + Vector3.UP * 1.5
 
 
+## The horizontal direction the actor's face points, so the dialogue camera frames the face the actor speaks with. A
+## turned head decides it; the body's facing is the fallback when the head cannot be read or points up or down.
+func _dialogue_face_forward(actor: Dictionary, actor_root: Node3D) -> Vector3:
+	var body_forward := -actor_root.global_basis.z
+	body_forward.y = 0.0
+	if body_forward.length_squared() < 0.001:
+		body_forward = player.global_position - actor_root.global_position
+		body_forward.y = 0.0
+	body_forward = body_forward.normalized() if body_forward.length_squared() > 0.001 else Vector3.FORWARD
+	var head_forward := head_forward_on_skeleton(actor.get("skeleton") as Skeleton3D, body_forward)
+	return head_forward if head_forward.length_squared() > 0.0 else body_forward
+
+
+## The horizontal direction "Bip01 Head" points, given the direction the body faces at rest (zero when the skeleton has
+## no head or the head points up or down). Bone axes differ between rigs, so the forward axis is whatever points along
+## the body's facing in the rest pose.
+static func head_forward_on_skeleton(skeleton: Skeleton3D, body_forward: Vector3) -> Vector3:
+	if not is_instance_valid(skeleton):
+		return Vector3.ZERO
+	var head_index := skeleton.find_bone("Bip01 Head")
+	if head_index < 0:
+		return Vector3.ZERO
+	var skeleton_basis := skeleton.global_transform.basis
+	var rest_head_basis := skeleton_basis * skeleton.get_bone_global_rest(head_index).basis
+	var forward_in_bone := rest_head_basis.orthonormalized().inverse() * body_forward
+	var head_basis := skeleton_basis * skeleton.get_bone_global_pose(head_index).basis
+	var head_forward := head_basis.orthonormalized() * forward_in_bone
+	head_forward.y = 0.0
+	if head_forward.length_squared() < 0.04:
+		return Vector3.ZERO
+	return head_forward.normalized()
+
+
 func _update_dialogue_camera(delta: float) -> void:
 	if not _dialogue_active or not is_instance_valid(_dialogue_camera):
 		return
@@ -3745,12 +3778,7 @@ func _update_dialogue_camera(delta: float) -> void:
 		_end_dialogue()
 		return
 	var head_position := _dialogue_head_position(_dialogue_actor)
-	var face_forward := -actor_root.global_basis.z
-	face_forward.y = 0.0
-	if face_forward.length_squared() < 0.001:
-		face_forward = player.global_position - actor_root.global_position
-		face_forward.y = 0.0
-	face_forward = face_forward.normalized() if face_forward.length_squared() > 0.001 else Vector3.FORWARD
+	var face_forward := _dialogue_face_forward(_dialogue_actor, actor_root)
 	var camera_position := head_position + face_forward * 0.82 + Vector3.UP * 0.04
 	var ray_start := head_position + face_forward * 0.06
 	var query := PhysicsRayQueryParameters3D.create(ray_start, camera_position, 2 | 4, [player.get_rid(), actor_root.get_rid()])
