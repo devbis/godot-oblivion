@@ -35,6 +35,7 @@ ScriptExpr make_binary(std::string op, ScriptExpr lhs, ScriptExpr rhs) {
 // How deeply statements (nested `if`) and expressions (parentheses, unary operators) may nest. A script that goes
 // deeper is reported and skipped, rather than overflowing the stack of the thread that parses it.
 constexpr int kMaxNesting = 64;
+constexpr int kMaxBinaryChain = 512;
 
 class Parser {
 public:
@@ -90,6 +91,8 @@ private:
     std::size_t position_ = 0;
     std::vector<ScriptDiagnostic> diagnostics_;
     int depth_ = 0;
+    // Binary operators chain in a loop, so nesting alone does not bound the tree's depth.
+    int binary_nodes_ = 0;
 
     // Counts one level of nesting for as long as it lives.
     struct DepthGuard {
@@ -280,13 +283,22 @@ private:
         return statement;
     }
 
-    ScriptExpr parse_expression() { return parse_or(); }
+    ScriptExpr parse_expression() {
+        if (depth_ == 0) binary_nodes_ = 0;
+        return parse_or();
+    }
+
+    ScriptExpr make_binary_checked(std::string op, ScriptExpr lhs, ScriptExpr rhs) {
+        if (++binary_nodes_ > kMaxBinaryChain)
+            throw SyntaxError{peek().line, "expression has too many operators"};
+        return make_binary(std::move(op), std::move(lhs), std::move(rhs));
+    }
 
     ScriptExpr parse_or() {
         auto lhs = parse_and();
         while (is_operator(peek(), "||")) {
             advance();
-            lhs = make_binary("||", std::move(lhs), parse_and());
+            lhs = make_binary_checked("||", std::move(lhs), parse_and());
         }
         return lhs;
     }
@@ -295,7 +307,7 @@ private:
         auto lhs = parse_comparison();
         while (is_operator(peek(), "&&")) {
             advance();
-            lhs = make_binary("&&", std::move(lhs), parse_comparison());
+            lhs = make_binary_checked("&&", std::move(lhs), parse_comparison());
         }
         return lhs;
     }
@@ -309,7 +321,7 @@ private:
                 token.text != "<=" && token.text != ">=") break;
             const auto op = token.text;
             advance();
-            lhs = make_binary(op, std::move(lhs), parse_additive());
+            lhs = make_binary_checked(op, std::move(lhs), parse_additive());
         }
         return lhs;
     }
@@ -319,7 +331,7 @@ private:
         while (is_operator(peek(), "+") || is_operator(peek(), "-")) {
             const auto op = peek().text;
             advance();
-            lhs = make_binary(op, std::move(lhs), parse_multiplicative());
+            lhs = make_binary_checked(op, std::move(lhs), parse_multiplicative());
         }
         return lhs;
     }
@@ -329,7 +341,7 @@ private:
         while (is_operator(peek(), "*") || is_operator(peek(), "/") || is_operator(peek(), "%")) {
             const auto op = peek().text;
             advance();
-            lhs = make_binary(op, std::move(lhs), parse_unary());
+            lhs = make_binary_checked(op, std::move(lhs), parse_unary());
         }
         return lhs;
     }
