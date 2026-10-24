@@ -146,6 +146,9 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		var model_space_bone_attachment := false
 		if item_type == "WEAP" or (int(data_reader.get_item_biped_slots(item_form_id)) & 0x2000) != 0:
 			attach_bone = await _parent_reference_node(item_path)
+			# The cell may have been left while the NIF loaded.
+			if not is_current.call() or not is_instance_valid(skeleton):
+				return {}
 			if attach_bone.is_empty():
 				push_warning("NPC equipment model %s has no NIF Prn attachment node" % item_path)
 				continue
@@ -500,6 +503,9 @@ func add_actor_model(
 	var meshes: Array = await assets.meshes_for_model(model_path)
 	var attachment: Node3D = avatar
 	var added_instances: Array[MeshInstance3D] = []
+	# The avatar is freed when its cell is left while the model loads.
+	if not is_instance_valid(avatar) or not is_instance_valid(skeleton):
+		return added_instances
 	var actor_head_model_path := npc_head_model_path(npc_face_data) if not npc_face_data.is_empty() else ""
 	var is_actor_head := not actor_head_model_path.is_empty() and model_path.to_lower() == actor_head_model_path.to_lower()
 	if not attach_bone.is_empty():
