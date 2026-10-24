@@ -92,6 +92,17 @@ const std::vector<float>& race_shape_coefficients(const oblivion::RaceFaceGenRec
     return symmetric ? race->face_symmetric : race->face_asymmetric;
 }
 
+// GDScript passes int64 and uses -1 for "none". A value outside 32 bits is no form id: 0 matches no record,
+// where a plain cast would wrap it onto another record's id.
+std::uint32_t form_id_arg(int64_t value) {
+    return value < 0 || value > static_cast<int64_t>(UINT32_MAX) ? 0u : static_cast<std::uint32_t>(value);
+}
+
+// An out-of-range stage becomes one no quest has.
+unsigned stage_arg(int64_t value) {
+    return value < 0 || value > static_cast<int64_t>(UINT32_MAX) ? UINT32_MAX : static_cast<unsigned>(value);
+}
+
 std::uint32_t read_u32_le(const std::uint8_t* bytes) {
     return static_cast<std::uint32_t>(bytes[0])
         | (static_cast<std::uint32_t>(bytes[1]) << 8)
@@ -262,7 +273,7 @@ public:
         const oblivion::CellRecord* center = nullptr;
         for (const auto& cell : cells) {
             if (cell.exterior_grid_cell && !cell.interior && cell.has_grid
-                && cell.worldspace_form_id == static_cast<std::uint32_t>(worldspace_form_id)
+                && cell.worldspace_form_id == form_id_arg(worldspace_form_id)
                 && cell.grid_x == grid_x && cell.grid_y == grid_y) {
                 center = &cell;
                 break;
@@ -383,7 +394,7 @@ public:
         }
         try {
             const auto* quest_script = data_->find_script(quest->script_form_id);
-            for (const auto& run : oblivion::run_quest_stage(*quest, static_cast<unsigned>(stage),
+            for (const auto& run : oblivion::run_quest_stage(*quest, stage_arg(stage),
                                                              oblivion::make_command_lookup(*commands), quest_script,
                                                              quest_state_)) {
                 runs.push_back(stage_run_to_dictionary(run));
@@ -413,7 +424,7 @@ public:
     Dictionary find_pathgrid(int64_t cell_form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* pathgrid = data_->find_pathgrid(static_cast<std::uint32_t>(cell_form_id));
+        const auto* pathgrid = data_->find_pathgrid(form_id_arg(cell_form_id));
         if (!pathgrid) return {};
         Dictionary result;
         PackedVector3Array points;
@@ -521,7 +532,7 @@ public:
     Dictionary find_spell(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* spell = data_->find_spell(static_cast<std::uint32_t>(form_id));
+        const auto* spell = data_->find_spell(form_id_arg(form_id));
         if (!spell) return {};
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(spell->form_id);
@@ -559,7 +570,7 @@ public:
         Array result;
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return result;
-        const auto* outfit = data_->find_outfit(static_cast<std::uint32_t>(form_id));
+        const auto* outfit = data_->find_outfit(form_id_arg(form_id));
         if (!outfit) return result;
         for (const auto item_id : outfit->item_form_ids)
             result.push_back(static_cast<int64_t>(item_id));
@@ -569,7 +580,7 @@ public:
     Dictionary get_ai_package_info(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* package = data_->find_ai_package(static_cast<std::uint32_t>(form_id));
+        const auto* package = data_->find_ai_package(form_id_arg(form_id));
         if (!package) return {};
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(package->form_id);
@@ -588,14 +599,14 @@ public:
     String find_item_model_path(int64_t form_id, bool female) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* path = data_->find_item_model_path(static_cast<std::uint32_t>(form_id), female);
+        const auto* path = data_->find_item_model_path(form_id_arg(form_id), female);
         return path ? as_string(*path) : String{};
     }
 
     int64_t get_item_biped_slots(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return 0;
-        return data_->find_item_biped_slots(static_cast<std::uint32_t>(form_id));
+        return data_->find_item_biped_slots(form_id_arg(form_id));
     }
 
     int64_t find_form_id_by_editor_id(const String& editor_id) const {
@@ -608,28 +619,28 @@ public:
     String find_editor_id(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* editor_id = data_->find_editor_id(static_cast<std::uint32_t>(form_id));
+        const auto* editor_id = data_->find_editor_id(form_id_arg(form_id));
         return editor_id ? as_string(*editor_id) : String{};
     }
 
     String find_record_type(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* record_type = data_->find_record_type(static_cast<std::uint32_t>(form_id));
+        const auto* record_type = data_->find_record_type(form_id_arg(form_id));
         return record_type ? as_string(*record_type) : String{};
     }
 
     String find_record_display_name(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* display_name = data_->find_record_display_name(static_cast<std::uint32_t>(form_id));
+        const auto* display_name = data_->find_record_display_name(form_id_arg(form_id));
         return display_name ? as_string(*display_name) : String{};
     }
 
     String find_record_icon_path(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
-        const auto* icon_path = data_->find_record_icon_path(static_cast<std::uint32_t>(form_id));
+        const auto* icon_path = data_->find_record_icon_path(form_id_arg(form_id));
         return icon_path ? as_string(*icon_path) : String{};
     }
 
@@ -1072,7 +1083,7 @@ public:
     // a distance in game units, or null when the scene cannot answer.
     Dictionary start(const String& quest_editor_id, int64_t stage, const Callable& distance) {
         if (!world_) return Dictionary();
-        return tick_to_dictionary(world_->start(utf8_value(quest_editor_id), static_cast<unsigned>(stage), distance_function(distance)));
+        return tick_to_dictionary(world_->start(utf8_value(quest_editor_id), stage_arg(stage), distance_function(distance)));
     }
 
     // Runs GameMode of every started quest once after `seconds` have passed since the last tick.
@@ -1125,7 +1136,7 @@ public:
     Dictionary run_object_event(int64_t script_form_id, const String& event, const String& detail, const Callable& distance,
                                 const String& object_reference = String(), const String& action_reference = String()) {
         const auto* game = game_.get();
-        const auto* script = game ? game->find_script(static_cast<std::uint32_t>(script_form_id)) : nullptr;
+        const auto* script = game ? game->find_script(form_id_arg(script_form_id)) : nullptr;
         if (!script || !world_) return Dictionary();
         return tick_to_dictionary(world_->run_object_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance),
                                                            utf8_value(object_reference), utf8_value(action_reference)));
@@ -1134,7 +1145,7 @@ public:
     // Registers an NPC whose script's GameMode runs on every tick. False when the NPC or its script is missing.
     bool add_actor(int64_t npc_form_id, const String& reference_name) {
         const auto* game = game_.get();
-        const auto form_id = static_cast<std::uint32_t>(npc_form_id);
+        const auto form_id = form_id_arg(npc_form_id);
         const auto* npc = game ? game->find_npc_base(form_id) : nullptr;
         const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
         if (!script || !world_) return false;
@@ -1144,7 +1155,7 @@ public:
 
     // The package a placed NPC runs now (form ID, 0: none), for idle conditions such as GetIsCurrentPackage.
     void set_actor_package(const String& reference_name, int64_t package_form_id) {
-        if (world_) world_->set_actor_package(utf8_value(reference_name), static_cast<std::uint32_t>(package_form_id));
+        if (world_) world_->set_actor_package(utf8_value(reference_name), form_id_arg(package_form_id));
     }
 
     void clear_actors() {
@@ -1154,7 +1165,7 @@ public:
     // Names the NPC a placed reference of the scene stands for, so SayTo to that reference is to that NPC.
     void set_reference_base(const String& reference_name, int64_t npc_form_id) {
         if (!world_) return;
-        world_->set_reference_base(utf8_value(reference_name), static_cast<std::uint32_t>(npc_form_id));
+        world_->set_reference_base(utf8_value(reference_name), form_id_arg(npc_form_id));
     }
 
     // The length of a spoken reply, from the voice file the scene has for it (nothing when it has none).
@@ -1219,7 +1230,7 @@ public:
     Dictionary select_dialog_topic(int64_t topic_form_id, int64_t speaker_base, int64_t listener_base,
                                    const String& listener_race, bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
-        const auto* topic = game_->find_topic(static_cast<std::uint32_t>(topic_form_id));
+        const auto* topic = game_->find_topic(form_id_arg(topic_form_id));
         if (!topic || topic->editor_id == "GREETING") return {};
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
         if (!world_->dialogue_topic_available(*topic, context)) {
@@ -1364,8 +1375,8 @@ private:
     oblivion::DialogueContext make_dialogue_context(int64_t speaker_base, int64_t listener_base,
                                                      const String& listener_race, bool listener_female) const {
         oblivion::DialogueContext context;
-        context.speaker_base = static_cast<std::uint32_t>(speaker_base);
-        context.listener_base = static_cast<std::uint32_t>(listener_base);
+        context.speaker_base = form_id_arg(speaker_base);
+        context.listener_base = form_id_arg(listener_base);
         context.listener_race = game_ ? game_->find_form_id_by_editor_id(utf8_value(listener_race)) : 0u;
         context.listener_female = listener_female;
         if (game_) {
