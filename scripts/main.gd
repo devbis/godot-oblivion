@@ -912,6 +912,14 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	quest_world.set_reference_base(reference_name, base_form_id)
 	if not quest_world.add_actor(base_form_id, reference_name):
 		push_warning("OpenOB quest: no GameMode script for actor %s" % reference_name)
+	# A MoveTo issued before this actor was streamed in applies now.
+	var pending_move: Variant = quest_bridge.take_pending_move(int(actor.get("reference_id", 0)))
+	var actor_root := actor.get("root") as Node3D
+	if pending_move != null and is_instance_valid(actor_root):
+		if actor_root.has_method("teleport_to"):
+			actor_root.call("teleport_to", pending_move)
+		else:
+			actor_root.global_position = pending_move
 	# An idle picked before this actor was streamed in plays now.
 	var pending: Dictionary = _pending_idles.get(reference_name.to_lower(), {})
 	if not pending.is_empty():

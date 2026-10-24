@@ -53,6 +53,23 @@ func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
 	wall_min_slide_angle = 0.0
 
+## Moves the actor without walking: the route it was following and the remembered ground belong to the old place, so
+## both go, and the package route is planned again from here.
+func teleport_to(destination: Vector3) -> void:
+	global_position = destination
+	velocity = Vector3.ZERO
+	is_walking = false
+	_yield_path.clear()
+	_yield_waypoint_index = 0
+	waypoints.clear()
+	waypoint_speeds.clear()
+	waypoint_index = 0
+	_route_blocked_elapsed = 0.0
+	_route_blocked_reported = false
+	_last_grounded_position = destination
+	_has_last_grounded_position = grounding_enabled
+	set_physics_process(not inactive and grounding_enabled)
+
 func configure_route(
 	route: Array[Dictionary], should_loop: bool, initial_pause: float,
 	final_arrival_distance_m: float = -1.0, use_authored_route_height: bool = false

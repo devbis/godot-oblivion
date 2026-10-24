@@ -16,6 +16,19 @@ var disabled_actors: Dictionary = {}
 var removed_reference_ids: Dictionary = {}
 
 
+## Destinations of MoveTo for actors that were not loaded yet, by reference id; the scene applies one when it builds the actor.
+var pending_moves: Dictionary = {}
+
+
+## The destination a MoveTo left for this actor before it was built, or null.
+func take_pending_move(reference_id: int) -> Variant:
+	if not pending_moves.has(reference_id):
+		return null
+	var destination: Vector3 = pending_moves[reference_id]
+	pending_moves.erase(reference_id)
+	return destination
+
+
 func is_actor_removed(reference_id: int) -> bool:
 	return removed_reference_ids.has(reference_id)
 
@@ -177,11 +190,19 @@ func _move_to(target: String, arguments: Array, references: Dictionary, world: N
 	var destination := str(arguments[0])
 	if not references.has(destination):
 		return "not applied: %s, destination %s is not in this cell" % [label, destination]
+	var destination_transform: Transform3D = transform_of.call(references[destination])
 	var actor := _actor_node(target, world)
 	if actor == null:
-		return "not applied: %s, %s is not in this cell" % [label, target]
-	var destination_transform: Transform3D = transform_of.call(references[destination])
-	actor.global_position = destination_transform.origin
+		# Actors are streamed in lazily: the move waits for the actor to be built.
+		var target_reference: Dictionary = references.get(target, {})
+		if target_reference.is_empty():
+			return "not applied: %s, %s is not in this cell" % [label, target]
+		pending_moves[int(target_reference.get("form_id", 0))] = destination_transform.origin
+		return "applied: %s to %s, %s is not loaded yet and moves when it is" % [label, destination, target]
+	if actor.has_method("teleport_to"):
+		actor.call("teleport_to", destination_transform.origin)
+	else:
+		actor.global_position = destination_transform.origin
 	return "applied: %s to %s" % [label, destination]
 
 
