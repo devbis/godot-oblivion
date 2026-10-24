@@ -1101,13 +1101,12 @@ public:
                               bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
-        std::unordered_set<std::uint32_t> visited;
-        for (const auto topic_id : game_->topic_order()) {
-            if (!visited.insert(topic_id).second) continue;
-            const auto* topic = game_->find_topic(topic_id);
-            if (!topic || topic->topic_type != 1) continue; // DIAL Conversation: the NPC's opening line.
-            auto run = world_->run_dialogue_topic(*topic, context, distance_function(distance));
-            if (run.reply) return dialogue_result(*topic, context, run);
+        // Oblivion's authored greeting is the special GREETING DIAL, whose DATA type is Topic (0),
+        // not Conversation (1). Other Conversation records are scripted exchanges, not NPC greetings.
+        const auto* greeting = game_->find_topic_by_editor_id("GREETING");
+        if (greeting) {
+            auto run = world_->run_dialogue_topic(*greeting, context, distance_function(distance));
+            if (run.reply) return dialogue_result(*greeting, context, run);
         }
         Dictionary result;
         result["success"] = false;
@@ -1123,13 +1122,10 @@ public:
         for (const auto topic_id : game_->topic_order()) {
             if (!visited.insert(topic_id).second) continue;
             const auto* topic = game_->find_topic(topic_id);
-            if (!topic || topic->topic_type != 0 || !world_->dialogue_topic_available(*topic, context)) continue;
-            Dictionary item;
-            item["form_id"] = static_cast<int64_t>(topic->form_id);
-            item["editor_id"] = utf8_text(topic->editor_id);
-            item["name"] = utf8_text(topic->name.empty() ? topic->editor_id : topic->name);
-            item["topic_type"] = topic->topic_type;
-            result.push_back(item);
+            if (!topic || topic->topic_type != 0 || topic->name.empty() || topic->editor_id == "GREETING"
+                    || choice_only_topic_ids_.contains(topic_id)
+                    || !world_->dialogue_topic_available(*topic, context)) continue;
+            result.push_back(topic_to_dictionary(*topic));
         }
         return result;
     }
@@ -1138,8 +1134,13 @@ public:
                                    const String& listener_race, bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
         const auto* topic = game_->find_topic(static_cast<std::uint32_t>(topic_form_id));
-        if (!topic || topic->topic_type != 0) return {};
+        if (!topic || topic->editor_id == "GREETING") return {};
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
+        if (!world_->dialogue_topic_available(*topic, context)) {
+            Dictionary result;
+            result["success"] = false;
+            return result;
+        }
         auto run = world_->run_dialogue_topic(*topic, context, distance_function(distance));
         if (!run.reply) {
             Dictionary result;
@@ -1213,6 +1214,16 @@ public:
         owner_ = owner;
         game_ = std::move(game);
         world_ = std::move(world);
+        choice_only_topic_ids_.clear();
+        if (game_) {
+            for (const auto& [topic_id, topic] : game_->topics()) {
+                for (const auto& response : topic.responses) {
+                    for (const auto linked_topic_id : response.topic_links) {
+                        if (linked_topic_id != 0) choice_only_topic_ids_.insert(linked_topic_id);
+                    }
+                }
+            }
+        }
     }
 
     static void _bind_methods() {
@@ -1244,6 +1255,8 @@ private:
     // The game data the world's quests, scripts and topics point into. Declared before the world, so it outlives it.
     std::shared_ptr<const oblivion::GameData> game_;
     std::unique_ptr<oblivion::QuestWorld> world_;
+    // TCLT-linked topics are inline dialogue choices in TES4, not part of the general topic list.
+    std::unordered_set<std::uint32_t> choice_only_topic_ids_;
 
     static std::string utf8_value(const String& value) {
         const CharString text = value.utf8();
@@ -1276,8 +1289,17 @@ private:
         return context;
     }
 
-    static Dictionary dialogue_result(const oblivion::DialogTopic& topic, const oblivion::DialogueContext& context,
-                                      const oblivion::TopicRun& run) {
+    static Dictionary topic_to_dictionary(const oblivion::DialogTopic& topic) {
+        Dictionary item;
+        item["form_id"] = static_cast<int64_t>(topic.form_id);
+        item["editor_id"] = utf8_text(topic.editor_id);
+        item["name"] = utf8_text(topic.name.empty() ? topic.editor_id : topic.name);
+        item["topic_type"] = topic.topic_type;
+        return item;
+    }
+
+    Dictionary dialogue_result(const oblivion::DialogTopic& topic, const oblivion::DialogueContext& context,
+                               const oblivion::TopicRun& run) const {
         Dictionary result = tick_to_dictionary(run.tick);
         result["success"] = run.reply != nullptr;
         if (!run.reply) return result;
@@ -1321,8 +1343,17 @@ private:
         }
         result["response_lines"] = lines;
         Array links;
-        for (const auto link : run.reply->topic_links) links.push_back(static_cast<int64_t>(link));
+        Array choices;
+        std::unordered_set<std::uint32_t> seen_choices;
+        for (const auto link : run.reply->topic_links) {
+            links.push_back(static_cast<int64_t>(link));
+            if (link == 0 || !seen_choices.insert(link).second) continue;
+            const auto* choice = game_ ? game_->find_topic(link) : nullptr;
+            if (!choice || !world_ || !world_->dialogue_topic_available(*choice, context)) continue;
+            choices.push_back(topic_to_dictionary(*choice));
+        }
         result["topic_links"] = links;
+        result["dialogue_choices"] = choices;
         return result;
     }
 

@@ -5,7 +5,10 @@ const START_MARKER_EDITOR_ID := "CGPlayerStartMarker"
 const START_MARKER_FORM_ID := 0x00032AB5
 const PLAYER_REFERENCE_FORM_ID := 0x00000014
 const AI_PACKAGE_TYPE_AMBUSH := 9
+const AI_PACKAGE_TYPE_FOLLOW := 1
 const AI_PACKAGE_TARGET_REFERENCE := 0
+const AI_PACKAGE_FLAG_ALWAYS_RUN := 0x2000
+const DIALOGUE_REPLY_FLAG_GOODBYE := 0x01
 const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
 const ActorFactory := preload("res://scripts/actor_factory.gd")
 const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
@@ -179,6 +182,10 @@ var _container_reference_cache: Dictionary = {}
 var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
 var _dialogue_active := false
+var _dialogue_paused_actor: Node3D
+var _pending_dialogue_actions: Array[Dictionary] = []
+var _pending_dialogue_route_finished_actor_ids: Array[int] = []
+var _dialogue_pending_route_refresh := false
 var _scripted_subtitle_generation := 0
 var _suppress_scripted_dialogue_presentation := false
 var _dialogue_actor: Dictionary = {}
@@ -604,6 +611,10 @@ func _physics_process(delta: float) -> void:
 		_aimed_target = InteractionTargeting.empty_snapshot()
 	if quest_world == null:
 		return
+	# A dialogue is a script pause as well as a camera mode. Let the selected reply finish and the camera return before
+	# GameMode, trigger zones, package completion, or route refreshes can advance the quest.
+	if _dialogue_active or _dialogue_exit_transition:
+		return
 	_sync_player_actor_values_to_quest_world()
 	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
 	for line: String in _apply_driver_result(result):
@@ -615,7 +626,7 @@ func _physics_process(delta: float) -> void:
 	_player_route_timer -= delta
 	if _player_route_timer <= 0.0:
 		_player_route_timer = 0.5
-		_follow_player_routes()
+		_update_dynamic_target_routes()
 	_open_doors_on_npc_routes()
 
 ## Trigger zones of the cell: a reference whose base has an object script with an OnTrigger block. The zone's OnTrigger
@@ -742,41 +753,50 @@ func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, li
 
 var _player_route_timer := 0.0
 
-## A package near the player (the player's reference is its location) keeps its NPC walking to the player as the player
-## moves: the route is set again when the player has moved more than a metre from the route's target.
-func _follow_player_routes() -> void:
+## Player-targeted packages and Follow packages track their live target as it moves.
+func _update_dynamic_target_routes() -> void:
 	for actor: Dictionary in _npc_actors:
 		var package: Dictionary = actor.get("package", {})
-		if _package_destination_form_id(package) != PLAYER_REFERENCE_FORM_ID:
+		var destination_form_id := _package_destination_form_id(package)
+		var follows_player := destination_form_id == PLAYER_REFERENCE_FORM_ID
+		var follows_actor := _is_dynamic_follow_package(package)
+		if (not follows_player and not follows_actor) or bool(actor.get("package_done", false)):
 			continue
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")):
 			continue
+		var destination_value: Variant = _package_destination_position(package)
+		if destination_value == null:
+			continue
+		var destination: Vector3 = destination_value
 		var arrival_distance := _package_destination_arrival_distance(package, root)
-		var player_distance := Vector2(root.global_position.x - player.global_position.x, root.global_position.z - player.global_position.z).length()
-		if player_distance <= arrival_distance:
+		var destination_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
+		if destination_distance <= arrival_distance:
 			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 			if not active_route.is_empty():
 				var stopped_route: Array[Dictionary] = []
 				root.call("configure_route", stopped_route, false, 0.0, arrival_distance)
-			if not bool(actor.get("package_done", false)):
-				# A player-targeted package can enter its authored radius between route waypoints.
-				# Stopping its route does not emit route_finished, so complete it explicitly here.
-				_on_actor_route_finished(int(actor.get("reference_id", 0)))
+			# A moving target can enter the authored radius between route waypoints. Stopping the route does not emit
+			# route_finished, so complete the package explicitly when the leader or player is already in range.
+			_on_actor_route_finished(int(actor.get("reference_id", 0)))
 			continue
 		var target: Vector3 = actor.get("route_target", Vector3.INF)
-		if target.distance_to(player.global_position) <= 1.0:
+		var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+		if target.distance_to(destination) <= 1.0 and not active_route.is_empty():
 			continue
-		actor["route_target"] = player.global_position
+		actor["route_target"] = destination
 		var waypoints: Array[Dictionary] = []
-		var route_path := director.navigation_path(root.global_position, player.global_position, _actor_collision_radius(root))
+		var route_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
+		var flags := int(package.get("flags", 0))
+		var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 		for point: Vector3 in route_path:
-			waypoints.push_back({"position": point, "speed_mps": 1.3})
+			waypoints.push_back({"position": point, "speed_mps": speed})
 		root.call("configure_route", waypoints, false, 0.0, arrival_distance)
-		print("OpenOB AI route update: %s from=%s destination=Player at=%s path=%s" % [
+		print("OpenOB AI route update: %s from=%s destination=%s at=%s path=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(root.global_position),
-			str(player.global_position),
+			_package_location_label(destination_form_id),
+			str(destination),
 			str(route_path),
 		])
 
@@ -890,9 +910,25 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 		report.push_back("stage %s" % change)
 	for error_text: String in result.get("parse_errors", PackedStringArray()):
 		report.push_back("parse error " + error_text)
+	# Quest actions produced during dialogue are held until the response and camera exit are both complete. This prevents
+	# stage results from speaking, turning, opening doors, or changing packages over the active dialogue.
+	var actions_to_apply: Array[Dictionary] = []
+	for action_value: Variant in result.get("actions", []):
+		var action: Dictionary = action_value
+		if _dialogue_active or _dialogue_exit_transition:
+			_pending_dialogue_actions.push_back(action.duplicate(true))
+			var command := str(action.get("command", "")).to_lower()
+			var arguments: Array = action.get("arguments", [])
+			if command == "look" and not arguments.is_empty():
+				report.push_back("defers scripted look: %s will look at %s after the dialogue camera returns" % [str(action.get("target", "NPC")), str(arguments[0])])
+			elif command == "speech":
+				var speaker := str(arguments[1]) if arguments.size() > 1 else str(action.get("target", "NPC"))
+				report.push_back("defers scripted speech from %s until the dialogue camera returns" % speaker)
+			continue
+		actions_to_apply.push_back(action)
 	# State and unsupported-command reports are summarized once. Speech is an event, so repeated identical dialogue lines
 	# remain visible each time the script says them.
-	for line: String in quest_bridge.apply_actions(result.get("actions", []), current_cell, self, Callable(self, "_reference_transform")):
+	for line: String in quest_bridge.apply_actions(actions_to_apply, current_cell, self, Callable(self, "_reference_transform")):
 		if line.strip_edges().begins_with("says (") or line.strip_edges().begins_with("picks idle"):
 			report.push_back(line)
 		elif not _reported_bridge_lines.has(line):
@@ -947,6 +983,9 @@ func _quest_position(name: String) -> Variant:
 
 ## Gives every placed NPC the route of the package it starts at the quest's current stage.
 func _refresh_npc_routes() -> void:
+	if _dialogue_active or _dialogue_exit_transition:
+		_dialogue_pending_route_refresh = true
+		return
 	for actor: Dictionary in _npc_actors:
 		_refresh_actor_route(actor)
 
@@ -994,19 +1033,19 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	# Packages without a PLDT location can still name a PTDT target reference to approach.
 	var destination_form_id := _package_destination_form_id(package)
 	if not package.is_empty() and destination_form_id != 0:
-		var position = _location_position(destination_form_id)
+		var position = _package_destination_position(package)
 		if position == null:
 			print("OpenOB package %s for %s: target %s is not available in this cell" % [
 				str(package.get("editor_id", "")), str(actor.get("name", "")), _package_location_label(destination_form_id)
 			])
 		else:
 			final_arrival_distance = _package_destination_arrival_distance(package, root as Node3D)
-			if destination_form_id == PLAYER_REFERENCE_FORM_ID:
+			if destination_form_id == PLAYER_REFERENCE_FORM_ID or _is_dynamic_follow_package(package):
 				actor["route_target"] = position
 			else:
 				actor.erase("route_target")
 			var flags := int(package.get("flags", 0))
-			var speed := 3.4 if (flags & 0x2000) != 0 else 1.3
+			var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 			route_path = director.navigation_path((root as Node3D).global_position, position, _actor_collision_radius(root as Node3D))
 			for point: Vector3 in route_path:
 				waypoints.push_back({"position": point, "speed_mps": speed})
@@ -1018,7 +1057,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		str(actor.get("reference_name", actor.get("name", "NPC"))),
 		str(package.get("editor_id", "<none>")),
 		_package_location_label(destination_form_id),
-		str(_location_position(destination_form_id)),
+		str(_package_destination_position(package)),
 		str((root as Node3D).global_position),
 		str(route_path),
 	])
@@ -1028,6 +1067,10 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 
 ## The NPC reached the end of its package's route: run OnPackageDone on its script.
 func _on_actor_route_finished(actor_reference_id: int) -> void:
+	if _dialogue_active or _dialogue_exit_transition:
+		if not _pending_dialogue_route_finished_actor_ids.has(actor_reference_id):
+			_pending_dialogue_route_finished_actor_ids.push_back(actor_reference_id)
+		return
 	for actor: Dictionary in _npc_actors:
 		if int(actor.get("reference_id", 0)) != actor_reference_id or quest_world == null or route_quest_editor_id.is_empty():
 			continue
@@ -1038,7 +1081,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		if not is_instance_valid(root):
 			return
 		var destination_form_id := _package_destination_form_id(package)
-		var location = _location_position(destination_form_id)
+		var location = _package_destination_position(package)
 		if location != null:
 			var destination: Vector3 = location
 			var horizontal_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
@@ -1053,7 +1096,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 					var retry_distance := Vector2(root.global_position.x - retry_end.x, root.global_position.z - retry_end.z).length()
 					if retry_distance > actor_arrival_distance:
 						var flags := int(package.get("flags", 0))
-						var speed := 3.4 if (flags & 0x2000) != 0 else 1.3
+						var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 						var waypoints: Array[Dictionary] = []
 						for point: Vector3 in retry_path:
 							waypoints.push_back({"position": point, "speed_mps": speed})
@@ -1176,6 +1219,31 @@ func _package_destination_form_id(package: Dictionary) -> int:
 	if int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE:
 		return int(package.get("target_form_id", 0))
 	return 0
+
+
+func _is_dynamic_follow_package(package: Dictionary) -> bool:
+	return int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_FOLLOW \
+		and int(package.get("location_form_id", 0)) == 0 \
+		and int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE
+
+
+func _npc_reference_position(reference_form_id: int) -> Variant:
+	for actor: Dictionary in _npc_actors:
+		if int(actor.get("reference_id", 0)) != reference_form_id:
+			continue
+		var root := actor.get("root") as Node3D
+		if is_instance_valid(root):
+			return root.global_position
+	return null
+
+
+func _package_destination_position(package: Dictionary) -> Variant:
+	var destination_form_id := _package_destination_form_id(package)
+	if destination_form_id == PLAYER_REFERENCE_FORM_ID:
+		return player.global_position
+	if _is_dynamic_follow_package(package):
+		return _npc_reference_position(destination_form_id)
+	return _location_position(destination_form_id)
 
 
 func _package_destination_arrival_distance(package: Dictionary, root: Node3D) -> float:
@@ -2977,6 +3045,10 @@ func _begin_dialogue(actor: Dictionary, show_failure_toast: bool = true) -> bool
 		if show_failure_toast:
 			_show_interaction_toast("They have nothing to say")
 		return false
+	var dialogue_actor_root := actor.get("root") as Node3D
+	if is_instance_valid(dialogue_actor_root) and dialogue_actor_root.has_method("set_dialogue_paused"):
+		dialogue_actor_root.call("set_dialogue_paused", true)
+	_dialogue_paused_actor = dialogue_actor_root
 	set_npc_look_target(str(actor.get("reference_name", "")), "player")
 	_suppress_scripted_dialogue_presentation = true
 	var greeting_report := _apply_driver_result(greeting)
@@ -3003,7 +3075,7 @@ func _begin_dialogue(actor: Dictionary, show_failure_toast: bool = true) -> bool
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_dialogue_speaker_label.text = str(actor.get("display_name", actor.get("name", "NPC")))
 	_present_dialogue_response(greeting)
-	_refresh_dialogue_topics()
+	_refresh_dialogue_topics(greeting)
 	_dialogue_goodbye_button.grab_focus()
 	return true
 
@@ -3063,18 +3135,25 @@ func _npc_actor_by_base_form_id(base_form_id: int) -> Dictionary:
 	return nearest
 
 
-func _refresh_dialogue_topics() -> void:
+func _refresh_dialogue_topics(response: Dictionary = {}) -> void:
 	if not _dialogue_active or quest_world == null:
 		return
 	for child: Node in _dialogue_topics.get_children():
 		_dialogue_topics.remove_child(child)
 		child.queue_free()
-	var topic_values: Array = quest_world.available_dialog_topics(
-		_dialogue_speaker_form_id,
-		_dialogue_listener_form_id,
-		_dialogue_listener_race,
-		_dialogue_listener_female
-	)
+	var dialogue_choices: Array = response.get("dialogue_choices", [])
+	var reply_ends_dialogue := (int(response.get("reply_flags", 0)) & DIALOGUE_REPLY_FLAG_GOODBYE) != 0
+	if reply_ends_dialogue and dialogue_choices.is_empty():
+		# A Goodbye response ends the session after its voice lines; do not leave stale topics selectable meanwhile.
+		return
+	var topic_values: Array = dialogue_choices
+	if topic_values.is_empty():
+		topic_values = quest_world.available_dialog_topics(
+			_dialogue_speaker_form_id,
+			_dialogue_listener_form_id,
+			_dialogue_listener_race,
+			_dialogue_listener_female
+		)
 	if topic_values.is_empty():
 		var empty_label := Label.new()
 		empty_label.text = "No available topics"
@@ -3111,7 +3190,7 @@ func _select_dialogue_topic(topic_form_id: int) -> void:
 	if _needs_route_refresh(response):
 		_refresh_npc_routes()
 	_present_dialogue_response(response)
-	_refresh_dialogue_topics()
+	_refresh_dialogue_topics(response)
 
 
 func _present_dialogue_response(response: Dictionary) -> void:
@@ -3159,6 +3238,11 @@ func _play_dialogue_response_lines(response: Dictionary, generation: int) -> voi
 				elapsed += get_process_delta_time()
 		else:
 			await get_tree().create_timer(minimum_duration).timeout
+	var dialogue_choices: Array = response.get("dialogue_choices", [])
+	if _dialogue_active and generation == _dialogue_line_generation \
+			and (int(response.get("reply_flags", 0)) & DIALOGUE_REPLY_FLAG_GOODBYE) != 0 \
+			and dialogue_choices.is_empty():
+		_end_dialogue()
 
 
 func _dialogue_head_position(actor: Dictionary) -> Vector3:
@@ -3241,6 +3325,21 @@ func _finish_dialogue_camera_exit() -> void:
 	player.set_controls_suspended(_dialogue_previous_controls_suspended)
 	Input.mouse_mode = _dialogue_previous_mouse_mode
 	_dialogue_previous_camera = null
+	if not _pending_dialogue_actions.is_empty():
+		var pending_actions := _pending_dialogue_actions.duplicate(true)
+		_pending_dialogue_actions.clear()
+		for line: String in quest_bridge.apply_actions(pending_actions, current_cell, self, Callable(self, "_reference_transform")):
+			print("OpenOB quest: " + line)
+	var completed_actor_ids := _pending_dialogue_route_finished_actor_ids.duplicate()
+	_pending_dialogue_route_finished_actor_ids.clear()
+	for actor_reference_id: int in completed_actor_ids:
+		_on_actor_route_finished(actor_reference_id)
+	if _dialogue_pending_route_refresh:
+		_dialogue_pending_route_refresh = false
+		_refresh_npc_routes()
+	if is_instance_valid(_dialogue_paused_actor) and _dialogue_paused_actor.has_method("set_dialogue_paused"):
+		_dialogue_paused_actor.call("set_dialogue_paused", false)
+	_dialogue_paused_actor = null
 
 
 func _end_dialogue(immediate: bool = false) -> void:
@@ -4315,9 +4414,6 @@ func set_npc_look_target(reference_name: String, target_reference: String) -> St
 		return ""
 	actor["look_target"] = target
 	actor["look_blend"] = 0.0
-	var actor_root := actor.get("root") as Node3D
-	if is_instance_valid(actor_root) and actor_root.has_method("set_look_target"):
-		actor_root.call("set_look_target", target)
 	return str(actor.get("reference_name", reference_name))
 
 
@@ -4333,6 +4429,12 @@ func _restore_npc_head_pose(actor: Dictionary, skeleton: Skeleton3D) -> void:
 
 func _look_target_world_position(target: Node3D) -> Vector3:
 	if target == player:
+		# In first person the hidden avatar's eye meshes can be offset from the actual viewpoint.
+		# Aim NPC dialogue gaze at the camera lens, which sits at the center of the player's view.
+		if player.is_first_person:
+			var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+			if is_instance_valid(camera):
+				return camera.global_position
 		return _player_gaze_target_world_position()
 	for actor: Dictionary in _npc_actors:
 		if actor.get("root") == target:

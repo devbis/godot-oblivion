@@ -151,7 +151,7 @@ func _look_at(target: String, arguments: Array, world: Node3D, label: String) ->
 	var result := str(world.call("set_npc_look_target", target, str(arguments[0])))
 	if result.is_empty():
 		return "not applied: %s, actor or look target is not loaded" % label
-	return "looks at %s" % str(arguments[0])
+	return "%s looks at %s" % [target, str(arguments[0])]
 
 
 func _move_to(target: String, arguments: Array, references: Dictionary, world: Node3D, transform_of: Callable, label: String) -> String:
