@@ -277,7 +277,7 @@ static func build_head_mesh(
 	var base_vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
 	var vertex_count := base_vertices.size()
-	if vertex_count != int(tri.get("vertex_count", -1)):
+	if vertex_count != int(tri.get("vertex_count", -1)) or vertex_count != int(egm.get("vertex_count", -1)):
 		return null
 	var tri_vertices: PackedVector3Array = tri.get("vertices", PackedVector3Array())
 	if tri_vertices.size() < vertex_count:
@@ -442,7 +442,9 @@ static func _morph_delta_at(modes: Array, coefficients: PackedFloat32Array, vert
 		var coefficient := coefficients[mode_index]
 		if absf(coefficient) >= 0.000001:
 			var mode: PackedVector3Array = modes[mode_index]
-			result += mode[vertex_index] * coefficient
+			# The EGM covers the head's own vertices; the TRI's extra target vertices have no EGM data.
+			if vertex_index < mode.size():
+				result += mode[vertex_index] * coefficient
 	return result
 
 static func _relative_shape_arrays(
