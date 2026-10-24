@@ -732,6 +732,22 @@ func _actor_collision_radius(actor: Node3D) -> float:
 			return maxf(box_shape.size.x, box_shape.size.z) * 0.5 + shape_margin
 	return 0.0
 
+## Follow packages have a moving target, not a terminal destination. Hold at the authored distance and resume
+## tracking when the leader moves; completing the route must not fire OnPackageDone or freeze the follower.
+func _hold_dynamic_follow_route(actor: Dictionary, root: Node3D, target_form_id: int, arrival_distance: float) -> void:
+	var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+	if not active_route.is_empty():
+		var stopped_route: Array[Dictionary] = []
+		root.call("configure_route", stopped_route, false, 0.0, arrival_distance)
+	actor.erase("route_target")
+	if int(actor.get("follow_hold_target_form_id", 0)) != target_form_id:
+		print("OpenOB AI follow: %s holds %s within %.2fm and keeps tracking" % [
+			str(actor.get("reference_name", actor.get("name", "NPC"))),
+			_package_location_label(target_form_id),
+			arrival_distance,
+		])
+	actor["follow_hold_target_form_id"] = target_form_id
+
 ## Length in seconds of a spoken reply, from its voice file. The voice folder is the speaker's voice type, which is not read
 ## yet, so each race and sex folder is tried; a reply's form ID names one file. Null when no folder has it, so the quest
 ## estimates the length from the text.
@@ -791,6 +807,9 @@ func _update_dynamic_target_routes() -> void:
 				continue
 		if destination_distance <= arrival_distance:
 			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+			if follows_actor:
+				_hold_dynamic_follow_route(actor, root, destination_form_id, arrival_distance)
+				continue
 			if not active_route.is_empty():
 				var stopped_route: Array[Dictionary] = []
 				root.call("configure_route", stopped_route, false, 0.0, arrival_distance)
@@ -802,8 +821,11 @@ func _update_dynamic_target_routes() -> void:
 			continue
 		var target: Vector3 = actor.get("route_target", Vector3.INF)
 		var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
-		if target.distance_to(destination) <= 1.0 and not active_route.is_empty():
+		var route_index := int(root.get("waypoint_index"))
+		var route_is_active := route_index >= 0 and route_index < active_route.size()
+		if target.distance_to(destination) <= 1.0 and route_is_active:
 			continue
+		actor.erase("follow_hold_target_form_id")
 		actor["route_target"] = destination
 		var waypoints: Array[Dictionary] = []
 		var route_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
@@ -1055,6 +1077,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		actor["package_done"] = false
 		actor["package_target_activated"] = false
 		actor.erase("package_arrival_distance")
+		actor.erase("follow_hold_target_form_id")
 	if int(package.get("form_id", 0)) != int(previous.get("form_id", 0)):
 		actor.erase("npc_greet_attempted_package_id")
 		actor.erase("npc_greet_last_attempt_msec")
@@ -1164,6 +1187,11 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 							str(package.get("editor_id", "")), str(actor.get("name", "")), horizontal_distance
 						])
 				return
+		if _is_dynamic_follow_package(package):
+			_hold_dynamic_follow_route(
+				actor, root, destination_form_id, _package_destination_arrival_distance(package, root)
+			)
+			return
 		actor["package_done"] = true
 		print("OpenOB AI route complete: %s package=%s destination=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
