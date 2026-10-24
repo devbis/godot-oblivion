@@ -34,6 +34,7 @@ var _yield_path := PackedVector3Array()
 var _yield_waypoint_index := 0
 var _stepper := CharacterStepper.new()
 var _footstep_distance_m := 0.0
+var look_target: Node3D
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
@@ -98,6 +99,9 @@ func get_collision_radius() -> float:
 			return (collision.shape as SphereShape3D).radius + collision.shape.margin
 	return 0.18
 
+func set_look_target(target: Node3D) -> void:
+	look_target = target
+
 func _physics_process(delta: float) -> void:
 	if inactive:
 		set_physics_process(false)
@@ -115,7 +119,7 @@ func _physics_process(delta: float) -> void:
 				_yield_waypoint_index = 0
 		else:
 			var direction := offset.normalized()
-			rotation.y = lerp_angle(rotation.y, atan2(-direction.x, -direction.z), 1.0 - exp(-8.0 * delta))
+			_face_route_direction(direction, delta)
 			desired_horizontal_velocity = direction * minf(walk_speed_mps, 0.8)
 	elif not waypoints.is_empty() and waypoint_index < waypoints.size():
 		var offset := waypoints[waypoint_index] - global_position
@@ -127,7 +131,7 @@ func _physics_process(delta: float) -> void:
 			_advance_waypoint()
 		else:
 			var direction := offset.normalized()
-			rotation.y = lerp_angle(rotation.y, atan2(-direction.x, -direction.z), 1.0 - exp(-8.0 * delta))
+			_face_route_direction(direction, delta)
 			var speed := waypoint_speeds[waypoint_index] if waypoint_index < waypoint_speeds.size() else walk_speed_mps
 			desired_horizontal_velocity = direction * speed
 
@@ -199,6 +203,18 @@ func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> vo
 		if bool(blocker.call("request_yield", away_direction, clearance)):
 			print("OpenOB AI avoidance: %s asked %s to yield by %.2fm" % [name, blocker.name, clearance])
 			return
+
+func _face_route_direction(movement_direction: Vector3, delta: float) -> void:
+	var desired_yaw := atan2(-movement_direction.x, -movement_direction.z)
+	if is_instance_valid(look_target):
+		var toward_target := look_target.global_position - global_position
+		toward_target.y = 0.0
+		if toward_target.length_squared() > 0.0001:
+			var target_yaw := atan2(-toward_target.x, -toward_target.z)
+			var yaw_from_route := wrapf(target_yaw - desired_yaw, -PI, PI)
+			if absf(yaw_from_route) > deg_to_rad(48.0):
+				desired_yaw = target_yaw
+	rotation.y = lerp_angle(rotation.y, desired_yaw, 1.0 - exp(-8.0 * delta))
 
 func _has_walkable_floor_ahead(horizontal_velocity: Vector3, delta: float) -> bool:
 	var probe_position := global_position + Vector3(horizontal_velocity.x, 0.0, horizontal_velocity.z) * delta

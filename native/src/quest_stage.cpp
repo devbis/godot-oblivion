@@ -13,13 +13,14 @@ std::string lower_text(std::string text) {
     return text;
 }
 
-// Records every command as an action and answers it with 0.
+// Records every command as an action and answers it with 0 unless a stage command-value callback supplies a result.
 class RecordingStageHost final : public ScriptHost {
 public:
     RecordingStageHost(const QuestRecord& quest, unsigned stage, const ScriptRecord* quest_script, QuestState& state,
-                       const ForeignVariableReader& read_foreign, const PickIdleHook& pick_idle)
+                       const ForeignVariableReader& read_foreign, const PickIdleHook& pick_idle,
+                       const StageCommandValue& command_value)
         : quest_(quest.form_id), stage_(stage), quest_script_(quest_script), state_(state), quest_key_(lower(quest.editor_id)),
-          read_foreign_(read_foreign), pick_idle_(pick_idle) {}
+          read_foreign_(read_foreign), pick_idle_(pick_idle), command_value_(command_value) {}
 
     std::vector<ScriptAction> actions;
     ScriptInterpreter* interpreter = nullptr;  // set by the runner; bare quest variables are kept in step through it
@@ -47,6 +48,22 @@ public:
             }
             actions.push_back(pick_idle_(target && target->is_text ? target->text : std::string()));
             return ScriptValue::from_number(0.0);
+        }
+        if (command_value_) {
+            const auto lowered_name = lower(std::string(name));
+            if ((lowered_name == "say" || lowered_name == "sayto") && interpreter) {
+                const auto prefix = quest_key_ + ".";
+                for (const auto& [key, value] : interpreter->variables())
+                    if (!value.is_text && key.compare(0, prefix.size(), prefix) == 0) state_.variables[key] = value.number;
+            }
+            if (const auto value = command_value_(name, target, arguments)) {
+                ScriptAction action;
+                action.command = std::string(name);
+                if (target) action.target = target->text;
+                action.arguments = arguments;
+                actions.push_back(std::move(action));
+                return value;
+            }
         }
         ScriptAction action;
         action.command = std::string(name);
@@ -107,6 +124,7 @@ private:
     std::string quest_key_;
     const ForeignVariableReader& read_foreign_;
     const PickIdleHook& pick_idle_;
+    const StageCommandValue& command_value_;
 };
 
 } // namespace
@@ -114,7 +132,7 @@ private:
 std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned stage_index,
                                            const ScriptCommandLookup& lookup, const ScriptRecord* quest_script,
                                            QuestState& state, const ForeignVariableReader& read_foreign,
-                                           const PickIdleHook& pick_idle) {
+                                           const PickIdleHook& pick_idle, const StageCommandValue& command_value) {
     std::vector<StageEntryRun> runs;
     const QuestStage* stage = nullptr;
     for (const auto& candidate : quest.stages)
@@ -133,7 +151,7 @@ std::vector<StageEntryRun> run_quest_stage(const QuestRecord& quest, unsigned st
         StageEntryRun run;
         run.completes = entry.completes;
         run.log_text = entry.log_text;
-        RecordingStageHost host(quest, stage_index, quest_script, state, read_foreign, pick_idle);
+        RecordingStageHost host(quest, stage_index, quest_script, state, read_foreign, pick_idle, command_value);
         run.conditions_hold = evaluate_conditions(entry.conditions, host, &run.missing_conditions);
         if (run.conditions_hold) {
             // Fragments run with no script of their own; the interpreter only needs a script to outlive it.

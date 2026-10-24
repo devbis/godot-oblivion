@@ -56,6 +56,14 @@ public:
         return std::nullopt;
     }
 
+    // Conditions with a TES4 runOn selector can use the actor the condition targets. Older hosts keep their existing
+    // behavior through this default forwarding implementation.
+    virtual std::optional<double> call_condition(std::uint16_t function_index, std::uint32_t parameter1,
+                                                 std::uint32_t parameter2, std::uint32_t run_on) {
+        static_cast<void>(run_on);
+        return call_condition(function_index, parameter1, parameter2);
+    }
+
     // The value of a GLOB record, for a condition compared against a global (CTDA "use global"). Returns
     // nullopt when the host does not know it; the condition then counts as false.
     virtual std::optional<double> global_value(std::uint32_t form_id) {

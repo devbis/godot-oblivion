@@ -416,7 +416,9 @@ int main(int argc, char** argv) {
                     std::cout << "  " << package->editor_id << " form=" << std::hex << package_id << std::dec
                               << " type=" << static_cast<unsigned>(package->package_type) << " flags=0x" << std::hex << package->flags << std::dec
                               << " location_type=" << package->location_type << " location=" << location_name
-                              << " radius=" << package->location_radius << '\n';
+                              << " radius=" << package->location_radius << " target_type=" << package->target_type
+                              << " target=" << std::hex << package->target_form_id << std::dec
+                              << " target_distance=" << package->target_distance << '\n';
                     for (const auto& condition : package->conditions)
                         std::cout << "    if op=" << static_cast<unsigned>(condition.operator_code) << ' ' << condition.comparison
                                   << " function=" << condition.function_index << " param=" << std::hex << condition.parameter1

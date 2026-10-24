@@ -19,12 +19,13 @@
 
 namespace oblivion {
 
-// Who a topic is spoken by and to. GetIsID is answered for the speaker or the listener; GetIsRace and
-// GetIsSex are answered for the listener (the prisoner a taunt is addressed to).
+// Who a topic is spoken by and to. INFO conditions use CTDA runOn to choose the speaker (subject) or listener (target).
 struct DialogueContext {
     std::uint32_t speaker_base = 0;
     std::uint32_t listener_base = 0;
+    std::uint32_t speaker_race = 0;
     std::uint32_t listener_race = 0;
+    bool speaker_female = false;
     bool listener_female = false;
     // The idle manager asks about one actor: its base is both speaker and listener. `current_package` is the package
     // the actor runs now (GetIsCurrentPackage); `for_idle` makes MenuMode answer 0, as the game is not in a menu.
@@ -50,6 +51,7 @@ constexpr unsigned kMaxStageEntriesPerTick = 256;
 
 struct TopicRun {
     const DialogResponse* reply = nullptr;  // the reply whose conditions held first, or null
+    std::string quest_editor_id;
     QuestTick tick;                          // what its result did
 };
 
@@ -74,8 +76,8 @@ private:
 
 // Drives one quest: keeps its stage and variables, runs the quest script's GameMode
 // block on every tick, and runs a stage's results when the stage is set.
-// Commands are recorded as actions for the caller to perform; the only answers the
-// driver gives are GetStage, SetStage, GetSecondsPassed and GetDistance.
+// Commands are recorded as actions for the caller to perform; the driver answers quest state, time and distance
+// queries, as well as Say/SayTo with the eligible voice duration.
 class QuestDriver {
 public:
     QuestDriver(const QuestRecord& quest, const ScriptRecord& script, ScriptCommandLookup lookup);
@@ -90,6 +92,10 @@ public:
     // `depth` counts the SayTo and SetStage hops that led here, and bounds the chain.
     TopicRun run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance = {},
                        int depth = 0);
+    const DialogResponse* find_topic_reply(const DialogTopic& topic, const DialogueContext& context) const;
+    bool topic_reply_conditions_hold(const DialogResponse& reply, const DialogueContext& context) const;
+    TopicRun run_topic_reply(const DialogResponse& reply, const DialogueContext& context,
+                             const DistanceFunction& distance = {}, int depth = 0);
 
     // Runs an event block of an actor's script (for example OnPackageDone with the package's name).
     // The actor's script may set this quest's stage, and the results of the new stage run.
@@ -173,7 +179,8 @@ public:
     // Seconds a reply takes to say, from the speaker's base, the quest and topic, the reply's form ID and text; nullopt
     // when the scene does not know (the length is then estimated from the text).
     using SpeechLength = std::function<std::optional<double>(std::uint32_t speaker, std::string_view quest,
-                                                             std::string_view topic, std::uint32_t reply, std::string_view text)>;
+                                                             std::string_view topic, std::uint32_t reply,
+                                                             std::uint8_t line_number, std::string_view text)>;
 
     explicit QuestWorld(ScriptCommandLookup lookup);
 
@@ -189,6 +196,7 @@ public:
 
     QuestDriver* find(std::string_view editor_id);
     QuestDriver* find_form(std::uint32_t form_id);
+    const QuestDriver* find_form(std::uint32_t form_id) const;
 
     // Starts a registered quest at a stage and runs its results.
     QuestTick start(std::string_view editor_id, unsigned stage, const DistanceFunction& distance = {});
@@ -206,7 +214,10 @@ public:
     // seconds it takes to speak are returned (0 when nothing is said).
     // `depth` counts the hops of the chain (SayTo, SetStage) that led here; a chain deeper than the limit stops.
     double say(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener, QuestTick& tick,
-               const DistanceFunction& distance, int depth = 0);
+               const DistanceFunction& distance, int depth = 0, std::string_view speaker_reference = {});
+    // Resolves the same eligible INFO as SayTo and returns its voice duration without running its result script.
+    // Stage-result evaluation uses this return value before it executes the recorded SayTo action.
+    double speech_duration(std::string_view topic_editor_id, std::uint32_t speaker, std::uint32_t listener) const;
 
     // Runs an event of an object's script (OnTrigger with the player as the detail) in the world, as an actor's would run.
     QuestTick run_object_event(const ScriptRecord& script, std::string_view event, std::string_view detail,
@@ -240,6 +251,10 @@ public:
 
     // True once the quest has been started (StartQuest, SetStage or start()).
     bool is_started(const QuestDriver* driver) const { return started_.count(const_cast<QuestDriver*>(driver)) != 0; }
+
+    bool dialogue_topic_available(const DialogTopic& topic, const DialogueContext& context) const;
+    TopicRun run_dialogue_topic(const DialogTopic& topic, const DialogueContext& context,
+                                const DistanceFunction& distance = {}, int depth = 0);
 
     // PickIdle for a reference (empty: the actor `speaker_base` stands for). Picks the first idle of the tree whose
     // conditions hold for that actor and the current quest state (see select_idle) and records the action

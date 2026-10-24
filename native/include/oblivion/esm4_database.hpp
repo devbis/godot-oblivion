@@ -130,6 +130,9 @@ struct AiPackageRecord {
     std::int32_t location_type = -1;
     std::uint32_t location_form_id = 0;
     std::int32_t location_radius = 0;
+    std::int32_t target_type = -1;
+    std::uint32_t target_form_id = 0;
+    std::int32_t target_distance = 0;
     std::vector<QuestCondition> conditions;  // CTDA: the package starts only when these hold
 };
 
@@ -198,6 +201,7 @@ public:
     [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const;
     [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const;
     [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return topic_by_id_; }
+    [[nodiscard]] const std::vector<std::uint32_t>& topic_order() const noexcept { return topic_order_; }
     [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return quest_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const;
     [[nodiscard]] const std::vector<CellRecord>& cells() const noexcept { return cells_; }
@@ -258,6 +262,7 @@ private:
     std::size_t unplaced_reference_count_ = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> unplaced_references_;
     std::map<std::uint32_t, DialogTopic> topic_by_id_;
+    std::vector<std::uint32_t> topic_order_;
     std::map<std::uint32_t, std::vector<DialogResponse>> responses_by_topic_;
     std::uint32_t active_topic_id_ = 0;  // topic of the INFO group being walked
 

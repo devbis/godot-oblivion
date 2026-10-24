@@ -526,6 +526,9 @@ public:
         result["location_type"] = package->location_type;
         result["location_form_id"] = static_cast<int64_t>(package->location_form_id);
         result["location_radius"] = package->location_radius;
+        result["target_type"] = package->target_type;
+        result["target_form_id"] = static_cast<int64_t>(package->target_form_id);
+        result["target_distance"] = package->target_distance;
         return result;
     }
 
@@ -1075,10 +1078,12 @@ public:
             world_->set_speech_length(nullptr);
             return;
         }
-        world_->set_speech_length([length](std::uint32_t speaker, std::string_view quest, std::string_view topic, std::uint32_t reply,
+        world_->set_speech_length([length](std::uint32_t speaker, std::string_view quest, std::string_view topic,
+                                           std::uint32_t reply, std::uint8_t line_number,
                                            std::string_view text) -> std::optional<double> {
             const Variant value = length.call(static_cast<int64_t>(speaker), utf8_text(std::string(quest)), utf8_text(std::string(topic)),
-                                              static_cast<int64_t>(reply), utf8_text(std::string(text)));
+                                              static_cast<int64_t>(reply), static_cast<int64_t>(line_number),
+                                              utf8_text(std::string(text)));
             if (value.get_type() == Variant::FLOAT) return static_cast<double>(value);
             if (value.get_type() == Variant::INT) return static_cast<double>(static_cast<int64_t>(value));
             return std::nullopt;
@@ -1090,6 +1095,58 @@ public:
         const auto* game = game_.get();
         if (!world_) return;
         world_->set_listener(game ? game->find_form_id_by_editor_id(utf8_value(race_editor_id)) : 0u, female);
+    }
+
+    Dictionary begin_dialogue(int64_t speaker_base, int64_t listener_base, const String& listener_race,
+                              bool listener_female, const Callable& distance) {
+        if (!game_ || !world_) return {};
+        const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
+        std::unordered_set<std::uint32_t> visited;
+        for (const auto topic_id : game_->topic_order()) {
+            if (!visited.insert(topic_id).second) continue;
+            const auto* topic = game_->find_topic(topic_id);
+            if (!topic || topic->topic_type != 1) continue; // DIAL Conversation: the NPC's opening line.
+            auto run = world_->run_dialogue_topic(*topic, context, distance_function(distance));
+            if (run.reply) return dialogue_result(*topic, context, run);
+        }
+        Dictionary result;
+        result["success"] = false;
+        return result;
+    }
+
+    Array available_dialog_topics(int64_t speaker_base, int64_t listener_base, const String& listener_race,
+                                  bool listener_female) const {
+        Array result;
+        if (!game_ || !world_) return result;
+        const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
+        std::unordered_set<std::uint32_t> visited;
+        for (const auto topic_id : game_->topic_order()) {
+            if (!visited.insert(topic_id).second) continue;
+            const auto* topic = game_->find_topic(topic_id);
+            if (!topic || topic->topic_type != 0 || !world_->dialogue_topic_available(*topic, context)) continue;
+            Dictionary item;
+            item["form_id"] = static_cast<int64_t>(topic->form_id);
+            item["editor_id"] = utf8_text(topic->editor_id);
+            item["name"] = utf8_text(topic->name.empty() ? topic->editor_id : topic->name);
+            item["topic_type"] = topic->topic_type;
+            result.push_back(item);
+        }
+        return result;
+    }
+
+    Dictionary select_dialog_topic(int64_t topic_form_id, int64_t speaker_base, int64_t listener_base,
+                                   const String& listener_race, bool listener_female, const Callable& distance) {
+        if (!game_ || !world_) return {};
+        const auto* topic = game_->find_topic(static_cast<std::uint32_t>(topic_form_id));
+        if (!topic || topic->topic_type != 0) return {};
+        const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
+        auto run = world_->run_dialogue_topic(*topic, context, distance_function(distance));
+        if (!run.reply) {
+            Dictionary result;
+            result["success"] = false;
+            return result;
+        }
+        return dialogue_result(*topic, context, run);
     }
 
     void set_player_actor_values(const Dictionary& values) {
@@ -1133,6 +1190,9 @@ public:
         result["location_type"] = static_cast<int64_t>(chosen->location_type);
         result["location_form_id"] = static_cast<int64_t>(chosen->location_form_id);
         result["radius"] = static_cast<int64_t>(chosen->location_radius);
+        result["target_type"] = static_cast<int64_t>(chosen->target_type);
+        result["target_form_id"] = static_cast<int64_t>(chosen->target_form_id);
+        result["target_distance"] = static_cast<int64_t>(chosen->target_distance);
         result["flags"] = static_cast<int64_t>(chosen->flags);
         return result;
     }
@@ -1165,6 +1225,12 @@ public:
         ClassDB::bind_method(D_METHOD("run_object_event", "script_form_id", "event", "detail", "distance"), &OblivionQuestWorld::run_object_event);
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("begin_dialogue", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),
+                             &OblivionQuestWorld::begin_dialogue);
+        ClassDB::bind_method(D_METHOD("available_dialog_topics", "speaker_base", "listener_base", "listener_race", "listener_female"),
+                             &OblivionQuestWorld::available_dialog_topics);
+        ClassDB::bind_method(D_METHOD("select_dialog_topic", "topic_form_id", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),
+                             &OblivionQuestWorld::select_dialog_topic);
         ClassDB::bind_method(D_METHOD("set_player_actor_values", "values"), &OblivionQuestWorld::set_player_actor_values);
         ClassDB::bind_method(D_METHOD("set_speech_length", "length"), &OblivionQuestWorld::set_speech_length);
         ClassDB::bind_method(D_METHOD("set_reference_base", "reference_name", "npc_form_id"), &OblivionQuestWorld::set_reference_base);
@@ -1192,6 +1258,72 @@ private:
             if (value.get_type() == Variant::INT) return static_cast<double>(static_cast<int64_t>(value));
             return std::nullopt;
         };
+    }
+
+    oblivion::DialogueContext make_dialogue_context(int64_t speaker_base, int64_t listener_base,
+                                                     const String& listener_race, bool listener_female) const {
+        oblivion::DialogueContext context;
+        context.speaker_base = static_cast<std::uint32_t>(speaker_base);
+        context.listener_base = static_cast<std::uint32_t>(listener_base);
+        context.listener_race = game_ ? game_->find_form_id_by_editor_id(utf8_value(listener_race)) : 0u;
+        context.listener_female = listener_female;
+        if (game_) {
+            if (const auto* speaker = game_->find_npc_base(context.speaker_base)) {
+                context.speaker_race = speaker->race_form_id;
+                context.speaker_female = (speaker->flags & 0x1u) != 0;
+            }
+        }
+        return context;
+    }
+
+    static Dictionary dialogue_result(const oblivion::DialogTopic& topic, const oblivion::DialogueContext& context,
+                                      const oblivion::TopicRun& run) {
+        Dictionary result = tick_to_dictionary(run.tick);
+        result["success"] = run.reply != nullptr;
+        if (!run.reply) return result;
+        const oblivion::DialogResponseLine* line = nullptr;
+        for (const auto& candidate : run.reply->lines) {
+            if (!line) line = &candidate;
+            if (candidate.has_text) {
+                line = &candidate;
+                break;
+            }
+        }
+        result["topic_form_id"] = static_cast<int64_t>(topic.form_id);
+        result["topic_editor_id"] = utf8_text(topic.editor_id);
+        result["topic_name"] = utf8_text(topic.name);
+        result["speaker_base"] = static_cast<int64_t>(context.speaker_base);
+        result["listener_base"] = static_cast<int64_t>(context.listener_base);
+        result["quest_editor_id"] = utf8_text(run.quest_editor_id);
+        result["reply_form_id"] = static_cast<int64_t>(run.reply->form_id);
+        result["reply_flags"] = run.reply->flags;
+        result["text"] = utf8_text(line && line->has_text ? line->text : run.reply->text);
+        result["line_number"] = line ? line->number : 1;
+        result["emotion_type"] = static_cast<int64_t>(line ? line->emotion_type : 0);
+        result["emotion_value"] = static_cast<int64_t>(line ? line->emotion_value : 0);
+        Array lines;
+        for (const auto& response_line : run.reply->lines) {
+            if (!response_line.has_text) continue;
+            Dictionary line_item;
+            line_item["text"] = utf8_text(response_line.text);
+            line_item["line_number"] = response_line.number;
+            line_item["emotion_type"] = static_cast<int64_t>(response_line.emotion_type);
+            line_item["emotion_value"] = static_cast<int64_t>(response_line.emotion_value);
+            lines.push_back(line_item);
+        }
+        if (lines.is_empty()) {
+            Dictionary line_item;
+            line_item["text"] = utf8_text(run.reply->text);
+            line_item["line_number"] = 1;
+            line_item["emotion_type"] = 0;
+            line_item["emotion_value"] = 0;
+            lines.push_back(line_item);
+        }
+        result["response_lines"] = lines;
+        Array links;
+        for (const auto link : run.reply->topic_links) links.push_back(static_cast<int64_t>(link));
+        result["topic_links"] = links;
+        return result;
     }
 
     static Dictionary tick_to_dictionary(const oblivion::QuestTick& tick) {

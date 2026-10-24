@@ -3,6 +3,9 @@ extends Node3D
 const START_CELL_ID := "ImperialDungeon01"
 const START_MARKER_EDITOR_ID := "CGPlayerStartMarker"
 const START_MARKER_FORM_ID := 0x00032AB5
+const PLAYER_REFERENCE_FORM_ID := 0x00000014
+const AI_PACKAGE_TYPE_AMBUSH := 9
+const AI_PACKAGE_TARGET_REFERENCE := 0
 const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
 const ActorFactory := preload("res://scripts/actor_factory.gd")
 const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
@@ -175,6 +178,33 @@ var physics_grabber := PhysicsObjectGrabber.new()
 var _container_reference_cache: Dictionary = {}
 var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
+var _dialogue_active := false
+var _scripted_subtitle_generation := 0
+var _suppress_scripted_dialogue_presentation := false
+var _dialogue_actor: Dictionary = {}
+var _dialogue_camera: Camera3D
+var _dialogue_previous_camera: Camera3D
+var _dialogue_previous_mouse_mode := Input.MOUSE_MODE_VISIBLE
+var _dialogue_previous_controls_suspended := false
+var _dialogue_exit_transition := false
+var _dialogue_exit_elapsed := 0.0
+var _dialogue_return_transform := Transform3D.IDENTITY
+var _dialogue_return_fov := 72.0
+var _dialogue_layer: CanvasLayer
+var _dialogue_panel: PanelContainer
+var _dialogue_speaker_label: Label
+var _dialogue_subtitle_label: Label
+var _dialogue_topics: VBoxContainer
+var _dialogue_goodbye_button: Button
+var _scripted_dialogue_layer: CanvasLayer
+var _scripted_dialogue_panel: PanelContainer
+var _scripted_dialogue_speaker_label: Label
+var _scripted_dialogue_subtitle_label: Label
+var _dialogue_speaker_form_id := 0
+var _dialogue_listener_form_id := 0
+var _dialogue_listener_race := ""
+var _dialogue_listener_female := false
+var _dialogue_line_generation := 0
 var _player_first_person_mode := false
 var _active_animation := ""
 var _gesture_clips: Array[Dictionary] = []
@@ -197,6 +227,7 @@ var _fallback_support: StaticBody3D
 
 func _ready() -> void:
 	_setup_targeting()
+	_setup_dialogue_presentation()
 	physics_grabber.configure(player, self)
 	player.gameplay_frame.connect(_on_player_gameplay_frame)
 	player.set_physics_process(false)
@@ -245,6 +276,10 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
+	if _dialogue_active:
+		_update_dialogue_camera(_delta)
+	elif _dialogue_exit_transition:
+		_update_dialogue_camera_exit(_delta)
 	if (_world_loading or _inventory_open or player.face_preview_enabled) and physics_grabber.is_holding_object():
 		physics_grabber.release_without_throw()
 	_update_hud()
@@ -253,6 +288,8 @@ func _process(_delta: float) -> void:
 	if (
 		not _world_loading
 		and not _inventory_open
+		and not _dialogue_active
+		and not _dialogue_exit_transition
 		and not player.face_preview_enabled
 		and _interact_ready
 		and Input.is_action_just_pressed("interact")
@@ -286,6 +323,14 @@ func _process(_delta: float) -> void:
 ## Camera input runs after the interface had its turn: a click on the inventory or on the Face and Fly buttons is theirs,
 ## and only an event no control took (a click on the world, the mouse motion that looks around) reaches the camera.
 func _unhandled_input(event: InputEvent) -> void:
+	if _dialogue_exit_transition:
+		return
+	if _dialogue_active:
+		if event is InputEventKey and event.pressed and not event.echo \
+				and (event.keycode == KEY_ESCAPE or event.keycode == KEY_SPACE):
+			_end_dialogue()
+			get_viewport().set_input_as_handled()
+		return
 	if is_instance_valid(player):
 		var grabber_handled_input := false
 		if not _world_loading and not _inventory_open and not player.face_preview_enabled:
@@ -553,7 +598,7 @@ func _log_runtime_spawn_positions() -> void:
 
 func _physics_process(delta: float) -> void:
 	physics_grabber.physics_update(delta)
-	if not _world_loading and not _inventory_open and not player.face_preview_enabled:
+	if not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition and not player.face_preview_enabled:
 		_aimed_target = targeting.acquire()
 	else:
 		_aimed_target = InteractionTargeting.empty_snapshot()
@@ -565,6 +610,7 @@ func _physics_process(delta: float) -> void:
 		print("OpenOB quest: " + line)
 	if _needs_route_refresh(result):
 		_refresh_npc_routes()
+	_try_npc_initiated_dialogues()
 	_fire_trigger_zones()
 	_player_route_timer -= delta
 	if _player_route_timer <= 0.0:
@@ -675,8 +721,8 @@ func _actor_collision_radius(actor: Node3D) -> float:
 const VOICE_FOLDERS := ["argonian", "breton", "dark seducer", "dremora", "golden saint", "high elf", "imperial", "nord", "redguard", "sheogorath"]
 var _speech_length_cache: Dictionary = {}
 
-func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, _text: String) -> Variant:
-	var file_name := "%s_%s_%08x_1.mp3" % [quest.to_lower(), topic.to_lower(), reply]
+func _speech_seconds(_speaker: int, quest: String, topic: String, reply: int, line_number: int, _text: String) -> Variant:
+	var file_name := "%s_%s_%08x_%d.mp3" % [quest.to_lower(), topic.to_lower(), reply, maxi(1, line_number)]
 	if _speech_length_cache.has(file_name):
 		return _speech_length_cache[file_name]
 	var length: Variant = null
@@ -701,10 +747,22 @@ var _player_route_timer := 0.0
 func _follow_player_routes() -> void:
 	for actor: Dictionary in _npc_actors:
 		var package: Dictionary = actor.get("package", {})
-		if int(package.get("location_form_id", 0)) != 0x14:
+		if _package_destination_form_id(package) != PLAYER_REFERENCE_FORM_ID:
 			continue
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")):
+			continue
+		var arrival_distance := _package_destination_arrival_distance(package, root)
+		var player_distance := Vector2(root.global_position.x - player.global_position.x, root.global_position.z - player.global_position.z).length()
+		if player_distance <= arrival_distance:
+			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+			if not active_route.is_empty():
+				var stopped_route: Array[Dictionary] = []
+				root.call("configure_route", stopped_route, false, 0.0, arrival_distance)
+			if not bool(actor.get("package_done", false)):
+				# A player-targeted package can enter its authored radius between route waypoints.
+				# Stopping its route does not emit route_finished, so complete it explicitly here.
+				_on_actor_route_finished(int(actor.get("reference_id", 0)))
 			continue
 		var target: Vector3 = actor.get("route_target", Vector3.INF)
 		if target.distance_to(player.global_position) <= 1.0:
@@ -714,7 +772,7 @@ func _follow_player_routes() -> void:
 		var route_path := director.navigation_path(root.global_position, player.global_position, _actor_collision_radius(root))
 		for point: Vector3 in route_path:
 			waypoints.push_back({"position": point, "speed_mps": 1.3})
-		root.call("configure_route", waypoints, false, 0.0, _package_arrival_radius(package, root))
+		root.call("configure_route", waypoints, false, 0.0, arrival_distance)
 		print("OpenOB AI route update: %s from=%s destination=Player at=%s path=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(root.global_position),
@@ -758,12 +816,14 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		if quest_world == null:
 			return PackedStringArray(["quest world not created (command table of %s)" % executable_path])
 		quest_world.set_speech_length(Callable(self, "_speech_seconds"))
-		# Valen Dreth's GameMode runs in the intro and speaks the taunts to the player; the player is an Argonian man until
-		# character creation's race and sex are read.
-		quest_world.set_listener("Argonian", false)
+		# Dialogue conditions read the currently loaded Player base record until character creation supplies live identity.
+		var player_race_form_id := int(_player_base_record.get("race_form_id", 0))
+		var player_race_editor_id := str(data_reader.find_editor_id(player_race_form_id)) if player_race_form_id > 0 else ""
+		quest_world.set_listener(player_race_editor_id, bool(_player_base_record.get("female", false)))
 		_sync_player_actor_values_to_quest_world()
 		for actor: Dictionary in _npc_actors:
 			_register_quest_actor(actor)
+	_register_cell_npc_references(current_cell)
 	if quest_world.get_stage(quest_editor_id) < 0:
 		return PackedStringArray(["quest %s has no script" % quest_editor_id])
 	if route_quest_editor_id.is_empty():
@@ -787,6 +847,20 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	if not pending.is_empty():
 		_pending_idles.erase(reference_name.to_lower())
 		_start_npc_idle(actor, str(pending.path), str(pending.idle_id))
+
+
+func _register_cell_npc_references(cell: Dictionary) -> void:
+	if quest_world == null or data_reader == null:
+		return
+	for reference_value: Variant in cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("record_type", "")) != "ACHR":
+			continue
+		var reference_name := str(reference.get("reference_name", "")).strip_edges()
+		var base_form_id := int(reference.get("base_form_id", 0))
+		if reference_name.is_empty() or str(data_reader.find_record_type(base_form_id)) != "NPC_":
+			continue
+		quest_world.set_reference_base(reference_name, base_form_id)
 
 ## Keeps GetAV/GetBaseAV in loaded quest scripts tied to the same current/base values drawn on the HUD.
 func _sync_player_actor_values_to_quest_world() -> void:
@@ -896,27 +970,38 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(package.get("editor_id", "")),
 			str((root as Node3D).global_position),
-			_package_location_label(int(package.get("location_form_id", 0))),
+			_package_location_label(_package_destination_form_id(package)),
 			str(remaining_path),
 		])
 		return
 	# A new package starts a new activation: its OnPackageDone may run once when its route ends.
 	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
 		actor["package_done"] = false
+	if int(package.get("form_id", 0)) != int(previous.get("form_id", 0)):
+		actor.erase("npc_greet_attempted_package_id")
+		actor.erase("npc_greet_last_attempt_msec")
+		actor.erase("npc_greet_debug_package_id")
+		actor.erase("npc_greet_range_package_id")
+		actor.erase("npc_greet_range_bucket")
+		actor.erase("npc_greet_unavailable_package_id")
+		actor.erase("npc_greet_bad_distance_package_id")
 	actor["package"] = package
 	if quest_world != null:
 		quest_world.set_actor_package(str(actor.get("reference_name", "")), int(package.get("form_id", 0)))
 	var waypoints: Array[Dictionary] = []
 	var route_path := PackedVector3Array()
 	var final_arrival_distance := 0.08
-	# A package without a location (for example waiting at the actor's editor location) keeps the actor in place.
-	if not package.is_empty() and int(package.get("location_form_id", 0)) != 0:
-		var position = _location_position(int(package.get("location_form_id", 0)))
+	# Packages without a PLDT location can still name a PTDT target reference to approach.
+	var destination_form_id := _package_destination_form_id(package)
+	if not package.is_empty() and destination_form_id != 0:
+		var position = _location_position(destination_form_id)
 		if position == null:
-			print("OpenOB package %s for %s: its location is not in this cell" % [str(package.get("editor_id", "")), str(actor.get("name", ""))])
+			print("OpenOB package %s for %s: target %s is not available in this cell" % [
+				str(package.get("editor_id", "")), str(actor.get("name", "")), _package_location_label(destination_form_id)
+			])
 		else:
-			final_arrival_distance = _package_arrival_radius(package, root as Node3D)
-			if int(package.get("location_form_id", 0)) == 0x14:
+			final_arrival_distance = _package_destination_arrival_distance(package, root as Node3D)
+			if destination_form_id == PLAYER_REFERENCE_FORM_ID:
 				actor["route_target"] = position
 			else:
 				actor.erase("route_target")
@@ -932,8 +1017,8 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
 		str(actor.get("reference_name", actor.get("name", "NPC"))),
 		str(package.get("editor_id", "<none>")),
-		_package_location_label(int(package.get("location_form_id", 0))),
-		str(_location_position(int(package.get("location_form_id", 0)))),
+		_package_location_label(destination_form_id),
+		str(_location_position(destination_form_id)),
 		str((root as Node3D).global_position),
 		str(route_path),
 	])
@@ -952,12 +1037,13 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root):
 			return
-		var location = _location_position(int(package.get("location_form_id", 0)))
+		var destination_form_id := _package_destination_form_id(package)
+		var location = _location_position(destination_form_id)
 		if location != null:
 			var destination: Vector3 = location
 			var horizontal_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
 			var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
-			var arrival_radius := _package_arrival_radius(package, root)
+			var arrival_radius := _package_destination_arrival_distance(package, root)
 			if horizontal_distance > arrival_radius:
 				# A partial NavigationServer path is not package completion. Replan from the
 				# actor's current position, and leave OnPackageDone for actual arrival.
@@ -978,6 +1064,11 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 						])
 				return
 		actor["package_done"] = true
+		print("OpenOB AI route complete: %s package=%s destination=%s" % [
+			str(actor.get("reference_name", actor.get("name", "NPC"))),
+			str(package.get("editor_id", "")),
+			_package_location_label(destination_form_id),
+		])
 		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
 		for line: String in _apply_driver_result(result):
@@ -985,6 +1076,74 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		if _needs_route_refresh(result):
 			_refresh_npc_routes()
 		return
+
+
+## An active Ambush package aimed at the player starts the eligible NPC greeting at its authored target distance.
+## Scripted Say/SayTo actions only speak and direct the speaker's gaze; they do not open the dialogue session.
+func _try_npc_initiated_dialogues() -> void:
+	if _world_loading or _inventory_open or _dialogue_active or _dialogue_exit_transition \
+			or player.face_preview_enabled or quest_world == null:
+		return
+	for actor: Dictionary in _npc_actors:
+		var package: Dictionary = actor.get("package", {})
+		if package.is_empty() or int(package.get("package_type", -1)) != AI_PACKAGE_TYPE_AMBUSH:
+			continue
+		var package_id := int(package.get("form_id", 0))
+		if package_id <= 0 \
+				or int(package.get("target_type", -1)) != AI_PACKAGE_TARGET_REFERENCE \
+				or int(package.get("target_form_id", 0)) != PLAYER_REFERENCE_FORM_ID:
+			continue
+		if int(actor.get("npc_greet_attempted_package_id", 0)) == package_id:
+			continue
+		var actor_root := actor.get("root") as Node3D
+		if not is_instance_valid(actor_root):
+			continue
+		var target_distance := int(package.get("target_distance", 0))
+		if target_distance <= 0:
+			target_distance = int(package.get("radius", 0))
+		var distance_game_units := Vector2(
+			actor_root.global_position.x - player.global_position.x,
+			actor_root.global_position.z - player.global_position.z
+		).length() / game_units_to_meters
+		if int(actor.get("npc_greet_debug_package_id", 0)) != package_id:
+			actor["npc_greet_debug_package_id"] = package_id
+			print("OpenOB dialogue: force-greet package %s target_type=%d target=0x%08X distance=%.1f target_distance=%d location_radius=%d" % [
+				str(package.get("editor_id", "Ambush")),
+				int(package.get("target_type", -1)),
+				int(package.get("target_form_id", 0)),
+				distance_game_units,
+				target_distance,
+				int(package.get("radius", 0)),
+			])
+		if target_distance <= 0:
+			if int(actor.get("npc_greet_bad_distance_package_id", 0)) != package_id:
+				actor["npc_greet_bad_distance_package_id"] = package_id
+				push_warning("OpenOB dialogue: %s has a player-targeted Ambush package without a usable target distance" % str(actor.get("reference_name", "NPC")))
+			continue
+		if distance_game_units > float(target_distance):
+			var distance_bucket := int(floor(distance_game_units / 50.0))
+			if int(actor.get("npc_greet_range_package_id", 0)) != package_id \
+					or int(actor.get("npc_greet_range_bucket", -1)) != distance_bucket:
+				actor["npc_greet_range_package_id"] = package_id
+				actor["npc_greet_range_bucket"] = distance_bucket
+				print("OpenOB dialogue: %s waits for force-greet range at %.1f/%d units" % [
+					str(actor.get("reference_name", "NPC")), distance_game_units, target_distance
+				])
+			continue
+		var now_msec := Time.get_ticks_msec()
+		if now_msec - int(actor.get("npc_greet_last_attempt_msec", 0)) < 750:
+			continue
+		actor["npc_greet_last_attempt_msec"] = now_msec
+		if _begin_dialogue(actor, false):
+			actor["npc_greet_attempted_package_id"] = package_id
+			print("OpenOB dialogue: %s force-greets the player via %s at %.1f/%d units" % [
+				str(actor.get("reference_name", actor.get("name", "NPC"))),
+				str(package.get("editor_id", "Ambush")), distance_game_units, target_distance
+			])
+			return
+		if int(actor.get("npc_greet_unavailable_package_id", 0)) != package_id:
+			actor["npc_greet_unavailable_package_id"] = package_id
+			print("OpenOB dialogue: %s is in force-greet range, but no Greeting response is eligible yet; retrying" % str(actor.get("reference_name", "NPC")))
 
 ## Position of a placed reference of the loaded cell, by form ID, or null when the cell does not have it.
 func _location_position(form_id: int) -> Variant:
@@ -1008,6 +1167,25 @@ func _package_arrival_radius(package: Dictionary, root: Node3D) -> float:
 	var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
 	var package_radius := float(package.get("radius", 0)) * game_units_to_meters
 	return package_radius + _actor_collision_radius(root) + actor_arrival_distance
+
+
+func _package_destination_form_id(package: Dictionary) -> int:
+	var location_form_id := int(package.get("location_form_id", 0))
+	if location_form_id != 0:
+		return location_form_id
+	if int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE:
+		return int(package.get("target_form_id", 0))
+	return 0
+
+
+func _package_destination_arrival_distance(package: Dictionary, root: Node3D) -> float:
+	if int(package.get("location_form_id", 0)) != 0:
+		return _package_arrival_radius(package, root)
+	var target_distance := int(package.get("target_distance", 0))
+	if target_distance > 0:
+		var actor_arrival_distance := float(root.get("arrival_distance")) if root.get("arrival_distance") != null else 0.08
+		return maxf(actor_arrival_distance, float(target_distance) * game_units_to_meters)
+	return _package_arrival_radius(package, root)
 
 ## Runs one stage of a quest against the loaded cell and returns the report lines.
 ## The executable comes from OBLIVION_EXE, or from the usual install layout next to Data.
@@ -2654,8 +2832,449 @@ func _door_reference_by_id(reference_id: int) -> Dictionary:
 	director.door_reference_lookup_cache[reference_id] = {}
 	return {}
 
+func _setup_dialogue_presentation() -> void:
+	_dialogue_camera = Camera3D.new()
+	_dialogue_camera.name = "DialogueCamera"
+	_dialogue_camera.current = false
+	_dialogue_camera.fov = 42.0
+	_dialogue_camera.near = 0.04
+	add_child(_dialogue_camera)
+
+	_dialogue_layer = CanvasLayer.new()
+	_dialogue_layer.name = "DialogueLayer"
+	_dialogue_layer.layer = 8
+	_dialogue_layer.visible = false
+	add_child(_dialogue_layer)
+	_dialogue_panel = PanelContainer.new()
+	_dialogue_panel.name = "DialoguePanel"
+	_dialogue_panel.anchor_left = 0.025
+	_dialogue_panel.anchor_top = 0.53
+	_dialogue_panel.anchor_right = 0.38
+	_dialogue_panel.anchor_bottom = 0.97
+	_dialogue_panel.offset_left = 0.0
+	_dialogue_panel.offset_top = 0.0
+	_dialogue_panel.offset_right = 0.0
+	_dialogue_panel.offset_bottom = 0.0
+	_dialogue_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_dialogue_layer.add_child(_dialogue_panel)
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 14)
+	margin.add_theme_constant_override("margin_top", 10)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_bottom", 10)
+	_dialogue_panel.add_child(margin)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 7)
+	margin.add_child(content)
+	_dialogue_speaker_label = Label.new()
+	_dialogue_speaker_label.add_theme_font_size_override("font_size", 21)
+	content.add_child(_dialogue_speaker_label)
+	_dialogue_subtitle_label = Label.new()
+	_dialogue_subtitle_label.custom_minimum_size = Vector2(0.0, 64.0)
+	_dialogue_subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_dialogue_subtitle_label.add_theme_font_size_override("font_size", 17)
+	content.add_child(_dialogue_subtitle_label)
+	var separator := HSeparator.new()
+	content.add_child(separator)
+	var topic_scroll := ScrollContainer.new()
+	topic_scroll.custom_minimum_size = Vector2(0.0, 156.0)
+	topic_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	content.add_child(topic_scroll)
+	_dialogue_topics = VBoxContainer.new()
+	_dialogue_topics.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	topic_scroll.add_child(_dialogue_topics)
+	_dialogue_goodbye_button = Button.new()
+	_dialogue_goodbye_button.text = "Goodbye  ·  Esc"
+	_dialogue_goodbye_button.pressed.connect(_end_dialogue)
+	content.add_child(_dialogue_goodbye_button)
+
+	_scripted_dialogue_layer = CanvasLayer.new()
+	_scripted_dialogue_layer.name = "ScriptedDialogueLayer"
+	_scripted_dialogue_layer.layer = 8
+	_scripted_dialogue_layer.visible = false
+	add_child(_scripted_dialogue_layer)
+	_scripted_dialogue_panel = PanelContainer.new()
+	_scripted_dialogue_panel.anchor_left = 0.18
+	_scripted_dialogue_panel.anchor_top = 0.77
+	_scripted_dialogue_panel.anchor_right = 0.82
+	_scripted_dialogue_panel.anchor_bottom = 0.96
+	_scripted_dialogue_panel.offset_left = 0.0
+	_scripted_dialogue_panel.offset_top = 0.0
+	_scripted_dialogue_panel.offset_right = 0.0
+	_scripted_dialogue_panel.offset_bottom = 0.0
+	_scripted_dialogue_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_scripted_dialogue_layer.add_child(_scripted_dialogue_panel)
+	var scripted_margin := MarginContainer.new()
+	scripted_margin.add_theme_constant_override("margin_left", 18)
+	scripted_margin.add_theme_constant_override("margin_top", 8)
+	scripted_margin.add_theme_constant_override("margin_right", 18)
+	scripted_margin.add_theme_constant_override("margin_bottom", 8)
+	_scripted_dialogue_panel.add_child(scripted_margin)
+	var scripted_content := VBoxContainer.new()
+	scripted_content.add_theme_constant_override("separation", 3)
+	scripted_margin.add_child(scripted_content)
+	_scripted_dialogue_speaker_label = Label.new()
+	_scripted_dialogue_speaker_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_scripted_dialogue_speaker_label.add_theme_font_size_override("font_size", 17)
+	_scripted_dialogue_speaker_label.add_theme_color_override("font_color", Color(1.0, 0.91, 0.69))
+	_scripted_dialogue_speaker_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	_scripted_dialogue_speaker_label.add_theme_constant_override("outline_size", 4)
+	scripted_content.add_child(_scripted_dialogue_speaker_label)
+	_scripted_dialogue_subtitle_label = Label.new()
+	_scripted_dialogue_subtitle_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_scripted_dialogue_subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_scripted_dialogue_subtitle_label.add_theme_font_size_override("font_size", 19)
+	_scripted_dialogue_subtitle_label.add_theme_color_override("font_color", Color(1.0, 1.0, 0.9))
+	_scripted_dialogue_subtitle_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	_scripted_dialogue_subtitle_label.add_theme_constant_override("outline_size", 4)
+	scripted_content.add_child(_scripted_dialogue_subtitle_label)
+
+
+func _dialogue_player_identity() -> Dictionary:
+	var player_form_id := int(_player_base_record.get("form_id", 0))
+	if player_form_id <= 0 and data_reader != null:
+		player_form_id = int(data_reader.find_form_id_by_editor_id("Player"))
+	var race_form_id := int(_player_base_record.get("race_form_id", 0))
+	var race_editor_id := str(data_reader.find_editor_id(race_form_id)) if data_reader != null and race_form_id > 0 else ""
+	return {
+		"base_form_id": player_form_id,
+		"race_editor_id": race_editor_id,
+		"female": bool(_player_base_record.get("female", false)),
+	}
+
+
+func _begin_dialogue(actor: Dictionary, show_failure_toast: bool = true) -> bool:
+	if _dialogue_active or actor.is_empty() or quest_world == null:
+		if show_failure_toast:
+			_show_interaction_toast("Dialogue system is not ready")
+		return false
+	if _dialogue_exit_transition:
+		_finish_dialogue_camera_exit()
+	var actor_root := actor.get("root") as Node3D
+	if not is_instance_valid(actor_root):
+		return false
+	var identity := _dialogue_player_identity()
+	_dialogue_speaker_form_id = int(actor.get("base_form_id", 0))
+	_dialogue_listener_form_id = int(identity.get("base_form_id", 0))
+	_dialogue_listener_race = str(identity.get("race_editor_id", ""))
+	_dialogue_listener_female = bool(identity.get("female", false))
+	if _dialogue_speaker_form_id <= 0 or _dialogue_listener_form_id <= 0:
+		if show_failure_toast:
+			_show_interaction_toast("Dialogue actor data is unavailable")
+		return false
+	_dialogue_actor = actor
+	_sync_player_actor_values_to_quest_world()
+	quest_world.set_listener(_dialogue_listener_race, _dialogue_listener_female)
+	var greeting: Dictionary = quest_world.begin_dialogue(
+		_dialogue_speaker_form_id,
+		_dialogue_listener_form_id,
+		_dialogue_listener_race,
+		_dialogue_listener_female,
+		Callable(self, "_quest_distance")
+	)
+	if not bool(greeting.get("success", false)):
+		_dialogue_actor = {}
+		if show_failure_toast:
+			_show_interaction_toast("They have nothing to say")
+		return false
+	set_npc_look_target(str(actor.get("reference_name", "")), "player")
+	_suppress_scripted_dialogue_presentation = true
+	var greeting_report := _apply_driver_result(greeting)
+	_suppress_scripted_dialogue_presentation = false
+	for line: String in greeting_report:
+		print("OpenOB dialogue: " + line)
+	if _needs_route_refresh(greeting):
+		_refresh_npc_routes()
+
+	_clear_scripted_speech_subtitle()
+	_dialogue_previous_camera = get_viewport().get_camera_3d()
+	_dialogue_previous_mouse_mode = Input.mouse_mode
+	_dialogue_previous_controls_suspended = player.controls_suspended
+	if is_instance_valid(_dialogue_previous_camera):
+		_dialogue_camera.global_transform = _dialogue_previous_camera.global_transform
+		_dialogue_camera.fov = _dialogue_previous_camera.fov
+	else:
+		_dialogue_camera.global_position = player.global_position + Vector3.UP * 1.5
+	_dialogue_active = true
+	player.set_controls_suspended(true)
+	_dialogue_camera.make_current()
+	_dialogue_layer.visible = true
+	_dialogue_panel.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_dialogue_speaker_label.text = str(actor.get("display_name", actor.get("name", "NPC")))
+	_present_dialogue_response(greeting)
+	_refresh_dialogue_topics()
+	_dialogue_goodbye_button.grab_focus()
+	return true
+
+
+## Scripted Say/SayTo lines show subtitles without opening an interactive dialogue session.
+func present_scripted_speech_line(
+	speaker_form_id: int, speaker_editor_id: String, line: String, voice_duration: float,
+	speaker_reference: String = ""
+) -> void:
+	if _suppress_scripted_dialogue_presentation or _dialogue_active or line.strip_edges().is_empty():
+		return
+	if not speaker_reference.is_empty():
+		set_npc_look_target(speaker_reference, "player")
+	_scripted_subtitle_generation += 1
+	var subtitle_generation := _scripted_subtitle_generation
+	var speaker_name := speaker_editor_id
+	if data_reader != null and speaker_form_id > 0:
+		var npc: Dictionary = data_reader.find_npc_base(speaker_form_id)
+		speaker_name = str(npc.get("name", speaker_editor_id))
+	_scripted_dialogue_speaker_label.text = speaker_name
+	_scripted_dialogue_subtitle_label.text = line.strip_edges()
+	_scripted_dialogue_layer.visible = true
+	var text_duration := maxf(1.2, float(line.length()) / 14.0)
+	var hold_duration := maxf(voice_duration, text_duration) + 0.15
+	_finish_scripted_subtitle_after(subtitle_generation, hold_duration)
+
+
+func _finish_scripted_subtitle_after(generation: int, duration: float) -> void:
+	await get_tree().create_timer(duration).timeout
+	if generation != _scripted_subtitle_generation:
+		return
+	if is_instance_valid(_scripted_dialogue_layer):
+		_scripted_dialogue_layer.visible = false
+
+
+func _clear_scripted_speech_subtitle() -> void:
+	_scripted_subtitle_generation += 1
+	if is_instance_valid(_scripted_dialogue_layer):
+		_scripted_dialogue_layer.visible = false
+
+
+func _npc_actor_by_base_form_id(base_form_id: int) -> Dictionary:
+	if base_form_id <= 0:
+		return {}
+	var nearest: Dictionary = {}
+	var nearest_distance := INF
+	for actor: Dictionary in _npc_actors:
+		if int(actor.get("base_form_id", 0)) != base_form_id:
+			continue
+		var actor_root := actor.get("root") as Node3D
+		if not is_instance_valid(actor_root):
+			continue
+		var distance := actor_root.global_position.distance_squared_to(player.global_position)
+		if distance < nearest_distance:
+			nearest = actor
+			nearest_distance = distance
+	return nearest
+
+
+func _refresh_dialogue_topics() -> void:
+	if not _dialogue_active or quest_world == null:
+		return
+	for child: Node in _dialogue_topics.get_children():
+		_dialogue_topics.remove_child(child)
+		child.queue_free()
+	var topic_values: Array = quest_world.available_dialog_topics(
+		_dialogue_speaker_form_id,
+		_dialogue_listener_form_id,
+		_dialogue_listener_race,
+		_dialogue_listener_female
+	)
+	if topic_values.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "No available topics"
+		_dialogue_topics.add_child(empty_label)
+		return
+	for topic_value: Variant in topic_values:
+		var topic: Dictionary = topic_value
+		var topic_id := int(topic.get("form_id", 0))
+		var topic_button := Button.new()
+		topic_button.text = str(topic.get("name", topic.get("editor_id", "Topic")))
+		topic_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		topic_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		topic_button.pressed.connect(_select_dialogue_topic.bind(topic_id))
+		_dialogue_topics.add_child(topic_button)
+
+
+func _select_dialogue_topic(topic_form_id: int) -> void:
+	if not _dialogue_active or quest_world == null:
+		return
+	var response: Dictionary = quest_world.select_dialog_topic(
+		topic_form_id,
+		_dialogue_speaker_form_id,
+		_dialogue_listener_form_id,
+		_dialogue_listener_race,
+		_dialogue_listener_female,
+		Callable(self, "_quest_distance")
+	)
+	if not bool(response.get("success", false)):
+		_dialogue_subtitle_label.text = "That topic is no longer available."
+		_refresh_dialogue_topics()
+		return
+	for line: String in _apply_driver_result(response):
+		print("OpenOB dialogue: " + line)
+	if _needs_route_refresh(response):
+		_refresh_npc_routes()
+	_present_dialogue_response(response)
+	_refresh_dialogue_topics()
+
+
+func _present_dialogue_response(response: Dictionary) -> void:
+	_dialogue_line_generation += 1
+	_play_dialogue_response_lines(response, _dialogue_line_generation)
+
+
+func _play_dialogue_response_lines(response: Dictionary, generation: int) -> void:
+	var lines: Array = response.get("response_lines", [])
+	if lines.is_empty():
+		lines = [{
+			"text": str(response.get("text", response.get("topic_name", ""))),
+			"line_number": int(response.get("line_number", 1)),
+			"emotion_type": int(response.get("emotion_type", 0)),
+			"emotion_value": int(response.get("emotion_value", 0)),
+		}]
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	for line_value: Variant in lines:
+		if not _dialogue_active or generation != _dialogue_line_generation:
+			return
+		var line: Dictionary = line_value
+		var text := str(line.get("text", "")).strip_edges()
+		_dialogue_subtitle_label.text = text
+		var duration := 0.0
+		if audio_manager != null and audio_manager.has_method("play_dialogue"):
+			duration = float(audio_manager.call(
+				"play_dialogue",
+				data_reader,
+				self,
+				int(response.get("speaker_base", _dialogue_speaker_form_id)),
+				str(response.get("quest_editor_id", "")),
+				str(response.get("topic_editor_id", "")),
+				int(response.get("reply_form_id", 0)),
+				quest_bridge._dialogue_face_expression(int(line.get("emotion_type", 0))),
+				clampf(float(line.get("emotion_value", 0)) / 100.0, 0.0, 1.0),
+				int(line.get("line_number", 1))
+			))
+		var minimum_duration := maxf(1.2, float(text.length()) / 14.0)
+		if duration > 0.0 and audio_manager != null and audio_manager.has_method("is_dialogue_playing"):
+			var elapsed := 0.0
+			var reference_id := int(_dialogue_actor.get("reference_id", 0))
+			while elapsed < duration and _dialogue_active and generation == _dialogue_line_generation \
+					and bool(audio_manager.call("is_dialogue_playing", reference_id)):
+				await get_tree().process_frame
+				elapsed += get_process_delta_time()
+		else:
+			await get_tree().create_timer(minimum_duration).timeout
+
+
+func _dialogue_head_position(actor: Dictionary) -> Vector3:
+	var actor_root := actor.get("root") as Node3D
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	if is_instance_valid(skeleton):
+		var head_index := skeleton.find_bone("Bip01 Head")
+		if head_index >= 0:
+			return skeleton.to_global(skeleton.get_bone_global_pose(head_index).origin)
+	if is_instance_valid(actor_root):
+		return actor_root.global_position + Vector3.UP * 1.52
+	return player.global_position + Vector3.UP * 1.5
+
+
+func _update_dialogue_camera(delta: float) -> void:
+	if not _dialogue_active or not is_instance_valid(_dialogue_camera):
+		return
+	var actor_root := _dialogue_actor.get("root") as Node3D
+	if not is_instance_valid(actor_root) or bool(actor_root.get("inactive")):
+		_end_dialogue()
+		return
+	var head_position := _dialogue_head_position(_dialogue_actor)
+	var face_forward := -actor_root.global_basis.z
+	face_forward.y = 0.0
+	if face_forward.length_squared() < 0.001:
+		face_forward = player.global_position - actor_root.global_position
+		face_forward.y = 0.0
+	face_forward = face_forward.normalized() if face_forward.length_squared() > 0.001 else Vector3.FORWARD
+	var camera_position := head_position + face_forward * 0.82 + Vector3.UP * 0.04
+	var ray_start := head_position + face_forward * 0.06
+	var query := PhysicsRayQueryParameters3D.create(ray_start, camera_position, 2 | 4, [player.get_rid(), actor_root.get_rid()])
+	query.collide_with_areas = false
+	var obstruction := get_world_3d().direct_space_state.intersect_ray(query)
+	if not obstruction.is_empty():
+		camera_position = Vector3(obstruction.get("position", camera_position)) + Vector3(obstruction.get("normal", Vector3.UP)) * 0.05
+	var look_target := head_position + Vector3.UP * 0.035
+	var direction := look_target - camera_position
+	if direction.length_squared() < 0.001:
+		return
+	var target_basis := Basis.looking_at(direction.normalized(), Vector3.UP)
+	var blend := 1.0 - exp(-5.5 * delta)
+	var current_transform := _dialogue_camera.global_transform
+	var current_rotation := current_transform.basis.get_rotation_quaternion()
+	var target_rotation := target_basis.get_rotation_quaternion()
+	_dialogue_camera.global_transform = Transform3D(
+		Basis(current_rotation.slerp(target_rotation, blend)),
+		current_transform.origin.lerp(camera_position, blend)
+	)
+	_dialogue_camera.fov = lerpf(_dialogue_camera.fov, 42.0, blend)
+
+
+func _update_dialogue_camera_exit(delta: float) -> void:
+	if not is_instance_valid(_dialogue_camera):
+		_finish_dialogue_camera_exit()
+		return
+	_dialogue_exit_elapsed += delta
+	var blend := 1.0 - exp(-8.0 * delta)
+	var current_transform := _dialogue_camera.global_transform
+	var target_rotation := _dialogue_return_transform.basis.get_rotation_quaternion()
+	var current_rotation := current_transform.basis.get_rotation_quaternion()
+	_dialogue_camera.global_transform = Transform3D(
+		Basis(current_rotation.slerp(target_rotation, blend)),
+		current_transform.origin.lerp(_dialogue_return_transform.origin, blend)
+	)
+	_dialogue_camera.fov = lerpf(_dialogue_camera.fov, _dialogue_return_fov, blend)
+	if _dialogue_exit_elapsed >= 0.35:
+		_finish_dialogue_camera_exit()
+
+
+func _finish_dialogue_camera_exit() -> void:
+	_dialogue_exit_transition = false
+	if is_instance_valid(_dialogue_camera):
+		_dialogue_camera.current = false
+	if is_instance_valid(_dialogue_previous_camera):
+		_dialogue_previous_camera.make_current()
+	else:
+		var player_camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+		if is_instance_valid(player_camera):
+			player_camera.make_current()
+	player.set_controls_suspended(_dialogue_previous_controls_suspended)
+	Input.mouse_mode = _dialogue_previous_mouse_mode
+	_dialogue_previous_camera = null
+
+
+func _end_dialogue(immediate: bool = false) -> void:
+	if not _dialogue_active:
+		if immediate and _dialogue_exit_transition:
+			_finish_dialogue_camera_exit()
+		return
+	_dialogue_active = false
+	_dialogue_line_generation += 1
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	var reference_id := int(_dialogue_actor.get("reference_id", 0))
+	if audio_manager != null and audio_manager.has_method("stop_dialogue") and reference_id > 0:
+		audio_manager.call("stop_dialogue", reference_id)
+	if is_instance_valid(_dialogue_previous_camera):
+		_dialogue_return_transform = _dialogue_previous_camera.global_transform
+		_dialogue_return_fov = _dialogue_previous_camera.fov
+	else:
+		var player_camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+		if is_instance_valid(player_camera):
+			_dialogue_previous_camera = player_camera
+			_dialogue_return_transform = player_camera.global_transform
+			_dialogue_return_fov = player_camera.fov
+	if is_instance_valid(_dialogue_layer):
+		_dialogue_layer.visible = false
+	_dialogue_actor = {}
+	_dialogue_exit_elapsed = 0.0
+	_dialogue_exit_transition = true
+	if immediate:
+		_finish_dialogue_camera_exit()
+
+
 func _update_hud() -> void:
-	var visible_hud: bool = not _world_loading and not _inventory_open and not player.face_preview_enabled
+	var visible_hud: bool = not _world_loading and not _inventory_open and not _dialogue_active \
+		and not _dialogue_exit_transition and not player.face_preview_enabled
 	var vital_snapshot: Dictionary = _player_actor_values.snapshot() if _player_actor_values_ready else {}
 	hud.set_snapshot(_aimed_target, vital_snapshot, _player_loadout_snapshot(), _player_compass_heading_degrees(), visible_hud)
 	if not visible_hud:
@@ -2705,7 +3324,7 @@ func _activate_target(target: Dictionary) -> void:
 		"locked":
 			_show_interaction_toast("Locked")
 		"talk":
-			_show_interaction_toast("Dialogue unavailable")
+			_begin_dialogue(target.get("actor", {}))
 		"open":
 			var door_reference: Dictionary = target.get("reference", {})
 			var state_key := "door_open_%08x" % int(target.get("reference_id", 0))
@@ -3052,6 +3671,7 @@ func _player_head_model_to_head_transform() -> Transform3D:
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
 	if clear_existing:
 		_clear_cell_actors()
+	_register_cell_npc_references(cell)
 	var stream_generation := _npc_stream_generation
 	var actor_count := 0
 	var grounded_actor_count := 0
@@ -3297,6 +3917,8 @@ func _load_next_streamed_npc(cell: Dictionary, reference_id: int, stream_generat
 		_npc_stream_busy = false
 
 func _clear_cell_actors() -> void:
+	_end_dialogue(true)
+	_clear_scripted_speech_subtitle()
 	director.clear_navigation_tiles()
 	if quest_world != null:
 		quest_world.clear_actors()
@@ -3599,15 +4221,18 @@ func _update_npc_actors(delta: float) -> void:
 		var skeleton := actor.get("skeleton") as Skeleton3D
 		if not is_instance_valid(actor_root) or not is_instance_valid(skeleton) or not actor_root.visible:
 			continue
+		_restore_npc_head_pose(actor, skeleton)
 		# Animating a skeleton and morphing a face costs the main thread every frame: an NPC that is far away, or out of
 		# view and not close, keeps its last pose until it is seen again.
 		var distance_to_player := actor_root.global_position.distance_to(player.global_position)
-		if distance_to_player > NPC_ANIMATION_DISTANCE_M:
+		var has_look_target := is_instance_valid(actor.get("look_target") as Node3D)
+		if distance_to_player > NPC_ANIMATION_DISTANCE_M and not has_look_target:
 			continue
 		# A scripted idle keeps running out of view, so a gesture is not lost when the actor is looked at again.
 		if (
 			distance_to_player > NPC_ANIMATION_ALWAYS_NEAR_M
 			and not bool(actor.get("idle_active", false))
+			and not has_look_target
 			and camera != null
 			and not camera.is_position_in_frustum(actor_root.global_position + Vector3.UP)
 		):
@@ -3644,6 +4269,7 @@ func _update_npc_actors(delta: float) -> void:
 			requested_animation = "Forward"
 			animation = animations.get(requested_animation, {})
 		if animation.is_empty():
+			_update_npc_head_look(actor, skeleton, delta)
 			continue
 		if requested_animation != str(actor.get("active_animation", "")):
 			actor["animation_from_pose"] = _capture_skeleton_pose(skeleton)
@@ -3671,6 +4297,117 @@ func _update_npc_actors(delta: float) -> void:
 		)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
+		_update_npc_head_look(actor, skeleton, delta)
+
+
+func set_npc_look_target(reference_name: String, target_reference: String) -> String:
+	var actor := _npc_actor_by_reference(reference_name.to_lower())
+	if actor.is_empty():
+		return ""
+	var target_name := target_reference.strip_edges().to_lower()
+	var target: Node3D
+	if target_name == "player":
+		target = player
+	else:
+		var target_actor := _npc_actor_by_reference(target_name)
+		target = target_actor.get("root") as Node3D
+	if not is_instance_valid(target):
+		return ""
+	actor["look_target"] = target
+	actor["look_blend"] = 0.0
+	var actor_root := actor.get("root") as Node3D
+	if is_instance_valid(actor_root) and actor_root.has_method("set_look_target"):
+		actor_root.call("set_look_target", target)
+	return str(actor.get("reference_name", reference_name))
+
+
+func _restore_npc_head_pose(actor: Dictionary, skeleton: Skeleton3D) -> void:
+	if not bool(actor.get("look_pose_applied", false)):
+		return
+	var bone_index := int(actor.get("look_bone_index", -1))
+	if bone_index >= 0 and bone_index < skeleton.get_bone_count():
+		var base_rotation: Quaternion = actor.get("look_base_pose_rotation", Quaternion.IDENTITY)
+		skeleton.set_bone_pose_rotation(bone_index, base_rotation)
+	actor["look_pose_applied"] = false
+
+
+func _look_target_world_position(target: Node3D) -> Vector3:
+	if target == player:
+		return _player_gaze_target_world_position()
+	for actor: Dictionary in _npc_actors:
+		if actor.get("root") == target:
+			return _dialogue_head_position(actor)
+	return target.global_position + Vector3.UP * 1.45
+
+
+func _player_gaze_target_world_position() -> Vector3:
+	# Face-preview's anchor is tuned for camera framing. NPC gaze should use the actual face location instead.
+	var eye_position_sum := Vector3.ZERO
+	var eye_count := 0
+	for eye_mesh: MeshInstance3D in _player_eye_meshes:
+		if not is_instance_valid(eye_mesh) or not eye_mesh.is_inside_tree() or eye_mesh.mesh == null:
+			continue
+		eye_position_sum += eye_mesh.global_transform * eye_mesh.mesh.get_aabb().get_center()
+		eye_count += 1
+	if eye_count > 0:
+		return eye_position_sum / float(eye_count)
+	if is_instance_valid(_player_skeleton):
+		var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
+		if head_bone_index >= 0:
+			return _player_skeleton.to_global(_player_skeleton.get_bone_global_pose(head_bone_index).origin)
+	return player.global_position + Vector3.UP * 1.45
+
+
+func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float) -> void:
+	var target := actor.get("look_target") as Node3D
+	if not is_instance_valid(target):
+		return
+	var bone_index := int(actor.get("look_bone_index", -1))
+	if bone_index < 0:
+		bone_index = skeleton.find_bone("Bip01 Head")
+		if bone_index < 0:
+			bone_index = skeleton.find_bone("Bip01 Neck")
+		actor["look_bone_index"] = bone_index
+	if bone_index < 0:
+		return
+	var base_rotation := skeleton.get_bone_pose_rotation(bone_index)
+	var head_transform := skeleton.global_transform * skeleton.get_bone_global_pose(bone_index)
+	var target_position := _look_target_world_position(target)
+	var actor_root := actor.get("root") as Node3D
+	if is_instance_valid(actor_root) and not bool(actor_root.get("is_walking")):
+		var body_direction := target_position - actor_root.global_position
+		body_direction.y = 0.0
+		if body_direction.length_squared() > 0.0001:
+			var body_target_yaw := atan2(-body_direction.x, -body_direction.z)
+			var body_yaw_error := wrapf(body_target_yaw - actor_root.rotation.y, -PI, PI)
+			if absf(body_yaw_error) > deg_to_rad(48.0):
+				actor_root.rotation.y = lerp_angle(actor_root.rotation.y, body_target_yaw, 1.0 - exp(-5.0 * delta))
+	var target_direction := target_position - head_transform.origin
+	if target_direction.length_squared() <= 0.0001:
+		return
+	target_direction = target_direction.normalized()
+	var current_forward := -head_transform.basis.z.normalized()
+	var world_delta := Quaternion(current_forward, target_direction)
+	var max_angle := deg_to_rad(48.0)
+	var angle := world_delta.get_angle()
+	if angle > max_angle:
+		world_delta = Quaternion.IDENTITY.slerp(world_delta, max_angle / angle)
+	var desired_world_basis := Basis(world_delta) * head_transform.basis.orthonormalized()
+	var parent_index := skeleton.get_bone_parent(bone_index)
+	var parent_global_basis := skeleton.global_transform.basis
+	if parent_index >= 0:
+		parent_global_basis = skeleton.global_transform.basis * skeleton.get_bone_global_pose(parent_index).basis
+	var rest_basis := skeleton.get_bone_rest(bone_index).basis
+	var desired_pose_basis := rest_basis.inverse() * parent_global_basis.inverse() * desired_world_basis
+	var desired_pose_rotation := desired_pose_basis.orthonormalized().get_rotation_quaternion()
+	var blend := 1.0 - exp(-5.0 * delta)
+	actor["look_base_pose_rotation"] = base_rotation
+	actor["look_pose_applied"] = true
+	actor["look_blend"] = minf(1.0, float(actor.get("look_blend", 0.0)) + blend)
+	skeleton.set_bone_pose_rotation(
+		bone_index,
+	base_rotation.slerp(desired_pose_rotation, float(actor["look_blend"]))
+	)
 
 ## The idle manager's PickIdle for one NPC (see QuestWorld.pick_idle): plays the chosen original clip on the actor
 ## with the reference name. An empty path means no idle matched: the actor returns to its default idle. An actor that

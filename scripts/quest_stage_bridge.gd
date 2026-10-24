@@ -49,9 +49,11 @@ func apply_actions(actions: Array, cell: Dictionary, world: Node3D, transform_of
 	for action_value: Variant in actions:
 		var action: Dictionary = action_value
 		var command := str(action.get("command", "")).to_lower()
-		if command == "setstage" or command == "startquest":
-			# Stage changes and quest starts are applied by the quest world itself; this line only records them.
-			report.push_back("  %s handled by the quest world" % command)
+		if command in ["setstage", "startquest", "say", "sayto"]:
+			# The quest world executes these commands and emits a `speech` action for Say/SayTo.
+			# The scene consumes that speech action below; replaying the original command here is wrong.
+			if command in ["setstage", "startquest"]:
+				report.push_back("  %s handled by the quest world" % command)
 			continue
 		report.push_back("  " + _apply_action(action, references, world, transform_of))
 	return report
@@ -73,11 +75,13 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 		"setopenstate":
 			return _set_open_state(target, arguments, references, world, label)
 		"speech":
-			# A SayTo line: the topic's reply, printed as the subtitle would show it.
+			# A resolved Say/SayTo reply, with the speaker's installed voice, face animation and subtitle.
 			var line := str(arguments[0]) if not arguments.is_empty() else ""
 			var who := str(arguments[1]) if arguments.size() > 1 else ""
 			_play_dialogue_audio(action, arguments, who, world)
 			return "says (%s): %s" % [who, line]
+		"look":
+			return _look_at(target, arguments, world, label)
 		"pickidle":
 			return _pick_idle(target, arguments, world)
 		"evp":
@@ -100,28 +104,33 @@ func _pick_idle(target: String, arguments: Array, world: Node3D) -> String:
 
 
 func _play_dialogue_audio(action: Dictionary, arguments: Array, speaker_editor_id: String, world: Node3D) -> void:
-	if arguments.size() < 4 or speaker_editor_id.is_empty():
+	if arguments.is_empty():
 		return
+	var line := str(arguments[0])
 	var reader_value: Variant = world.get("data_reader")
-	if reader_value == null or not reader_value.has_method("find_form_id_by_editor_id"):
-		return
-	var speaker_form_id := int(reader_value.call("find_form_id_by_editor_id", speaker_editor_id))
-	if speaker_form_id == 0:
-		return
+	var speaker_form_id := 0
+	if reader_value != null and reader_value.has_method("find_form_id_by_editor_id") and not speaker_editor_id.is_empty():
+		speaker_form_id = int(reader_value.call("find_form_id_by_editor_id", speaker_editor_id))
 	var audio_manager := world.get_tree().root.get_node_or_null("AudioManager")
-	if audio_manager == null:
-		return
-	audio_manager.call(
-		"play_dialogue",
-		reader_value,
-		world,
-		speaker_form_id,
-		str(arguments[3]),
-		str(action.get("target", "")),
-		int(arguments[2]),
-		_dialogue_face_expression(int(arguments[4])) if arguments.size() > 4 else "",
-		clampf(float(arguments[5]) / 100.0, 0.0, 1.0) if arguments.size() > 5 else 0.0
-	)
+	var duration := 0.0
+	if audio_manager != null and reader_value != null and speaker_form_id > 0 and arguments.size() >= 4:
+		duration = float(audio_manager.call(
+			"play_dialogue",
+			reader_value,
+			world,
+			speaker_form_id,
+			str(arguments[3]),
+			str(action.get("target", "")),
+			int(arguments[2]),
+			_dialogue_face_expression(int(arguments[4])) if arguments.size() > 4 else "",
+			clampf(float(arguments[5]) / 100.0, 0.0, 1.0) if arguments.size() > 5 else 0.0,
+			int(arguments[6]) if arguments.size() > 6 else 1
+		))
+	# Say and SayTo are scripted speech commands. They show the line but never open a dialogue session.
+	var player_directed := arguments.size() < 8 or int(arguments[7]) != 0
+	if player_directed and world.has_method("present_scripted_speech_line"):
+		var speaker_reference := str(arguments[8]) if arguments.size() > 8 else ""
+		world.call("present_scripted_speech_line", speaker_form_id, speaker_editor_id, line, duration, speaker_reference)
 
 
 func _dialogue_face_expression(emotion_type: int) -> String:
@@ -132,6 +141,17 @@ func _dialogue_face_expression(emotion_type: int) -> String:
 		5: return "Happy"
 		6: return "Surprise"
 		_: return ""
+
+
+func _look_at(target: String, arguments: Array, world: Node3D, label: String) -> String:
+	if target.is_empty() or arguments.is_empty():
+		return "not applied: %s needs an actor and a look target" % label
+	if not world.has_method("set_npc_look_target"):
+		return "not applied: %s, the scene cannot direct actor gaze" % label
+	var result := str(world.call("set_npc_look_target", target, str(arguments[0])))
+	if result.is_empty():
+		return "not applied: %s, actor or look target is not loaded" % label
+	return "looks at %s" % str(arguments[0])
 
 
 func _move_to(target: String, arguments: Array, references: Dictionary, world: Node3D, transform_of: Callable, label: String) -> String:

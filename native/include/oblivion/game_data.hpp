@@ -46,6 +46,7 @@ public:
     [[nodiscard]] const QuestRecord* find_quest(std::string_view editor_id) const { return esm_.find_quest(editor_id); }
     [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const { return esm_.find_topic(form_id); }
     [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return esm_.topics(); }
+    [[nodiscard]] const std::vector<std::uint32_t>& topic_order() const noexcept { return esm_.topic_order(); }
     [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>& unplaced_references() const noexcept {
         return esm_.unplaced_references();
     }

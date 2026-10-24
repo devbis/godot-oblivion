@@ -42,6 +42,7 @@ var _third_person := true
 var _normal_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
 var _first_person_eye_anchor := Vector3(0.0, 1.5, 0.0)
 var face_preview_enabled := false
+var controls_suspended := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
 var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
@@ -104,6 +105,11 @@ func release_mouse() -> void:
 	_capture_mouse_on_focus = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
+func set_controls_suspended(suspended: bool) -> void:
+	controls_suspended = suspended
+	if suspended:
+		velocity = Vector3.ZERO
+
 func set_fly_mode(enabled: bool) -> void:
 	if is_flying == enabled:
 		return
@@ -147,6 +153,8 @@ func _process(delta: float) -> void:
 	_apply_camera_orbit()
 
 func handle_camera_input(event: InputEvent) -> void:
+	if controls_suspended:
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_camera_yaw = wrapf(_camera_yaw - event.relative.x * mouse_sensitivity, -PI, PI)
 		var pitch_min := camera_pitch_min_degrees
@@ -200,7 +208,7 @@ func handle_camera_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_APPLICATION_FOCUS_IN and _capture_mouse_on_focus:
+	if what == NOTIFICATION_APPLICATION_FOCUS_IN and _capture_mouse_on_focus and not controls_suspended:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _apply_camera_orbit() -> void:
@@ -219,6 +227,10 @@ func _set_camera_distance(distance: float) -> void:
 		_update_camera_clearance(0.0)
 
 func _physics_process(delta: float) -> void:
+	if controls_suspended:
+		velocity = Vector3.ZERO
+		gameplay_frame.emit(delta, false, false)
+		return
 	if is_flying:
 		var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		var vertical := Input.get_action_strength("jump") - Input.get_action_strength("crouch")

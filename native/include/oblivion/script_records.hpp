@@ -19,6 +19,7 @@ struct QuestCondition {
     std::uint16_t function_index = 0;
     std::uint32_t parameter1 = 0;
     std::uint32_t parameter2 = 0;
+    std::uint32_t run_on = 0; // TES4 CTDA: 0 subject, 1 target, 2 reference, 3 combat target, 4 linked reference
 };
 
 // One log entry of a stage (the QSDT group): its conditions, optional journal
@@ -74,6 +75,7 @@ struct DialogTopic {
     std::uint32_t form_id = 0;
     std::string editor_id;
     std::string name;                 // FULL: the topic text in the list
+    std::uint8_t topic_type = 0;      // DIAL DATA: Topic=0, Conversation=1, Combat=2, Persuasion=3, Detection=4, Service=5, Miscellaneous=6
     std::vector<std::uint32_t> quests;  // QSTI
     std::vector<DialogResponse> responses;
 };

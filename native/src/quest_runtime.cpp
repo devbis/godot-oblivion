@@ -30,7 +30,8 @@ bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHo
         bool joined = false;
         do {
             const auto& condition = conditions[index];
-            const auto value = host.call_condition(condition.function_index, condition.parameter1, condition.parameter2);
+            const auto value = host.call_condition(condition.function_index, condition.parameter1, condition.parameter2,
+                                                   condition.run_on);
             bool holds = false;
             // "Use global": the comparison value is a GLOB record, which the host has to know.
             std::optional<double> comparison = static_cast<double>(condition.comparison);

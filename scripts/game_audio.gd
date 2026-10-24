@@ -95,16 +95,17 @@ func play_dialogue(
 	topic: String,
 	reply_form_id: int,
 	expression_name := "",
-	expression_weight := 0.0
-) -> void:
+	expression_weight := 0.0,
+	line_number := 1
+) -> float:
 	if reader == null or not is_instance_valid(reader) or not reader.has_method("read_asset"):
-		return
+		return 0.0
 	var npc: Dictionary = reader.call("find_npc_base", speaker_form_id)
 	var race_form_id := int(npc.get("race_form_id", 0))
 	var race_editor_id := str(reader.call("find_editor_id", race_form_id)).to_lower()
 	var voice_group := _voice_group(race_editor_id)
 	var sex := "f" if bool(npc.get("female", false)) else "m"
-	var file_name := "%s_%s_%08x_1.mp3" % [quest.to_lower(), topic.to_lower(), reply_form_id]
+	var file_name := "%s_%s_%08x_%d.mp3" % [quest.to_lower(), topic.to_lower(), reply_form_id, maxi(1, line_number)]
 	var groups_to_try: Array[String] = [voice_group]
 	for group: String in VOICE_GROUPS:
 		if group != voice_group:
@@ -123,7 +124,7 @@ func play_dialogue(
 		if not _missing_voice_warnings.has(file_name):
 			_missing_voice_warnings[file_name] = true
 			push_warning("OpenOB audio: no voice asset found for %s/%s/%08x" % [quest, topic, reply_form_id])
-		return
+		return 0.0
 	if selected_group != voice_group:
 		print("OpenOB audio: %s voice resolved in '%s' folder (race folder '%s' has no clip)" % [file_name, selected_group, voice_group])
 	var lip_path := selected_asset_path.trim_suffix(".mp3") + ".lip"
@@ -161,7 +162,7 @@ func play_dialogue(
 	if dialogue_player == null:
 		if is_instance_valid(speaker) and scene_root.has_method("clear_npc_dialogue_expression"):
 			scene_root.call("clear_npc_dialogue_expression", reference_id)
-		return
+		return 0.0
 	_dialogue_players[reference_id] = {
 		"player": dialogue_player,
 		"bus_name": bus_name,
@@ -169,6 +170,7 @@ func play_dialogue(
 		"lip_animation": lip_animation,
 	}
 	dialogue_player.finished.connect(_on_dialogue_finished.bind(reference_id, dialogue_player.get_instance_id()), CONNECT_ONE_SHOT)
+	return selected_stream.get_length()
 
 
 ## Door SetOpenState uses original NIF animation data; this adds the matching
@@ -296,6 +298,10 @@ func is_dialogue_playing(reference_id: int) -> bool:
 		return false
 	var player := (entry_value as Dictionary).get("player") as AudioStreamPlayer3D
 	return is_instance_valid(player) and player.playing
+
+
+func stop_dialogue(reference_id: int) -> void:
+	_stop_dialogue(reference_id)
 
 
 ## Returns the voice level for the actor's own dialogue bus, scaled like the original game's FaceGen talk driver.

@@ -122,12 +122,13 @@ std::string lower_ascii(std::string value) {
 
 // Parses a 24-byte CTDA. When the "use global" flag (0x04) is set, the comparison field is the
 // form id of a GLOB record rather than a float.
-QuestCondition parse_condition(const std::uint8_t* value) {
+QuestCondition parse_condition(const std::uint8_t* value, std::size_t size) {
     QuestCondition condition;
     condition.operator_code = value[0];
     condition.function_index = u16(value + 8);
     condition.parameter1 = u32(value + 12);
     condition.parameter2 = u32(value + 16);
+    if (size >= 24) condition.run_on = u32(value + 20);
     if ((condition.operator_code & 0x04) != 0) {
         condition.comparison_is_global = true;
         condition.comparison_global_form_id = u32(value + 4);
@@ -191,6 +192,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     quest_by_id_.clear();
     quest_id_by_editor_id_.clear();
     topic_by_id_.clear();
+    topic_order_.clear();
     responses_by_topic_.clear();
     active_topic_id_ = 0;
     record_type_index_.clear();
@@ -849,11 +851,11 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "PKID" && is_npc_base && subrecord_size >= 4) {
             npc.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {
-            QuestCondition condition = parse_condition(value);
+            QuestCondition condition = parse_condition(value, subrecord_size);
             ai_package.conditions.push_back(condition);
         } else if ((tag == "CTDA" || tag == "CTDT") && is_idle && subrecord_size >= 20) {
             // CTDT is the 20-byte form of CTDA that the master also uses; parse_condition reads only the first 20 bytes.
-            idle.conditions.push_back(parse_condition(value));
+            idle.conditions.push_back(parse_condition(value, subrecord_size));
         } else if (tag == "MODL" && is_idle) {
             idle.animation_file = read_zstring(value, subrecord_size);
         } else if (tag == "ANAM" && is_idle && subrecord_size >= 1) {
@@ -873,6 +875,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             ai_package.location_type = static_cast<std::int32_t>(u32(value));
             ai_package.location_form_id = u32(value + 4);
             ai_package.location_radius = static_cast<std::int32_t>(u32(value + 8));
+        } else if (tag == "PTDT" && is_ai_package && subrecord_size >= 12) {
+            ai_package.target_type = static_cast<std::int32_t>(u32(value));
+            ai_package.target_form_id = u32(value + 4);
+            ai_package.target_distance = static_cast<std::int32_t>(u32(value + 8));
         } else if (is_quest) {
             // Stages start at INDX; each entry starts at QSDT and owns the CTDA, CNAM and
             // result (SCTX, SCRO) subrecords that follow it, until the next QSDT or INDX.
@@ -892,7 +898,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 quest.stages.back().entries.push_back(QuestStageEntry{});
                 quest.stages.back().entries.back().completes = value[0] != 0;
             } else if (tag == "CTDA" && subrecord_size >= 24 && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
-                QuestCondition condition = parse_condition(value);
+                QuestCondition condition = parse_condition(value, subrecord_size);
                 quest.stages.back().entries.back().conditions.push_back(condition);
             } else if (tag == "CNAM" && !quest.stages.empty() && !quest.stages.back().entries.empty()) {
                 quest.stages.back().entries.back().log_text = read_zstring(value, subrecord_size);
@@ -906,6 +912,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (is_topic) {
             if (tag == "EDID") topic.editor_id = read_zstring(value, subrecord_size);
             else if (tag == "FULL") topic.name = read_zstring(value, subrecord_size);
+            else if (tag == "DATA" && subrecord_size >= 1) topic.topic_type = value[0];
             else if (tag == "QSTI" && subrecord_size >= 4) topic.quests.push_back(u32(value));
         } else if (is_response) {
             if (tag == "TRDT") {
@@ -930,7 +937,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             } else if (tag == "DATA" && subrecord_size >= 3) response.flags = value[2];
             else if (tag == "QSTI" && subrecord_size >= 4) response.quest = u32(value);
             else if (tag == "CTDA" && subrecord_size >= 24) {
-                QuestCondition condition = parse_condition(value);
+                QuestCondition condition = parse_condition(value, subrecord_size);
                 response.conditions.push_back(condition);
             } else if (tag == "TCLT" && subrecord_size >= 4) response.topic_links.push_back(u32(value));
             else if (tag == "SCTX") {
@@ -1027,7 +1034,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         script_by_id_[form_id] = std::move(script);
     if (is_quest)
         quest_by_id_[form_id] = std::move(quest);
-    if (is_topic) topic_by_id_[form_id] = std::move(topic);
+    if (is_topic) {
+        topic_order_.push_back(form_id);
+        topic_by_id_[form_id] = std::move(topic);
+    }
     if (is_response) responses_by_topic_[active_topic_id_].push_back(std::move(response));
     record_type_by_id_[form_id] = intern_record_type(type);
     if (!base_editor_id.empty())
