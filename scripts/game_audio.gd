@@ -241,7 +241,9 @@ func _stream_for_asset(asset_path: String, reader_override: Object = null) -> Au
 				var mp3 := AudioStreamMP3.new()
 				mp3.data = bytes
 				stream = mp3
-	_stream_cache[asset_path] = stream
+	# A failed read is not cached: the archive may be loaded by the time the sound is asked for again.
+	if stream != null:
+		_stream_cache[asset_path] = stream
 	return stream
 
 
