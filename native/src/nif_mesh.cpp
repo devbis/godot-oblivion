@@ -6,6 +6,7 @@
 #include "oblivion/nif_mesh.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <istream>
 #include <stdexcept>
@@ -16,6 +17,7 @@
 #include <Geometry.hpp>
 #include <Animation.hpp>
 #include <bhk.hpp>
+#include <ExtraData.hpp>
 #include <Nodes.hpp>
 #include <Skin.hpp>
 
@@ -24,6 +26,29 @@ namespace {
 
 // Oblivion's chain NIF maps BHK body spacing to NiNode spacing at 1:7.
 constexpr float kHavokToGameUnits = 7.0f;
+
+bool starts_with_case_insensitive(std::string_view value, std::string_view prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        const auto value_char = static_cast<unsigned char>(value[index]);
+        const auto prefix_char = static_cast<unsigned char>(prefix[index]);
+        if (std::tolower(value_char) != std::tolower(prefix_char)) return false;
+    }
+    return true;
+}
+
+bool is_editor_marker_geometry(std::string_view name) {
+    return starts_with_case_insensitive(name, "EditorMarker") ||
+           starts_with_case_insensitive(name, "VisibilityEditorMarker");
+}
+
+bool root_has_editor_marker_flag(nifly::NifFile& file, nifly::NiAVObject& root) {
+    for (const auto& extra_data_ref : root.extraDataRefs) {
+        const auto* flags = file.GetHeader().GetBlock<nifly::BSXFlags>(extra_data_ref);
+        if (flags && (flags->integerData & nifly::BSX_EDITOR_MARKER) != 0) return true;
+    }
+    return false;
+}
 
 std::array<float, 3> to_godot(const nifly::Vector3& value) {
     return {value.x, value.z, -value.y};
@@ -208,7 +233,8 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
 
 // Depth-first, pre-order traversal with an explicit stack (children are visited in
 // order), so a deep chain in a malformed NIF cannot overflow the stack.
-void visit_scene(nifly::NifFile& file, nifly::NiAVObject* root, std::vector<NifMeshData>& meshes) {
+void visit_scene(nifly::NifFile& file, nifly::NiAVObject* root, bool has_editor_markers,
+                 std::vector<NifMeshData>& meshes) {
     struct Frame {
         nifly::NiAVObject* object;
         nifly::MatTransform parent_transform;
@@ -229,6 +255,7 @@ void visit_scene(nifly::NifFile& file, nifly::NiAVObject* root, std::vector<NifM
         if (auto* shape = dynamic_cast<nifly::NiShape*>(object)) {
             NifMeshData mesh;
             append_shape(file, *shape, world_transform, frame.parent_transform, frame.parent_node_name, mesh);
+            mesh.editor_marker = has_editor_markers && is_editor_marker_geometry(mesh.name);
             if (mesh.vertices.size() >= 3 && mesh.indices.size() >= 3)
                 meshes.push_back(std::move(mesh));
         }
@@ -630,7 +657,7 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         if (result.animations.empty()) throw std::runtime_error("NIF has no NiNode root");
         return result;
     }
-    visit_scene(file, root, result.meshes);
+    visit_scene(file, root, root_has_editor_marker_flag(file, *root), result.meshes);
     if (!geometry_only) append_physics(file, result, parents, global_transforms);
     return result;
 }

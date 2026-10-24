@@ -104,6 +104,7 @@ func meshes_for_model(model_path: String) -> Array:
 				"mesh": resource,
 				"mesh_name": str(mesh_data.get("name", "")),
 				"parent_node_name": str(mesh_data.get("parent_node_name", "")),
+				"editor_marker": bool(mesh_data.get("editor_marker", false)),
 				"parent_local_vertices": mesh_data.get("parent_local_vertices", PackedVector3Array()),
 				"parent_local_normals": mesh_data.get("parent_local_normals", PackedVector3Array()),
 				"uvs": mesh_data.get("uvs", PackedVector2Array()),
@@ -153,6 +154,8 @@ func ensure_collision_shape(model_path: String) -> void:
 		return
 	var collision_faces := PackedVector3Array()
 	for mesh_entry: Dictionary in model_cache.get(key, []):
+		if bool(mesh_entry.get("editor_marker", false)):
+			continue
 		var shape_name := str(mesh_entry.get("mesh_name", "")).to_lower()
 		if shape_name.contains("sky") or shape_name.contains("lightbeam") or shape_name.contains("dust"):
 			continue

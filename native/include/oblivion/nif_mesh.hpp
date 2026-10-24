@@ -13,6 +13,7 @@ struct NifMeshData {
     std::string name;
     std::string parent_node_name;
     std::string diffuse_texture_path;
+    bool editor_marker = false;
     bool alpha_blend = false;
     bool alpha_test = false;
     std::uint8_t alpha_threshold = 128;

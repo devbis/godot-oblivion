@@ -744,6 +744,7 @@ public:
             item["name"] = String::utf8(mesh.name.c_str());
             item["parent_node_name"] = String::utf8(mesh.parent_node_name.c_str());
             item["diffuse_texture_path"] = String::utf8(mesh.diffuse_texture_path.c_str());
+            item["editor_marker"] = mesh.editor_marker;
             item["alpha_blend"] = mesh.alpha_blend;
             item["alpha_test"] = mesh.alpha_test;
             item["alpha_threshold"] = mesh.alpha_threshold;

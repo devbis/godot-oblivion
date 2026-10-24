@@ -1624,6 +1624,8 @@ func _load_cell_geometry(
 		var item_mesh_instances: Array[MeshInstance3D] = []
 		for mesh_index in range(meshes.size()):
 			var mesh_entry: Dictionary = meshes[mesh_index]
+			if bool(mesh_entry.get("editor_marker", false)):
+				continue
 			var model_key := model_path.to_lower().replace("\\", "/")
 			var can_batch := (
 				is_exterior
@@ -2289,6 +2291,8 @@ func _instantiate_imported_nif_physics(
 	var visual_mesh_instances: Array[MeshInstance3D] = []
 	for mesh_index in range(meshes.size()):
 		var mesh_entry: Dictionary = meshes[mesh_index]
+		if bool(mesh_entry.get("editor_marker", false)):
+			continue
 		var node_name := str(mesh_entry.get("parent_node_name", ""))
 		if not body_nodes.has(node_name):
 			var static_mesh := MeshInstance3D.new()
@@ -2418,6 +2422,8 @@ func _add_animated_reference_colliders(node_hosts: Dictionary, meshes: Array) ->
 	var faces_by_node: Dictionary = {}
 	for mesh_value: Variant in meshes:
 		var mesh_entry: Dictionary = mesh_value
+		if bool(mesh_entry.get("editor_marker", false)):
+			continue
 		var node_name := str(mesh_entry.get("parent_node_name", ""))
 		if not node_hosts.has(node_name):
 			continue
@@ -2725,6 +2731,8 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 	var has_bounds := false
 	for mesh_entry_value: Variant in meshes:
 		var mesh_entry: Dictionary = mesh_entry_value
+		if bool(mesh_entry.get("editor_marker", false)):
+			continue
 		var mesh := mesh_entry.get("mesh") as Mesh
 		if mesh == null:
 			continue
@@ -2756,7 +2764,7 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 
 func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
-	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx") and normalized.get_file() != "collisionbox01.nif"
+	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx")
 
 func _update_exterior_collision_streaming() -> void:
 	if (
@@ -2859,7 +2867,7 @@ func _material_for_reference(
 func _is_debug_service_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
 	var filename := normalized.get_file()
-	return filename in ["markerx.nif", "markerxheading.nif", "marker_north.nif", "collisionbox01.nif"] or normalized.contains("trigzone") or normalized.contains("/triggers/")
+	return filename in ["markerx.nif", "markerxheading.nif", "marker_north.nif"] or normalized.contains("trigzone") or normalized.contains("/triggers/")
 
 func _load_player_avatar() -> void:
 	if data_reader == null:
@@ -2921,6 +2929,8 @@ func _load_player_avatar() -> void:
 					head_attachment.add_child(hair_model_to_head)
 					attachment = hair_model_to_head
 		for mesh_entry: Dictionary in meshes:
+			if bool(mesh_entry.get("editor_marker", false)):
+				continue
 			var instance := MeshInstance3D.new()
 			var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
 			instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
@@ -3021,6 +3031,8 @@ func _load_player_face_detail_part(model_path: String) -> void:
 		head_attachment.add_child(face_detail_to_head)
 		attachment = face_detail_to_head
 	for mesh_entry: Dictionary in meshes:
+		if bool(mesh_entry.get("editor_marker", false)):
+			continue
 		var instance := MeshInstance3D.new()
 		var mesh_name := str(mesh_entry.get("mesh_name", "Mesh"))
 		instance.name = model_path.get_file().get_basename() + "_" + mesh_name.replace(":", "_")
