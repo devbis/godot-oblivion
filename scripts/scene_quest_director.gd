@@ -58,8 +58,48 @@ func in_door_box(point: Vector3) -> bool:
 
 const NAVIGATION_TILE_SIZE_M := 25.6
 const NAVIGATION_TILE_OVERLAP_M := 2.0
+const MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M := 2.5
 ## The navigation regions of the loaded cell, one per tile (OpenMW bakes its navigation mesh the same way).
 var navigation_tiles: Node3D = null
+var pathgrid_cell_form_id := 0
+var pathgrid_points: PackedVector3Array = PackedVector3Array()
+var pathgrid_neighbors: Array = []
+var last_navigation_path_uses_pathgrid := false
+
+func set_pathgrid(pathgrid: Dictionary, game_units_to_meters: float) -> void:
+	clear_pathgrid()
+	var source_points: PackedVector3Array = pathgrid.get("points", PackedVector3Array())
+	var edges: PackedInt32Array = pathgrid.get("edges", PackedInt32Array())
+	if source_points.is_empty() or edges.is_empty():
+		return
+	pathgrid_cell_form_id = int(pathgrid.get("cell_form_id", 0))
+	pathgrid_points.resize(source_points.size())
+	pathgrid_neighbors.resize(source_points.size())
+	for index in range(source_points.size()):
+		pathgrid_points[index] = _pathgrid_world_position(source_points[index], game_units_to_meters)
+		pathgrid_neighbors[index] = PackedInt32Array()
+	var edge_count := 0
+	for edge_index in range(0, edges.size() - 1, 2):
+		var from_index := edges[edge_index]
+		var to_index := edges[edge_index + 1]
+		if from_index < 0 or from_index >= pathgrid_neighbors.size() or to_index < 0 or to_index >= pathgrid_neighbors.size():
+			continue
+		var neighbors: PackedInt32Array = pathgrid_neighbors[from_index]
+		neighbors.push_back(to_index)
+		pathgrid_neighbors[from_index] = neighbors
+		edge_count += 1
+	print("OpenOB navigation: loaded cell PGRD 0x%08X with %d nodes and %d directed edges" % [
+		pathgrid_cell_form_id, pathgrid_points.size(), edge_count
+	])
+
+func clear_pathgrid() -> void:
+	pathgrid_cell_form_id = 0
+	pathgrid_points.clear()
+	pathgrid_neighbors.clear()
+	last_navigation_path_uses_pathgrid = false
+
+func _pathgrid_world_position(game_position: Vector3, game_units_to_meters: float) -> Vector3:
+	return Vector3(game_position.x, game_position.z, -game_position.y) * game_units_to_meters
 
 ## Bakes the walkable surfaces of the loaded cell in tiles. Each tile takes the static triangles that touch it, with an
 ## overlap, so the tiles connect at their edges and stairs and floors on different levels join.
@@ -148,6 +188,7 @@ func clear_navigation_tiles() -> void:
 	if is_instance_valid(navigation_tiles):
 		navigation_tiles.queue_free()
 	navigation_tiles = null
+	clear_pathgrid()
 
 func _collect_static_bodies(node: Node, bodies: Array) -> void:
 	if node is StaticBody3D:
@@ -158,9 +199,14 @@ func _collect_static_bodies(node: Node, bodies: Array) -> void:
 ## Finds a path over the navigation tiles. If a closed door split the baked mesh,
 ## join reachable paths on both sides through that door's actual opening.
 func navigation_path(from: Vector3, to: Vector3, actor_radius: float = 0.18) -> PackedVector3Array:
+	last_navigation_path_uses_pathgrid = false
 	var navigation_map := scene.get_world_3d().navigation_map
 	var path := NavigationServer3D.map_get_path(navigation_map, from, to, true)
 	if path.is_empty():
+		var disconnected_path := _pathgrid_route(from, to)
+		if not disconnected_path.is_empty():
+			last_navigation_path_uses_pathgrid = true
+			return disconnected_path
 		return PackedVector3Array([to])
 	var goal_on_mesh := NavigationServer3D.map_get_closest_point(navigation_map, to)
 	if _path_reaches(path, goal_on_mesh):
@@ -195,7 +241,88 @@ func navigation_path(from: Vector3, to: Vector3, actor_radius: float = 0.18) -> 
 		if candidate_length < best_length:
 			best_length = candidate_length
 			best_path = candidate
+	if not best_path.is_empty():
+		return best_path
+	var pathgrid_path := _pathgrid_route(from, to)
+	if not pathgrid_path.is_empty():
+		last_navigation_path_uses_pathgrid = true
+		return pathgrid_path
 	return best_path if not best_path.is_empty() else path
+
+func _pathgrid_route(from: Vector3, to: Vector3) -> PackedVector3Array:
+	var count := pathgrid_points.size()
+	if count == 0 or pathgrid_neighbors.size() != count:
+		return PackedVector3Array()
+	var start_index := _nearest_pathgrid_point(from)
+	var goal_index := _nearest_pathgrid_point(to)
+	if start_index < 0 or goal_index < 0:
+		return PackedVector3Array()
+	var start_snap_distance := from.distance_to(pathgrid_points[start_index])
+	var goal_snap_distance := to.distance_to(pathgrid_points[goal_index])
+	if start_snap_distance > MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M \
+			or goal_snap_distance > MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M:
+		return PackedVector3Array()
+	var costs := PackedFloat32Array()
+	costs.resize(count)
+	var predecessors := PackedInt32Array()
+	predecessors.resize(count)
+	var visited := PackedByteArray()
+	visited.resize(count)
+	for index in range(count):
+		costs[index] = INF
+		predecessors[index] = -1
+		visited[index] = 0
+	costs[start_index] = 0.0
+	for _iteration in range(count):
+		var current := -1
+		var current_cost := INF
+		for index in range(count):
+			if visited[index] == 0 and costs[index] < current_cost:
+				current = index
+				current_cost = costs[index]
+		if current < 0 or current == goal_index:
+			break
+		visited[current] = 1
+		var neighbors: PackedInt32Array = pathgrid_neighbors[current]
+		for next_index: int in neighbors:
+			if next_index < 0 or next_index >= count or visited[next_index] != 0:
+				continue
+			var candidate_cost := current_cost + pathgrid_points[current].distance_to(pathgrid_points[next_index])
+			if candidate_cost < costs[next_index]:
+				costs[next_index] = candidate_cost
+				predecessors[next_index] = current
+		if current_cost == INF:
+			break
+	if start_index != goal_index and predecessors[goal_index] < 0:
+		return PackedVector3Array()
+	var node_route: Array[int] = []
+	var cursor := goal_index
+	while cursor >= 0:
+		node_route.push_front(cursor)
+		if cursor == start_index:
+			break
+		cursor = predecessors[cursor]
+	if node_route.is_empty() or node_route[0] != start_index:
+		return PackedVector3Array()
+	var result := PackedVector3Array()
+	_append_path_point(result, from)
+	for node_index: int in node_route:
+		_append_path_point(result, pathgrid_points[node_index])
+	_append_path_point(result, to)
+	print("OpenOB navigation: navmesh route disconnected; using cell PGRD 0x%08X nodes=%d snap=%.2f/%.2fm" % [
+		pathgrid_cell_form_id, node_route.size(), start_snap_distance, goal_snap_distance
+	])
+	return result
+
+func _nearest_pathgrid_point(position: Vector3) -> int:
+	var nearest_index := -1
+	var nearest_distance_squared := INF
+	for index in range(pathgrid_points.size()):
+		var distance_squared := position.distance_squared_to(pathgrid_points[index])
+		if distance_squared < nearest_distance_squared:
+			nearest_distance_squared = distance_squared
+			nearest_index = index
+	return nearest_index
 
 func _door_portal_points(door: Dictionary, from: Vector3, to: Vector3, actor_radius: float) -> Dictionary:
 	var local_box: AABB = door.get("local_box", AABB())

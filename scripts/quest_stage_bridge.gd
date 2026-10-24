@@ -274,9 +274,10 @@ func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D,
 	var body_count := _door_body_count(reference_id, world)
 	if animation_player != null and not sequence_name.is_empty():
 		world.set_meta(state_key, is_open)
-		animation_player.animation_finished.connect(
-			_finish_door_animation.bind(reference_id, is_open, world), CONNECT_ONE_SHOT
-		)
+		if not is_open:
+			animation_player.animation_finished.connect(
+				_finish_door_animation.bind(animation_player, reference_id, is_open, world), CONNECT_ONE_SHOT
+			)
 		animation_player.play(sequence_name)
 		_play_door_audio(reference, is_open, world)
 		return "applied: %s (%s, NIF %s animation)" % [label, "open" if is_open else "closed", sequence_name]
@@ -306,13 +307,9 @@ func _play_group(target: String, arguments: Array, references: Dictionary, world
 	if animation_player == null or sequence_name.is_empty():
 		return "not applied: %s has no NIF animation group '%s'" % [label, str(arguments[0])]
 	var group_name := str(arguments[0]).to_lower()
-	if group_name in ["forward", "open"]:
+	if group_name in ["backward", "close"]:
 		animation_player.animation_finished.connect(
-			_finish_reference_animation.bind(reference_id, false, world), CONNECT_ONE_SHOT
-		)
-	elif group_name in ["backward", "close"]:
-		animation_player.animation_finished.connect(
-			_finish_reference_animation.bind(reference_id, true, world), CONNECT_ONE_SHOT
+			_finish_reference_animation.bind(animation_player, reference_id, true, world), CONNECT_ONE_SHOT
 		)
 	animation_player.play(sequence_name)
 	return "applied: %s (%s animation)" % [label, sequence_name]
@@ -343,23 +340,94 @@ func _door_body_count(reference_id: int, world: Node3D) -> int:
 	return count
 
 
-func _finish_door_animation(_animation_name: StringName, reference_id: int, is_open: bool, world: Node3D) -> void:
+func _finish_door_animation(
+	animation_name: StringName, animation_player: AnimationPlayer, reference_id: int, is_open: bool, world: Node3D
+) -> void:
 	if not is_instance_valid(world):
 		return
 	var state_key := "door_open_%08x" % reference_id
 	if not world.has_meta(state_key) or bool(world.get_meta(state_key)) != is_open:
 		return
-	_set_door_collision(reference_id, is_open, world)
+	if not is_open:
+		_set_animated_collision_enabled(animation_player, reference_id, true, world, animation_name)
 
 
 func _set_door_collision(reference_id: int, is_open: bool, world: Node3D) -> void:
 	_set_reference_collision_enabled(reference_id, not is_open, world)
 
 
-func _finish_reference_animation(_animation_name: StringName, reference_id: int, collision_enabled: bool, world: Node3D) -> void:
-	if not is_instance_valid(world):
+func _finish_reference_animation(
+	animation_name: StringName, animation_player: AnimationPlayer, reference_id: int,
+	collision_enabled: bool, world: Node3D
+) -> void:
+	if not is_instance_valid(world) or not collision_enabled:
 		return
-	_set_reference_collision_enabled(reference_id, collision_enabled, world)
+	_set_animated_collision_enabled(animation_player, reference_id, true, world, animation_name)
+
+
+func _animated_collision_host_names(
+	animation_player: AnimationPlayer, reference_id: int, world: Node3D, animation_name: StringName = &""
+) -> Dictionary:
+	var collision_hosts: Dictionary = {}
+	if not is_instance_valid(animation_player):
+		return collision_hosts
+	var selected_animation := animation_name if not animation_name.is_empty() else animation_player.current_animation
+	if selected_animation.is_empty():
+		return collision_hosts
+	var animation := animation_player.get_animation(selected_animation)
+	if animation == null:
+		return collision_hosts
+	var reference_hosts: Dictionary = {}
+	for node: Node in world.find_children("*", "PhysicsBody3D", true, false):
+		if int(node.get_meta("reference_id", 0)) == reference_id:
+			reference_hosts[node.name] = true
+	for host_name_value: Variant in reference_hosts:
+		var host_name := str(host_name_value)
+		for track_index in range(animation.get_track_count()):
+			if animation.track_get_type(track_index) != Animation.TYPE_VALUE:
+				continue
+			var track_path: NodePath = animation.track_get_path(track_index)
+			if track_path.get_name_count() == 0 or str(track_path.get_name(0)) != host_name:
+				continue
+			var first_transform: Variant = null
+			for key_index in range(animation.track_get_key_count(track_index)):
+				var value: Variant = animation.track_get_key_value(track_index, key_index)
+				if not value is Transform3D:
+					continue
+				if first_transform == null:
+					first_transform = value
+				elif _animation_transform_moves(first_transform, value):
+					collision_hosts[host_name] = true
+					break
+			if collision_hosts.has(host_name):
+				break
+	return collision_hosts
+
+
+func _animation_transform_moves(first: Variant, next: Variant) -> bool:
+	if not first is Transform3D or not next is Transform3D:
+		return false
+	var first_transform: Transform3D = first
+	var next_transform: Transform3D = next
+	return (
+		first_transform.origin.distance_to(next_transform.origin) > 0.05
+		or first_transform.basis.x.distance_to(next_transform.basis.x) > 0.001
+		or first_transform.basis.y.distance_to(next_transform.basis.y) > 0.001
+		or first_transform.basis.z.distance_to(next_transform.basis.z) > 0.001
+	)
+
+
+func _set_animated_collision_enabled(
+	animation_player: AnimationPlayer, reference_id: int, collision_enabled: bool, world: Node3D,
+	animation_name: StringName = &""
+) -> void:
+	var moving_hosts := _animated_collision_host_names(animation_player, reference_id, world, animation_name)
+	for node: Node in world.find_children("*", "PhysicsBody3D", true, false):
+		var body := node as PhysicsBody3D
+		if body == null or int(body.get_meta("reference_id", 0)) != reference_id \
+				or not moving_hosts.has(body.name):
+			continue
+		_set_body_collision_enabled(body, collision_enabled)
 
 
 ## Generated collision is a static mesh snapshot. When an authored NIF sequence moves an object, leaving that
@@ -369,15 +437,19 @@ func _set_reference_collision_enabled(reference_id: int, collision_enabled: bool
 		var body := node as PhysicsBody3D
 		if body == null or int(body.get_meta("reference_id", 0)) != reference_id:
 			continue
-		if not collision_enabled:
-			if not body.has_meta("closed_layer"):
-				body.set_meta("closed_layer", body.collision_layer)
-				body.set_meta("closed_mask", body.collision_mask)
-			body.collision_layer = 0
-			body.collision_mask = 0
-		elif body.has_meta("closed_layer"):
-			body.collision_layer = int(body.get_meta("closed_layer"))
-			body.collision_mask = int(body.get_meta("closed_mask"))
+		_set_body_collision_enabled(body, collision_enabled)
+
+
+func _set_body_collision_enabled(body: PhysicsBody3D, collision_enabled: bool) -> void:
+	if not collision_enabled:
+		if not body.has_meta("closed_layer"):
+			body.set_meta("closed_layer", body.collision_layer)
+			body.set_meta("closed_mask", body.collision_mask)
+		body.collision_layer = 0
+		body.collision_mask = 0
+	elif body.has_meta("closed_layer"):
+		body.collision_layer = int(body.get_meta("closed_layer"))
+		body.collision_mask = int(body.get_meta("closed_mask"))
 
 
 func _store(target: String, command: String, arguments: Array) -> void:

@@ -28,6 +28,8 @@ var final_arrival_distance := 0.08
 var loops_route := false
 var is_walking := false
 var grounding_enabled := false
+## PGRD points are the authored walk plane. Use them to support an actor across small collision gaps in imported cells.
+var follow_authored_route_height := false
 ## Whether the walk checks the floor ahead for a drop. A route of several points comes from the navigation tiles, which
 ## already keep to walkable floor, so the check is only kept for a single straight target.
 var check_floor_ahead := true
@@ -50,7 +52,10 @@ func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
 	wall_min_slide_angle = 0.0
 
-func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause: float, final_arrival_distance_m: float = -1.0) -> void:
+func configure_route(
+	route: Array[Dictionary], should_loop: bool, initial_pause: float,
+	final_arrival_distance_m: float = -1.0, use_authored_route_height: bool = false
+) -> void:
 	_yield_path.clear()
 	_yield_waypoint_index = 0
 	waypoints.clear()
@@ -59,6 +64,7 @@ func configure_route(route: Array[Dictionary], should_loop: bool, initial_pause:
 		waypoints.push_back(waypoint.get("position", global_position))
 		waypoint_speeds.push_back(float(waypoint.get("speed_mps", walk_speed_mps)))
 	loops_route = should_loop
+	follow_authored_route_height = use_authored_route_height
 	final_arrival_distance = maxf(arrival_distance, final_arrival_distance_m) if final_arrival_distance_m >= 0.0 else arrival_distance
 	check_floor_ahead = waypoints.size() <= 1
 	_pause_remaining = initial_pause
@@ -244,7 +250,15 @@ func _physics_process(delta: float) -> void:
 			desired_horizontal_velocity = direction * speed
 
 	if grounding_enabled:
-		velocity.y = 0.0 if (is_on_floor() or _stepper.is_stepping()) else velocity.y - gravity_mps2 * delta
+		var follows_route_plane := follow_authored_route_height \
+			and not waypoints.is_empty() and waypoint_index < waypoints.size()
+		if follows_route_plane:
+			# Oblivion's pathgrid records the intended floor height. A few imported cells have gaps between
+			# static collision meshes; gravity alone drops an actor off that authored route before the next floor.
+			var route_height_error := waypoints[waypoint_index].y - global_position.y
+			velocity.y = clampf(route_height_error * 4.0, -1.2, 1.2)
+		else:
+			velocity.y = 0.0 if (is_on_floor() or _stepper.is_stepping()) else velocity.y - gravity_mps2 * delta
 		if (
 			desired_horizontal_velocity.length_squared() > 0.0001
 			and is_on_floor()

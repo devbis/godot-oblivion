@@ -136,6 +136,13 @@ struct AiPackageRecord {
     std::vector<QuestCondition> conditions;  // CTDA: the package starts only when these hold
 };
 
+struct PathgridRecord {
+    std::uint32_t form_id = 0;
+    std::uint32_t cell_form_id = 0;
+    std::vector<std::array<float, 3>> points;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> edges;
+};
+
 // An IDLE record: a node of the idle animation tree. MODL is the .kf file of an animation, or a folder
 // (no ".kf") that only groups its children; ANAM is the animation group (4 special idle, 5 whole body, ...,
 // 0x80 no return file); DATA is the parent and the previous sibling (both 0 when there is none).
@@ -180,6 +187,7 @@ public:
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
+    [[nodiscard]] const PathgridRecord* find_pathgrid(std::uint32_t cell_form_id) const;
     [[nodiscard]] const IdleRecord* find_idle(std::uint32_t form_id) const;
     // The children of an idle node (0: the roots), in sibling order (each follows its previous sibling).
     [[nodiscard]] const std::vector<const IdleRecord*>& idle_children(std::uint32_t parent_form_id) const;
@@ -230,6 +238,7 @@ private:
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;
+    std::map<std::uint32_t, PathgridRecord> pathgrid_by_cell_id_;
     std::map<std::uint32_t, IdleRecord> idle_by_id_;
     std::map<std::uint32_t, std::vector<const IdleRecord*>> idle_children_by_parent_;
     std::map<std::uint32_t, TreeBaseRecord> tree_by_id_;

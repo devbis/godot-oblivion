@@ -153,6 +153,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
         std::string_view("SLGM"), std::string_view("SGST"),
         std::string_view("QUST"), std::string_view("SCPT"), std::string_view("GLOB"), std::string_view("DIAL"), std::string_view("INFO"),
+        std::string_view("PGRD"),
     };
     return std::find(relevant_types.begin(), relevant_types.end(), type) != relevant_types.end();
 }
@@ -175,6 +176,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
+    pathgrid_by_cell_id_.clear();
     idle_by_id_.clear();
     idle_children_by_parent_.clear();
     tree_by_id_.clear();
@@ -315,6 +317,11 @@ const OutfitRecord* Esm4Database::find_outfit(std::uint32_t form_id) const {
 const AiPackageRecord* Esm4Database::find_ai_package(std::uint32_t form_id) const {
     const auto it = ai_package_by_id_.find(form_id);
     return it == ai_package_by_id_.end() ? nullptr : &it->second;
+}
+
+const PathgridRecord* Esm4Database::find_pathgrid(std::uint32_t cell_form_id) const {
+    const auto it = pathgrid_by_cell_id_.find(cell_form_id);
+    return it == pathgrid_by_cell_id_.end() ? nullptr : &it->second;
 }
 
 const std::string* Esm4Database::find_item_model_path(std::uint32_t form_id, bool female) const {
@@ -580,6 +587,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
     const bool is_idle = type == "IDLE";
+    const bool is_pathgrid = type == "PGRD";
     IdleRecord idle;
     idle.form_id = form_id;
     bool is_tree = type == "TREE";
@@ -603,6 +611,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     CellRecord cell;
     cell.form_id = form_id;
     cell.interior = true;
+    PathgridRecord pathgrid;
+    pathgrid.form_id = form_id;
+    pathgrid.cell_form_id = active_cell_id;
+    std::int16_t pathgrid_node_count = -1;
+    std::vector<std::uint8_t> pathgrid_points_data;
+    std::vector<std::uint8_t> pathgrid_links_data;
     PlacedReference reference;
     reference.form_id = form_id;
     NpcBaseRecord npc;
@@ -677,6 +691,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
             const std::uint16_t cell_flags = subrecord_size >= 2 ? u16(value) : value[0];
             cell.interior = (cell_flags & 0x0001) != 0;
+        } else if (tag == "DATA" && is_pathgrid && subrecord_size >= 2) {
+            pathgrid_node_count = static_cast<std::int16_t>(u16(value));
+        } else if (tag == "PGRP" && is_pathgrid) {
+            pathgrid_points_data.assign(value, value + subrecord_size);
+        } else if (tag == "PGRR" && is_pathgrid) {
+            pathgrid_links_data.assign(value, value + subrecord_size);
         } else if (tag == "XCLC" && is_cell && subrecord_size >= 8) {
             cell.grid_x = static_cast<std::int32_t>(u32(value));
             cell.grid_y = static_cast<std::int32_t>(u32(value + 4));
@@ -982,6 +1002,37 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
 
     if (is_global && global_value) global_value_by_id_[form_id] = *global_value;
+
+    if (is_pathgrid && active_cell_id != 0) {
+        if (pathgrid_node_count < 0
+            || pathgrid_points_data.size() != static_cast<std::size_t>(pathgrid_node_count) * 16u) {
+            throw std::runtime_error("ESM4 PGRD has an invalid node count or PGRP size");
+        }
+        pathgrid.points.reserve(static_cast<std::size_t>(pathgrid_node_count));
+        std::size_t expected_links_size = 0;
+        for (std::int16_t index = 0; index < pathgrid_node_count; ++index) {
+            const auto offset = static_cast<std::size_t>(index) * 16u;
+            pathgrid.points.push_back({f32(pathgrid_points_data.data() + offset),
+                                       f32(pathgrid_points_data.data() + offset + 4),
+                                       f32(pathgrid_points_data.data() + offset + 8)});
+            expected_links_size += pathgrid_points_data[offset + 12] * sizeof(std::int16_t);
+        }
+        if (pathgrid_links_data.size() < expected_links_size)
+            throw std::runtime_error("ESM4 PGRD PGRR is shorter than its node link counts");
+        std::size_t link_offset = 0;
+        for (std::int16_t start_node = 0; start_node < pathgrid_node_count; ++start_node) {
+            const auto point_offset = static_cast<std::size_t>(start_node) * 16u;
+            const auto link_count = pathgrid_points_data[point_offset + 12];
+            for (std::uint8_t link = 0; link < link_count; ++link) {
+                const auto end_node = static_cast<std::int16_t>(u16(pathgrid_links_data.data() + link_offset));
+                link_offset += sizeof(std::int16_t);
+                if (end_node >= 0 && end_node < pathgrid_node_count)
+                    pathgrid.edges.emplace_back(static_cast<std::uint32_t>(start_node),
+                                                static_cast<std::uint32_t>(end_node));
+            }
+        }
+        pathgrid_by_cell_id_[active_cell_id] = std::move(pathgrid);
+    }
 
     if (is_game_setting && game_setting_value && !base_editor_id.empty() && base_editor_id.front() == 'f')
         float_game_settings_[base_editor_id] = *game_setting_value;

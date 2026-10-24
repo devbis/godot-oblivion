@@ -390,6 +390,28 @@ public:
         return cell ? cell_to_dictionary(*cell) : Dictionary{};
     }
 
+    Dictionary find_pathgrid(int64_t cell_form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* pathgrid = data_->find_pathgrid(static_cast<std::uint32_t>(cell_form_id));
+        if (!pathgrid) return {};
+        Dictionary result;
+        PackedVector3Array points;
+        for (const auto& point : pathgrid->points)
+            points.push_back(Vector3(point[0], point[1], point[2]));
+        PackedInt32Array edges;
+        edges.resize(static_cast<int64_t>(pathgrid->edges.size() * 2));
+        for (std::size_t index = 0; index < pathgrid->edges.size(); ++index) {
+            edges.set(static_cast<int64_t>(index * 2), static_cast<std::int32_t>(pathgrid->edges[index].first));
+            edges.set(static_cast<int64_t>(index * 2 + 1), static_cast<std::int32_t>(pathgrid->edges[index].second));
+        }
+        result["form_id"] = static_cast<int64_t>(pathgrid->form_id);
+        result["cell_form_id"] = static_cast<int64_t>(pathgrid->cell_form_id);
+        result["points"] = points;
+        result["edges"] = edges;
+        return result;
+    }
+
     Dictionary find_npc_base(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
@@ -897,6 +919,7 @@ protected:
         ClassDB::bind_method(D_METHOD("run_quest_stage", "quest_editor_id", "stage", "executable_path", "cache_dir"),
                              &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
+        ClassDB::bind_method(D_METHOD("find_pathgrid", "cell_form_id"), &OblivionData::find_pathgrid);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),

@@ -8,6 +8,7 @@ const AI_PACKAGE_TYPE_AMBUSH := 9
 const AI_PACKAGE_TYPE_FOLLOW := 1
 const AI_PACKAGE_TYPE_USE_ITEM_AT := 8
 const AI_PACKAGE_TARGET_REFERENCE := 0
+const AI_USE_ITEM_ACTIVATION_RADIUS_GAME_UNITS := 150.0
 const AI_PACKAGE_FLAG_ALWAYS_RUN := 0x2000
 const DIALOGUE_REPLY_FLAG_GOODBYE := 0x01
 const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
@@ -781,6 +782,13 @@ func _update_dynamic_target_routes() -> void:
 		if uses_target:
 			arrival_distance = float(actor.get("package_arrival_distance", arrival_distance))
 		var destination_distance := Vector2(root.global_position.x - destination.x, root.global_position.z - destination.z).length()
+		if uses_target and not bool(actor.get("package_target_activated", false)) \
+				and destination_distance <= AI_USE_ITEM_ACTIVATION_RADIUS_GAME_UNITS * game_units_to_meters:
+			actor["package_target_activated"] = true
+			_activate_ai_package_target(actor, package)
+			# Activating the target may advance the quest and replace this package synchronously.
+			if str((actor.get("package", {}) as Dictionary).get("editor_id", "")) != str(package.get("editor_id", "")):
+				continue
 		if destination_distance <= arrival_distance:
 			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 			if not active_route.is_empty():
@@ -799,11 +807,12 @@ func _update_dynamic_target_routes() -> void:
 		actor["route_target"] = destination
 		var waypoints: Array[Dictionary] = []
 		var route_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
+		var route_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
 		var flags := int(package.get("flags", 0))
 		var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 		for point: Vector3 in route_path:
 			waypoints.push_back({"position": point, "speed_mps": speed})
-		root.call("configure_route", waypoints, false, 0.0, arrival_distance)
+		root.call("configure_route", waypoints, false, 0.0, arrival_distance, route_uses_pathgrid)
 		print("OpenOB AI route update: %s from=%s destination=%s at=%s path=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(root.global_position),
@@ -1059,6 +1068,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		quest_world.set_actor_package(str(actor.get("reference_name", "")), int(package.get("form_id", 0)))
 	var waypoints: Array[Dictionary] = []
 	var route_path := PackedVector3Array()
+	var route_uses_pathgrid := false
 	var final_arrival_distance := 0.08
 	# Packages without a PLDT location can still name a PTDT target reference to approach.
 	var destination_form_id := _package_destination_form_id(package)
@@ -1078,6 +1088,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			var flags := int(package.get("flags", 0))
 			var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 			route_path = director.navigation_path((root as Node3D).global_position, destination, _actor_collision_radius(root as Node3D))
+			route_uses_pathgrid = bool(director.get("last_navigation_path_uses_pathgrid"))
 			if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT and not route_path.is_empty():
 				var path_endpoint: Vector3 = route_path[route_path.size() - 1]
 				var navmesh_snap_distance := Vector2(path_endpoint.x - destination.x, path_endpoint.z - destination.z).length()
@@ -1090,7 +1101,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	# A route that starts ends a whole-body idle: the actor walks. An upper-body idle (pointing, arms crossed) plays on over the walk.
 	if not waypoints.is_empty() and bool(actor.get("idle_active", false)) and not bool(actor.get("idle_upper_body", false)):
 		_end_npc_idle(actor)
-	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance)
+	root.call("configure_route", waypoints, false, 0.0, final_arrival_distance, route_uses_pathgrid)
 	print("OpenOB AI route: %s package=%s destination=%s at=%s from=%s path=%s" % [
 		str(actor.get("reference_name", actor.get("name", "NPC"))),
 		str(package.get("editor_id", "<none>")),
@@ -1131,6 +1142,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 				# A partial NavigationServer path is not package completion. Replan from the
 				# actor's current position, and leave OnPackageDone for actual arrival.
 				var retry_path := director.navigation_path(root.global_position, destination, _actor_collision_radius(root))
+				var retry_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
 				if not retry_path.is_empty():
 					var retry_end: Vector3 = retry_path[retry_path.size() - 1]
 					var retry_distance := Vector2(root.global_position.x - retry_end.x, root.global_position.z - retry_end.z).length()
@@ -1146,7 +1158,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 							actor["package_arrival_distance"] = arrival_radius
 						for point: Vector3 in retry_path:
 							waypoints.push_back({"position": point, "speed_mps": speed})
-						root.call("configure_route", waypoints, false, 0.0, arrival_radius)
+						root.call("configure_route", waypoints, false, 0.0, arrival_radius, retry_uses_pathgrid)
 					else:
 						push_warning("OpenOB package %s for %s stopped %.2fm from its destination; no reachable route remains" % [
 							str(package.get("editor_id", "")), str(actor.get("name", "")), horizontal_distance
@@ -1190,7 +1202,19 @@ func _activate_ai_package_target(actor: Dictionary, package: Dictionary) -> void
 	if target_name.is_empty():
 		target_name = "0x%08X" % target_form_id
 	var actor_name := str(actor.get("reference_name", actor.get("name", "")))
-	print("OpenOB AI use item: %s activates %s via package=%s" % [actor_name, target_name, str(package.get("editor_id", ""))])
+	var actor_root := actor.get("root") as Node3D
+	var location_value: Variant = _package_destination_position(package)
+	var location_distance := 0.0
+	if is_instance_valid(actor_root) and location_value is Vector3:
+		var location: Vector3 = location_value
+		location_distance = Vector2(actor_root.global_position.x - location.x, actor_root.global_position.z - location.z).length()
+	print("OpenOB AI use item: %s activates %s at %.2fm (range %.2fm) via package=%s" % [
+		actor_name,
+		target_name,
+		location_distance,
+		AI_USE_ITEM_ACTIVATION_RADIUS_GAME_UNITS * game_units_to_meters,
+		str(package.get("editor_id", "")),
+	])
 	var result: Dictionary = quest_world.run_object_event(
 		script_form_id, "OnActivate", "", Callable(self, "_quest_distance"), target_name, actor_name
 	)
@@ -1632,7 +1656,15 @@ func _load_cell_geometry(
 					var parent_node_name := str(mesh_entry.get("parent_node_name", ""))
 					var node_host := animated_node_hosts.get(parent_node_name) as Node3D
 					if node_host == null:
-						node_host = Node3D.new()
+						if should_collide:
+							var animated_body := AnimatableBody3D.new()
+							animated_body.collision_layer = 2
+							animated_body.collision_mask = 0
+							animated_body.sync_to_physics = true
+							animated_body.set_meta("reference_id", int(reference.get("form_id", 0)))
+							node_host = animated_body
+						else:
+							node_host = Node3D.new()
 						node_host.name = "NifNode_%d" % animated_node_hosts.size()
 						node_host.set_meta("nif_node_name", parent_node_name)
 						node_host.set_meta("reference_id", int(reference.get("form_id", 0)))
@@ -1648,6 +1680,11 @@ func _load_cell_geometry(
 				instance_count += 1
 		if animated_reference_root != null and not animated_node_hosts.is_empty():
 			_install_nif_animations(animated_reference_root, physics_metadata, animated_node_hosts)
+		var animated_collision_count := 0
+		if should_collide and animate_reference and not animated_node_hosts.is_empty():
+			animated_collision_count = _add_animated_reference_colliders(
+				animated_node_hosts, meshes
+			)
 		if is_pickup_item and not item_mesh_instances.is_empty():
 			var reference_id := int(reference.get("form_id", 0))
 			var item_display_name := str(reference.get("reference_name", "")).strip_edges()
@@ -1667,7 +1704,9 @@ func _load_cell_geometry(
 				"target_area": target_area,
 			}
 		if should_collide:
-			if _add_reference_collider(int(reference.get("form_id", 0)), reference_transform, model_path, is_exterior):
+			if animated_collision_count > 0:
+				collision_count += animated_collision_count
+			elif _add_reference_collider(int(reference.get("form_id", 0)), reference_transform, model_path, is_exterior):
 				collision_count += 1
 		if reference_count % 8 == 0:
 			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
@@ -1703,6 +1742,7 @@ func _load_cell_geometry(
 
 	if generation != _cell_load_generation:
 		return false
+	_trim_static_collision_for_animated_openings()
 	if not pending_dynamic_bodies.is_empty():
 		# Let this cell's static and terrain colliders enter the physics space before dynamic props wake up.
 		await get_tree().physics_frame
@@ -2339,6 +2379,314 @@ func _add_reference_collider(reference_id: int, reference_transform: Transform3D
 	if track_exterior:
 		_exterior_collision_bodies[reference_id] = static_body
 	return true
+
+func _add_animated_reference_colliders(node_hosts: Dictionary, meshes: Array) -> int:
+	# NIF mesh vertices are in model-root space; using the same animated node host as the visual
+	# makes each collision part follow the authored sequence instead of leaving a closed-pose blocker.
+	var faces_by_node: Dictionary = {}
+	for mesh_value: Variant in meshes:
+		var mesh_entry: Dictionary = mesh_value
+		var node_name := str(mesh_entry.get("parent_node_name", ""))
+		if not node_hosts.has(node_name):
+			continue
+		var mesh := mesh_entry.get("mesh") as Mesh
+		if mesh == null:
+			continue
+		var mesh_faces := mesh.get_faces()
+		if mesh_faces.size() < 3:
+			continue
+		var combined_faces: PackedVector3Array = faces_by_node.get(node_name, PackedVector3Array())
+		combined_faces.append_array(mesh_faces)
+		faces_by_node[node_name] = combined_faces
+
+	var body_count := 0
+	for node_name_value: Variant in faces_by_node:
+		var node_name := str(node_name_value)
+		var body := node_hosts.get(node_name) as AnimatableBody3D
+		if body == null:
+			continue
+		var faces: PackedVector3Array = faces_by_node[node_name]
+		var collision_shape := NifAssetLibrary.build_concave_shape(faces)
+		if collision_shape == null:
+			continue
+		var collision_instance := CollisionShape3D.new()
+		collision_instance.name = "AnimatedNifCollision"
+		collision_instance.shape = collision_shape
+		body.add_child(collision_instance)
+		body_count += 1
+	return body_count
+
+
+## The cell kit can contain static render-mesh triangles behind a separately animated wall or door. The original
+## walkable opening is defined by that animated NIF, so remove only the overlapping part of generated static collision.
+func _trim_static_collision_for_animated_openings() -> void:
+	var opening_boxes: Array[AABB] = []
+	for player_node: Node in cell_visual_root.find_children("*", "AnimationPlayer", true, false):
+		var animation_player := player_node as AnimationPlayer
+		if animation_player == null:
+			continue
+		var opening_geometry := _animated_opening_collision_bounds(animation_player)
+		var opening_box: AABB = opening_geometry.get("opening", AABB())
+		if opening_box.size.length_squared() <= 0.0001:
+			continue
+		var clearance := Vector3(0.08, 0.05, 0.08)
+		# Trim the wall panel's closed footprint, not its entire swing path. The panel thickness axis is the shallow
+		# horizontal dimension; extending only that axis clears backing collision without erasing the adjoining wall.
+		if opening_box.size.x > 0.0 and opening_box.size.z > 0.0:
+			if opening_box.size.x <= opening_box.size.z:
+				clearance.x = maxf(clearance.x, opening_box.size.x * 0.75)
+			else:
+				clearance.z = maxf(clearance.z, opening_box.size.z * 0.75)
+		opening_box.position -= clearance
+		opening_box.size += clearance * 2.0
+		opening_boxes.push_back(opening_box)
+	if opening_boxes.is_empty():
+		return
+
+	var affected_body_count := 0
+	var removed_triangle_count := 0
+	for body_node: Node in cell_visual_root.find_children("*", "StaticBody3D", true, false):
+		var body := body_node as StaticBody3D
+		# Imported Havok shapes already describe the authored solid geometry. Only trim our render-mesh fallback.
+		if body == null or not body.has_meta("model_path"):
+			continue
+		for child: Node in body.get_children():
+			var collision := child as CollisionShape3D
+			if collision == null or not (collision.shape is ConcavePolygonShape3D):
+				continue
+			var original_faces: PackedVector3Array = (collision.shape as ConcavePolygonShape3D).get_faces()
+			if original_faces.is_empty():
+				continue
+			var local_to_world := body.global_transform * collision.transform
+			var world_to_local := local_to_world.affine_inverse()
+			var remaining_faces := PackedVector3Array()
+			var removed_for_body := 0
+			for face_index in range(0, original_faces.size(), 3):
+				var triangle := PackedVector3Array([
+					local_to_world * original_faces[face_index],
+					local_to_world * original_faces[face_index + 1],
+					local_to_world * original_faces[face_index + 2],
+				])
+				var triangle_normal := (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]).normalized()
+				# Preserve floor and ceiling triangles inside the aperture. Cutting the panel's swept AABB through
+				# every face also removed the floor under the doorway, so actors fell while crossing it.
+				if absf(triangle_normal.y) >= 0.7:
+					remaining_faces.append_array(PackedVector3Array([
+						original_faces[face_index], original_faces[face_index + 1], original_faces[face_index + 2]
+					]))
+					continue
+				var fragments: Array[PackedVector3Array] = [triangle]
+				for opening_box: AABB in opening_boxes:
+					var next_fragments: Array[PackedVector3Array] = []
+					for fragment: PackedVector3Array in fragments:
+						var fragment_bounds := _polygon_bounds(fragment)
+						if not fragment_bounds.intersects(opening_box):
+							next_fragments.push_back(fragment)
+							continue
+						next_fragments.append_array(_subtract_aabb_from_polygon(fragment, opening_box))
+					fragments = next_fragments
+					if fragments.is_empty():
+						break
+				if fragments.size() == 1 and fragments[0].size() == 3 \
+						and fragments[0][0].is_equal_approx(triangle[0]) \
+						and fragments[0][1].is_equal_approx(triangle[1]) \
+						and fragments[0][2].is_equal_approx(triangle[2]):
+					remaining_faces.append_array(PackedVector3Array([
+						original_faces[face_index], original_faces[face_index + 1], original_faces[face_index + 2]
+					]))
+					continue
+				removed_for_body += 1
+				for fragment: PackedVector3Array in fragments:
+					if fragment.size() < 3:
+						continue
+					var local_origin := world_to_local * fragment[0]
+					for vertex_index in range(1, fragment.size() - 1):
+						remaining_faces.push_back(local_origin)
+						remaining_faces.push_back(world_to_local * fragment[vertex_index])
+						remaining_faces.push_back(world_to_local * fragment[vertex_index + 1])
+			if removed_for_body == 0:
+				continue
+			var trimmed_shape := ConcavePolygonShape3D.new()
+			trimmed_shape.backface_collision = true
+			trimmed_shape.set_faces(remaining_faces)
+			collision.shape = trimmed_shape
+			affected_body_count += 1
+			removed_triangle_count += removed_for_body
+	if affected_body_count > 0:
+		print("OpenOB navigation: trimmed %d static collision meshes around animated openings (%d triangles crossed openings)" % [
+			affected_body_count, removed_triangle_count
+		])
+
+
+func _animated_opening_collision_bounds(animation_player: AnimationPlayer) -> Dictionary:
+	var animation: Animation = null
+	for requested_name in ["Open", "Forward"]:
+		var sequence_name := quest_bridge._reference_animation_name(animation_player, requested_name)
+		if not sequence_name.is_empty():
+			animation = animation_player.get_animation(sequence_name)
+			break
+	if animation == null:
+		return {}
+	var animated_root := animation_player.get_parent() as Node3D
+	if animated_root == null:
+		return {}
+	var closed_bounds := AABB()
+	var has_closed_bounds := false
+	var panel_bounds := AABB()
+	var has_panel_bounds := false
+	var has_collision_motion := false
+	for body_node: Node in animated_root.find_children("*", "AnimatableBody3D", true, false):
+		var body := body_node as AnimatableBody3D
+		if body == null:
+			continue
+		var body_transforms: Array[Transform3D] = []
+		var body_has_motion := false
+		var first_transform: Variant = null
+		for track_index in range(animation.get_track_count()):
+			if animation.track_get_type(track_index) != Animation.TYPE_VALUE:
+				continue
+			var track_path: NodePath = animation.track_get_path(track_index)
+			if track_path.get_name_count() == 0 or str(track_path.get_name(0)) != body.name:
+				continue
+			var key_count := animation.track_get_key_count(track_index)
+			for key_index in range(key_count):
+				var value: Variant = animation.track_get_key_value(track_index, key_index)
+				if not value is Transform3D:
+					continue
+				var node_transform: Transform3D = value
+				if first_transform != null and _nif_collision_transform_moves(first_transform, node_transform):
+					body_has_motion = true
+				if first_transform == null:
+					first_transform = node_transform
+				body_transforms.push_back(node_transform)
+		if not body_has_motion:
+			continue
+		has_collision_motion = true
+		for shape_node: Node in body.get_children():
+			var collision := shape_node as CollisionShape3D
+			if collision == null or not (collision.shape is ConcavePolygonShape3D):
+				continue
+			var faces: PackedVector3Array = (collision.shape as ConcavePolygonShape3D).get_faces()
+			var closed_transform := animated_root.global_transform * body_transforms[0] * collision.transform
+			var body_panel_bounds := AABB()
+			var has_body_panel_bounds := false
+			var vertical_surface_area := 0.0
+			var horizontal_surface_area := 0.0
+			for face_index in range(0, faces.size(), 3):
+				var a := closed_transform * faces[face_index]
+				var b := closed_transform * faces[face_index + 1]
+				var c := closed_transform * faces[face_index + 2]
+				for point: Vector3 in [a, b, c]:
+					if not has_closed_bounds:
+						closed_bounds = AABB(point, Vector3.ZERO)
+						has_closed_bounds = true
+					else:
+						closed_bounds = closed_bounds.expand(point)
+				var cross_product := (b - a).cross(c - a)
+				var surface_area := cross_product.length()
+				if surface_area <= 0.000001:
+					continue
+				var normal_y := absf(cross_product.normalized().y)
+				if normal_y < 0.7:
+					vertical_surface_area += surface_area
+					for point: Vector3 in [a, b, c]:
+						if not has_body_panel_bounds:
+							body_panel_bounds = AABB(point, Vector3.ZERO)
+							has_body_panel_bounds = true
+						else:
+							body_panel_bounds = body_panel_bounds.expand(point)
+				else:
+					horizontal_surface_area += surface_area
+			if has_body_panel_bounds and vertical_surface_area > horizontal_surface_area * 1.2:
+				for point: Vector3 in [body_panel_bounds.position, body_panel_bounds.end]:
+					if not has_panel_bounds:
+						panel_bounds = AABB(point, Vector3.ZERO)
+						has_panel_bounds = true
+					else:
+						panel_bounds = panel_bounds.expand(point)
+	if not has_collision_motion or not has_closed_bounds:
+		return {}
+	return {"opening": panel_bounds if has_panel_bounds else closed_bounds, "closed": closed_bounds}
+
+
+func _nif_collision_transform_moves(first: Transform3D, next: Transform3D) -> bool:
+	return (
+		first.origin.distance_to(next.origin) > 0.05
+		or first.basis.x.distance_to(next.basis.x) > 0.001
+		or first.basis.y.distance_to(next.basis.y) > 0.001
+		or first.basis.z.distance_to(next.basis.z) > 0.001
+	)
+
+
+func _polygon_bounds(polygon: PackedVector3Array) -> AABB:
+	if polygon.is_empty():
+		return AABB()
+	var bounds := AABB(polygon[0], Vector3.ZERO)
+	for point_index in range(1, polygon.size()):
+		bounds = bounds.expand(polygon[point_index])
+	return bounds
+
+
+func _subtract_aabb_from_polygon(polygon: PackedVector3Array, box: AABB) -> Array[PackedVector3Array]:
+	var pending: Array[PackedVector3Array] = [polygon]
+	var outside_pieces: Array[PackedVector3Array] = []
+	for axis in range(3):
+		for plane_spec: Array in [[box.position[axis], true], [box.end[axis], false]]:
+			var next_pending: Array[PackedVector3Array] = []
+			for fragment: PackedVector3Array in pending:
+				var split := _split_polygon_by_axis_plane(
+					fragment, axis, float(plane_spec[0]), bool(plane_spec[1])
+				)
+				var outside: PackedVector3Array = split.get("outside", PackedVector3Array())
+				var inside: PackedVector3Array = split.get("inside", PackedVector3Array())
+				if outside.size() >= 3:
+					outside_pieces.push_back(outside)
+				if inside.size() >= 3:
+					next_pending.push_back(inside)
+			pending = next_pending
+			if pending.is_empty():
+				break
+		if pending.is_empty():
+			break
+	return outside_pieces
+
+
+func _split_polygon_by_axis_plane(
+	polygon: PackedVector3Array, axis: int, plane: float, keep_greater: bool
+) -> Dictionary:
+	var inside := PackedVector3Array()
+	var outside := PackedVector3Array()
+	if polygon.size() < 3:
+		return {"inside": inside, "outside": outside}
+	var previous := polygon[polygon.size() - 1]
+	var previous_inside := previous[axis] >= plane if keep_greater else previous[axis] <= plane
+	for current: Vector3 in polygon:
+		var current_inside := current[axis] >= plane if keep_greater else current[axis] <= plane
+		if current_inside != previous_inside:
+			var denominator := current[axis] - previous[axis]
+			if absf(denominator) > 0.000001:
+				var intersection := previous.lerp(current, (plane - previous[axis]) / denominator)
+				_append_polygon_point(inside, intersection)
+				_append_polygon_point(outside, intersection)
+		if current_inside:
+			_append_polygon_point(inside, current)
+		else:
+			_append_polygon_point(outside, current)
+		previous = current
+		previous_inside = current_inside
+	_remove_duplicate_polygon_end(inside)
+	_remove_duplicate_polygon_end(outside)
+	return {"inside": inside, "outside": outside}
+
+
+func _append_polygon_point(polygon: PackedVector3Array, point: Vector3) -> void:
+	if polygon.is_empty() or polygon[polygon.size() - 1].distance_squared_to(point) > 0.00000001:
+		polygon.push_back(point)
+
+
+func _remove_duplicate_polygon_end(polygon: PackedVector3Array) -> void:
+	if polygon.size() > 1 and polygon[0].distance_squared_to(polygon[polygon.size() - 1]) <= 0.00000001:
+		polygon.remove_at(polygon.size() - 1)
 
 func _create_pickup_target_area(reference_id: int, reference_transform: Transform3D, meshes: Array) -> Area3D:
 	var model_bounds := AABB()
@@ -4020,11 +4368,16 @@ func _setup_cell_once(stream_generation: int) -> void:
 		await director.build_navigation_tiles()
 		if stream_generation != _npc_stream_generation:
 			return
+	if data_reader != null:
+		director.set_pathgrid(
+			data_reader.find_pathgrid(int(current_cell.get("form_id", 0))), game_units_to_meters
+		)
 	# The quest drives the NPCs' packages, so it starts once the cell's actors exist.
 	if quest_world == null:
 		for line: String in start_quest("CharacterGen", 0):
 			print("OpenOB quest: " + line)
 		_run_debug_stages()
+
 
 ## Developer check: OPENOB_DEBUG_STAGES="CharacterGen:58,CharacterGen:64" enters those quest stages one after the other
 ## (a few hundred frames apart) once the cell's quest runs, so the effects of late intro stages (idles, speech) can be
