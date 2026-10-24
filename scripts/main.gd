@@ -4375,6 +4375,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		}
 		_npc_actors.push_back(actor_state)
 		_register_quest_actor(actor_state)
+		# NPCs stream in after the quest started, so they pick up their package route here.
+		_refresh_actor_route(actor_state)
 		_npc_pending_roots.erase(actor_root)
 		_npc_loaded_reference_ids[reference_id] = true
 		_apply_face_expression(actor_state)
