@@ -1558,6 +1558,22 @@ void test_idle_folder_cycle_ends() {
     CHECK(found != nullptr && found->form_id == 0x4);
 }
 
+// An `if` nested past the limit is reported and skipped as a whole, so the `endif`s of the outer ifs still match.
+void test_deep_if_nesting_keeps_structure() {
+    std::string source = "begin onLoad\n";
+    const int depth = 70;
+    for (int i = 0; i < depth; ++i) source += "if x == 1\n";
+    source += "set deep to 1\n";
+    for (int i = 0; i < depth; ++i) source += "endif\n";
+    source += "set after to 2\nend\n";
+    const auto ast = oblivion::parse_script(source);
+    for (const auto& d : ast.diagnostics) std::cerr << "DIAG line " << d.line << ": " << d.message << "\n";
+    CHECK(ast.diagnostics.size() == 1);  // only the first too-deep `if`
+    CHECK(ast.blocks.size() == 1 && !ast.blocks[0].body.empty());
+    // The statement after the outermost `endif` is still at the top level of the block.
+    CHECK(ast.blocks[0].body.size() == 2 && ast.blocks[0].body[1].name == "after");
+}
+
 // Commands the review tests use, matched without regard to case.
 oblivion::ScriptCommandLookup review_commands() {
     return [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
@@ -2014,6 +2030,7 @@ int main() {
         test_subtraction_without_command_table();
         test_operator_chain_depth_is_bounded();
         test_idle_folder_cycle_ends();
+        test_deep_if_nesting_keeps_structure();
         test_actor_variables_stay_out_of_quest();
         test_say_to_cycles_stop();
         test_stage_oscillation_is_deterministic();

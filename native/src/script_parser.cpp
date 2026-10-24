@@ -138,6 +138,24 @@ private:
         while (peek().kind == ScriptTokenKind::Newline) advance();
     }
 
+    // Skips an `if` whose keyword was just read, through its matching `endif` (or up to the block's `end`).
+    void skip_if_block() {
+        int level = 1;
+        bool after_else = false;  // `else if` continues the arm, it does not open a block
+        while (peek().kind != ScriptTokenKind::EndOfFile) {
+            const auto& token = peek();
+            if (is_keyword(token, "end") || is_keyword(token, "begin")) return;
+            if (is_keyword(token, "endif") && --level == 0) {
+                advance();
+                skip_line();
+                return;
+            }
+            if (is_keyword(token, "if") && !after_else) ++level;
+            after_else = is_keyword(token, "else");
+            advance();
+        }
+    }
+
     void skip_line() {
         while (peek().kind != ScriptTokenKind::EndOfFile && peek().kind != ScriptTokenKind::Newline) advance();
         if (peek().kind == ScriptTokenKind::Newline) advance();
@@ -237,11 +255,24 @@ private:
         if (word == "if") {
             advance();
             statement.kind = ScriptStmtKind::If;
+            if (depth_ >= kMaxNesting) {
+                // Skipping the whole block keeps the outer `if`s closed by their own `endif`.
+                diagnostics_.push_back({token.line, "nested more than " + std::to_string(kMaxNesting) + " levels deep"});
+                skip_if_block();
+                return statement;
+            }
             const DepthGuard guard(*this, token.line);
             // `end` and `begin` end a body too: with an `endif` missing, the block's own `end` is not a stray token.
             ScriptBranch arm;
-            arm.condition = parse_expression();
-            end_statement();
+            try {
+                arm.condition = parse_expression();
+                end_statement();
+            } catch (const SyntaxError& error) {
+                // A condition that fails (or nests too deeply) must not leave its body to be read as outer statements.
+                diagnostics_.push_back({error.line, error.message});
+                skip_if_block();
+                return statement;
+            }
             arm.body = parse_statements({"elseif", "else", "endif", "end", "begin"});
             statement.branches.push_back(std::move(arm));
             while (true) {
