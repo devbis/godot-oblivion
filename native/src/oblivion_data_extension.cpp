@@ -336,6 +336,19 @@ public:
         return data_.get();
     }
 
+    // The script command table of an executable, read once and shared afterwards.
+    std::shared_ptr<const std::vector<oblivion::ScriptCommand>> command_table(const std::string& executable,
+                                                                              const std::string& cache) const {
+        std::lock_guard<std::mutex> lock(command_table_mutex_);
+        const std::string key = executable + '\n' + cache;
+        if (!command_table_ || command_table_key_ != key) {
+            command_table_ = std::make_shared<const std::vector<oblivion::ScriptCommand>>(
+                oblivion::load_command_table(executable, cache));
+            command_table_key_ = key;
+        }
+        return command_table_;
+    }
+
     std::shared_ptr<const oblivion::GameData> shared_game_data() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return data_;
@@ -350,6 +363,14 @@ public:
         const CharString quest_value = quest_editor_id.utf8();
         const CharString executable_value = executable_path.utf8();
         const CharString cache_value = cache_dir.utf8();
+        // Reading the executable is slow: do it outside the state mutex, once per executable.
+        std::shared_ptr<const std::vector<oblivion::ScriptCommand>> commands;
+        try {
+            commands = command_table(executable_value.get_data(), cache_value.get_data());
+        } catch (const std::exception& error) {
+            result["error"] = as_string(error.what());
+            return result;
+        }
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) {
             result["error"] = String("game data is not loaded");
@@ -361,10 +382,9 @@ public:
             return result;
         }
         try {
-            const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
             const auto* quest_script = data_->find_script(quest->script_form_id);
             for (const auto& run : oblivion::run_quest_stage(*quest, static_cast<unsigned>(stage),
-                                                             oblivion::make_command_lookup(commands), quest_script,
+                                                             oblivion::make_command_lookup(*commands), quest_script,
                                                              quest_state_)) {
                 runs.push_back(stage_run_to_dictionary(run));
             }
@@ -1022,6 +1042,9 @@ private:
     }
 
     mutable std::mutex state_mutex_;
+    mutable std::mutex command_table_mutex_;
+    mutable std::string command_table_key_;
+    mutable std::shared_ptr<const std::vector<oblivion::ScriptCommand>> command_table_;
     // Shared: a quest world keeps the game data it was built from alive after a reload replaces it here.
     std::shared_ptr<oblivion::GameData> data_;
     // Quest variables persist between stage runs of the loaded game.
@@ -1448,8 +1471,8 @@ Ref<OblivionQuestWorld> OblivionData::create_quest_world(const String& executabl
     const oblivion::GameData* game = shared_game.get();
     if (!game) return Ref<OblivionQuestWorld>();
     try {
-        const auto commands = oblivion::load_command_table(executable_value.get_data(), cache_value.get_data());
-        auto world = std::make_unique<oblivion::QuestWorld>(oblivion::make_command_lookup(commands));
+        const auto commands = command_table(executable_value.get_data(), cache_value.get_data());
+        auto world = std::make_unique<oblivion::QuestWorld>(oblivion::make_command_lookup(*commands));
         world->set_answer(oblivion::answer_fresh_player);
         // CTDA "use global": the comparison is the FLTV of a GLOB record.
         world->set_global_value([shared_game](std::uint32_t form_id) -> std::optional<double> {
