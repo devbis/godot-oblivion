@@ -1,6 +1,7 @@
 #include "oblivion/quest_runtime.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace oblivion {
 
@@ -74,14 +75,16 @@ namespace {
 
 constexpr int kMaxIdleDepth = 16;  // a folder cycle in broken data must end
 
+// `visited` holds the folders already walked: their conditions do not change during one pick, so a folder reached
+// again (through a cycle or a second parent) finds nothing new, and the walk stays linear in broken data.
 const IdleRecord* walk_idles(const IdleChildren& children, std::uint32_t parent, ScriptHost& host,
-                             std::vector<std::string>* unanswered, int depth) {
-    if (depth > kMaxIdleDepth) return nullptr;
+                             std::vector<std::string>* unanswered, int depth, std::unordered_set<std::uint32_t>& visited) {
+    if (depth > kMaxIdleDepth || !visited.insert(parent).second) return nullptr;
     for (const auto* idle : children(parent)) {
         if (!idle || idle->form_id == parent) continue;
         if (!evaluate_conditions(idle->conditions, host, unanswered)) continue;
         if (!idle->is_folder()) return idle;
-        if (const auto* found = walk_idles(children, idle->form_id, host, unanswered, depth + 1)) return found;
+        if (const auto* found = walk_idles(children, idle->form_id, host, unanswered, depth + 1, visited)) return found;
     }
     return nullptr;
 }
@@ -90,7 +93,8 @@ const IdleRecord* walk_idles(const IdleChildren& children, std::uint32_t parent,
 
 const IdleRecord* select_idle(const IdleChildren& children, ScriptHost& host, std::vector<std::string>* unanswered) {
     if (!children) return nullptr;
-    return walk_idles(children, 0, host, unanswered, 0);
+    std::unordered_set<std::uint32_t> visited;
+    return walk_idles(children, 0, host, unanswered, 0, visited);
 }
 
 } // namespace oblivion
