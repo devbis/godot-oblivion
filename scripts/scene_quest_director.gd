@@ -104,6 +104,7 @@ func _pathgrid_world_position(game_position: Vector3, game_units_to_meters: floa
 ## Bakes the walkable surfaces of the loaded cell in tiles. Each tile takes the static triangles that touch it, with an
 ## overlap, so the tiles connect at their edges and stairs and floors on different levels join.
 func build_navigation_tiles() -> void:
+	var started_ms := Time.get_ticks_msec()
 	clear_navigation_tiles()
 	var bodies: Array = []
 	_collect_static_bodies(scene, bodies)
@@ -141,25 +142,10 @@ func build_navigation_tiles() -> void:
 	var columns := int(ceil((highest.x - lowest.x) / NAVIGATION_TILE_SIZE_M))
 	var rows := int(ceil((highest.z - lowest.z) / NAVIGATION_TILE_SIZE_M))
 	var polygon_count := 0
+	var tile_triangles := bin_triangles_into_tiles(triangles, lowest, columns, rows)
 	for column in range(columns):
 		for row in range(rows):
-			var min_x := lowest.x + column * NAVIGATION_TILE_SIZE_M - NAVIGATION_TILE_OVERLAP_M
-			var min_z := lowest.z + row * NAVIGATION_TILE_SIZE_M - NAVIGATION_TILE_OVERLAP_M
-			var max_x := min_x + NAVIGATION_TILE_SIZE_M + 2.0 * NAVIGATION_TILE_OVERLAP_M
-			var max_z := min_z + NAVIGATION_TILE_SIZE_M + 2.0 * NAVIGATION_TILE_OVERLAP_M
-			var tile := PackedVector3Array()
-			for index in range(0, triangles.size(), 3):
-				var a := triangles[index]
-				var b := triangles[index + 1]
-				var c := triangles[index + 2]
-				if maxf(a.x, maxf(b.x, c.x)) < min_x or minf(a.x, minf(b.x, c.x)) > max_x:
-					continue
-				if maxf(a.z, maxf(b.z, c.z)) < min_z or minf(a.z, minf(b.z, c.z)) > max_z:
-					continue
-				# The bake expects the opposite winding to the one the collision faces come with.
-				tile.push_back(a)
-				tile.push_back(c)
-				tile.push_back(b)
+			var tile: PackedVector3Array = tile_triangles.get(column * rows + row, PackedVector3Array())
 			if tile.is_empty():
 				continue
 			var geometry := NavigationMeshSourceGeometryData3D.new()
@@ -179,10 +165,45 @@ func build_navigation_tiles() -> void:
 			var region := NavigationRegion3D.new()
 			region.navigation_mesh = nav_mesh
 			navigation_tiles.add_child(region)
-	print("OpenOB navigation: %d tiles, %d polygons" % [navigation_tiles.get_child_count(), polygon_count])
+	print("OpenOB navigation: %d tiles, %d polygons in %d ms" % [
+		navigation_tiles.get_child_count(), polygon_count, Time.get_ticks_msec() - started_ms
+	])
 	# The navigation map takes the new regions on its next physics frames.
 	await scene.get_tree().physics_frame
 	await scene.get_tree().physics_frame
+
+## Sorts the triangles into the tiles whose overlapped rectangle they touch, keyed by `column * rows + row`. Each
+## triangle is visited once rather than once per tile, so a cell with a distant collider and many empty tiles stays cheap.
+## The bake expects the opposite winding to the one the collision faces come with, so the vertices go in as a, c, b.
+static func bin_triangles_into_tiles(
+	triangles: PackedVector3Array, lowest: Vector3, columns: int, rows: int
+) -> Dictionary:
+	var tiles := {}
+	for index in range(0, triangles.size(), 3):
+		var a := triangles[index]
+		var b := triangles[index + 1]
+		var c := triangles[index + 2]
+		var column_from := _first_touching_tile(minf(a.x, minf(b.x, c.x)), lowest.x)
+		var column_to := _last_touching_tile(maxf(a.x, maxf(b.x, c.x)), lowest.x)
+		var row_from := _first_touching_tile(minf(a.z, minf(b.z, c.z)), lowest.z)
+		var row_to := _last_touching_tile(maxf(a.z, maxf(b.z, c.z)), lowest.z)
+		for column in range(maxi(column_from, 0), mini(column_to, columns - 1) + 1):
+			for row in range(maxi(row_from, 0), mini(row_to, rows - 1) + 1):
+				var key := column * rows + row
+				if not tiles.has(key):
+					tiles[key] = PackedVector3Array()
+				# Indexing the dictionary appends in place; a local copy would be duplicated on every push.
+				tiles[key].push_back(a)
+				tiles[key].push_back(c)
+				tiles[key].push_back(b)
+	return tiles
+
+# Tile `n` spans [origin + n * size - overlap, origin + (n + 1) * size + overlap].
+static func _first_touching_tile(minimum: float, origin: float) -> int:
+	return int(ceil((minimum - origin - NAVIGATION_TILE_OVERLAP_M) / NAVIGATION_TILE_SIZE_M)) - 1
+
+static func _last_touching_tile(maximum: float, origin: float) -> int:
+	return int(floor((maximum - origin + NAVIGATION_TILE_OVERLAP_M) / NAVIGATION_TILE_SIZE_M))
 
 func clear_navigation_tiles() -> void:
 	if is_instance_valid(navigation_tiles):
