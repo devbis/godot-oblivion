@@ -23,7 +23,7 @@ func is_actor_removed(reference_id: int) -> bool:
 ## Forgets door and actor state of the previous cell. Doors are rebuilt closed when a cell loads, so their open marks go.
 func reset_cell_state(world: Node) -> void:
 	for meta_name: StringName in world.get_meta_list():
-		if str(meta_name).begins_with("door_open_"):
+		if str(meta_name).begins_with("door_open_") or str(meta_name).begins_with("lock_level_"):
 			world.remove_meta(meta_name)
 
 
@@ -74,6 +74,8 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 			return _deactivate(target, command, world, label)
 		"setopenstate":
 			return _set_open_state(target, arguments, references, world, label)
+		"lock", "unlock":
+			return _set_lock_state(target, command, arguments, references, world, label)
 		"playgroup":
 			return _play_group(target, arguments, references, world, label)
 		"speech":
@@ -208,6 +210,45 @@ func _set_open_state(target: String, arguments: Array, references: Dictionary, w
 	if reference.is_empty():
 		return "not applied: %s, %s is not in this cell" % [label, target]
 	return _apply_door_open_state(reference, int(arguments[0]) != 0, world, label)
+
+
+func _set_lock_state(
+	target: String, command: String, arguments: Array, references: Dictionary, world: Node3D, label: String
+) -> String:
+	if target.is_empty():
+		return "not applied: %s needs a target" % label
+	var reference: Dictionary = references.get(target, {})
+	if reference.is_empty():
+		return "not applied: %s, %s is not in this cell" % [label, target]
+	var reference_id := int(reference.get("form_id", 0))
+	var state_key := "lock_level_%08x" % reference_id
+	var lock_level := 0
+	if command == "lock":
+		lock_level = maxi(1, int(arguments[0])) if not arguments.is_empty() else 1
+	world.set_meta(state_key, lock_level)
+	var state_label := "unlocked"
+	if lock_level > 0:
+		state_label = "lock level %d" % lock_level
+	return "applied: %s (%s)" % [label, state_label]
+
+
+func get_door_open_state(reference: Dictionary, world: Node3D) -> int:
+	var state_key := "door_open_%08x" % int(reference.get("form_id", 0))
+	if world.has_meta(state_key) and bool(world.get_meta(state_key)):
+		return 3
+	return 0
+
+
+func is_door_locked(reference: Dictionary, world: Node3D) -> bool:
+	var state_key := "lock_level_%08x" % int(reference.get("form_id", 0))
+	return world.has_meta(state_key) and int(world.get_meta(state_key)) > 0
+
+
+func door_lock_level(reference: Dictionary, world: Node3D) -> int:
+	var state_key := "lock_level_%08x" % int(reference.get("form_id", 0))
+	if world.has_meta(state_key):
+		return int(world.get_meta(state_key))
+	return int(reference.get("lock_level", 0))
 
 
 func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D, label: String) -> String:

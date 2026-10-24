@@ -23,17 +23,28 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 
 namespace godot {
 namespace {
+
+std::string lower_ascii(std::string_view value) {
+    std::string result(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return result;
+}
 
 PackedFloat32Array as_packed_coefficients(const std::vector<float>& coefficients) {
     PackedFloat32Array result;
@@ -1019,9 +1030,36 @@ public:
     }
 
     // Runs GameMode of every started quest once after `seconds` have passed since the last tick.
-    Dictionary tick(double seconds, const Callable& distance) {
+    Dictionary tick(double seconds, const Callable& distance, const Callable& world_command) {
         if (!world_) return Dictionary();
-        return tick_to_dictionary(world_->tick(seconds, distance_function(distance)));
+        const auto previous_answer = world_->answer();
+        if (world_command.is_valid()) {
+            world_->set_answer([previous_answer, world_command](std::string_view command,
+                                                               const oblivion::ScriptValue* target,
+                                                               const std::vector<oblivion::ScriptValue>& arguments)
+                                   -> std::optional<oblivion::ScriptValue> {
+                if (lower_ascii(command) == "getopenstate") {
+                    Array godot_arguments;
+                    for (const auto& argument : arguments) {
+                        godot_arguments.push_back(argument.is_text ? Variant(utf8_text(argument.text))
+                                                                   : Variant(argument.number));
+                    }
+                    const Variant value = world_command.call(
+                        utf8_text(std::string(command)),
+                        target && target->is_text ? Variant(utf8_text(target->text)) : Variant(String()),
+                        godot_arguments);
+                    if (value.get_type() == Variant::FLOAT)
+                        return oblivion::ScriptValue::from_number(static_cast<double>(value));
+                    if (value.get_type() == Variant::INT)
+                        return oblivion::ScriptValue::from_number(static_cast<int64_t>(value));
+                }
+                if (previous_answer) return previous_answer(command, target, arguments);
+                return std::nullopt;
+            });
+        }
+        const auto result = tick_to_dictionary(world_->tick(seconds, distance_function(distance)));
+        world_->set_answer(previous_answer);
+        return result;
     }
 
     // The stage of a quest, or -1 when the quest is not in the world.
@@ -1230,7 +1268,8 @@ public:
 
     static void _bind_methods() {
         ClassDB::bind_method(D_METHOD("start", "quest_editor_id", "stage", "distance"), &OblivionQuestWorld::start);
-        ClassDB::bind_method(D_METHOD("tick", "seconds", "distance"), &OblivionQuestWorld::tick);
+        ClassDB::bind_method(D_METHOD("tick", "seconds", "distance", "world_command"), &OblivionQuestWorld::tick,
+                             DEFVAL(Callable()));
         ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
         ClassDB::bind_method(D_METHOD("add_actor", "npc_form_id", "reference_name"), &OblivionQuestWorld::add_actor);
         ClassDB::bind_method(D_METHOD("set_actor_package", "reference_name", "package_form_id"), &OblivionQuestWorld::set_actor_package);

@@ -133,6 +133,8 @@ func acquire() -> Dictionary:
 			if display_name.is_empty():
 				display_name = "Door"
 			var lock_level := int(reference.get("lock_level", 0))
+			if world_host.has_method("door_lock_level"):
+				lock_level = int(world_host.call("door_lock_level", reference))
 			var locked := lock_level > 0
 			var door_action := "locked" if locked else ("enter" if int(reference.get("teleport_cell_id", 0)) != 0 else "open")
 			return _snapshot("door", door_action, reference_id, display_name, {

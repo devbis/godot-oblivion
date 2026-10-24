@@ -617,7 +617,9 @@ func _physics_process(delta: float) -> void:
 	if _dialogue_active or _dialogue_exit_transition:
 		return
 	_sync_player_actor_values_to_quest_world()
-	var result: Dictionary = quest_world.tick(delta, Callable(self, "_quest_distance"))
+	var result: Dictionary = quest_world.tick(
+		delta, Callable(self, "_quest_distance"), Callable(self, "_quest_world_command")
+	)
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
 	if _needs_route_refresh(result):
@@ -682,6 +684,8 @@ func _open_doors_on_npc_routes() -> void:
 		var actor_radius := _actor_collision_radius(root)
 		for door: Dictionary in director.door_references:
 			var reference: Dictionary = door.get("reference", {})
+			if quest_bridge.is_door_locked(reference, self):
+				continue
 			var state_key := "door_open_%08x" % int(reference.get("form_id", 0))
 			if has_meta(state_key) and bool(get_meta(state_key)):
 				continue
@@ -958,6 +962,22 @@ func _quest_distance(from: String, to: String) -> Variant:
 	if from_position == null or to_position == null:
 		return null
 	return (from_position as Vector3).distance_to(to_position as Vector3) / game_units_to_meters
+
+## Answers world-state queries made by GameMode scripts during a tick.
+func _quest_world_command(command: String, target: String, _arguments: Array) -> Variant:
+	if command.to_lower() != "getopenstate":
+		return null
+	var wanted_name := target.strip_edges().to_lower()
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("reference_name", "")).to_lower() != wanted_name:
+			continue
+		return quest_bridge.get_door_open_state(reference, self)
+	return null
+
+
+func door_lock_level(reference: Dictionary) -> int:
+	return quest_bridge.door_lock_level(reference, self)
 
 ## Origins of the loaded cell's references by name and by form id, built once per cell: a quest asks for a distance on
 ## every physics tick, and scanning every reference each time is wasteful.
