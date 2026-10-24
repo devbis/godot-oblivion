@@ -119,13 +119,14 @@ func try_step_up(body: CharacterBody3D, horizontal_motion: Vector3, max_step_hei
 ## floor snapping misses the lower tread. A contact within one step below the
 ## feet is taken as the next tread, and the same grace period carries the descent.
 func try_step_down(body: CharacterBody3D, max_step_height: float) -> void:
+	var min_floor_dot := cos(body.floor_max_angle)
 	var drop := KinematicCollision3D.new()
 	var found := body.test_move(body.global_transform, Vector3.DOWN * (max_step_height + body.safe_margin), drop, body.safe_margin)
 	if (
 		not found
 		or drop.get_collider() is CharacterBody3D
 		or drop.get_collider() is RigidBody3D
-		or drop.get_normal().dot(Vector3.UP) <= 0.0
+		or drop.get_normal().dot(Vector3.UP) < min_floor_dot
 	):
 		# Nothing within one step below: a real drop, so gravity takes over.
 		grace_frames = 0
