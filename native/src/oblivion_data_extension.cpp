@@ -342,11 +342,6 @@ public:
     // data so the records it reads stay alive. Returns null when the command table cannot be read.
     Ref<OblivionQuestWorld> create_quest_world(const String& executable_path, const String& cache_dir) const;
 
-    const oblivion::GameData* game_data() const {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        return data_.get();
-    }
-
     // The script command table of an executable, read once and shared afterwards.
     std::shared_ptr<const std::vector<oblivion::ScriptCommand>> command_table(const std::string& executable,
                                                                               const std::string& cache) const {
