@@ -18,6 +18,9 @@ const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
+const AnimationSampling := preload("res://scripts/animation_sampling.gd")
+const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
+const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
 	"fFatigueJumpBase", "fFatigueJumpMult", "fMagickaReturnBase", "fMagickaReturnMult",
@@ -70,6 +73,16 @@ const PLAYER_FACE_DETAIL_PARTS := ActorFactory.PLAYER_FACE_DETAIL_PARTS
 const FACE_EXPRESSION_CYCLE := ["", "Happy", "Anger", "Surprise", "Sad", "Fear"]
 const PICKUP_TARGET_COLLISION_LAYER := 8
 const FIRST_PERSON_HIDDEN_EQUIPMENT_SLOTS := 0x002F
+const WEAPON_TYPE_BOW := 5
+## Where a drawn weapon is held and where it is sheathed on the rig, by WEAP type: one-handed weapons hang at the side,
+## two-handed weapons, staves and bows on the back. A bow is held in the left hand.
+const WEAPON_HOLD_BONES := {5: "Torch"}
+const WEAPON_STOW_BONES := {0: "SideWeapon", 2: "SideWeapon"}
+const ARROW_SPEED_MPS := 45.0
+const SPELL_BOLT_SPEED_MPS := 22.0
+const AIM_RAY_LENGTH_M := 120.0
+const MELEE_BASE_REACH_M := 1.6
+const MELEE_PUSH_IMPULSE := 4.0
 const EXTERIOR_CELL_SIZE := 4096.0
 const EXTERIOR_STREAM_RADIUS := 9
 const EXTERIOR_STATIC_REFERENCE_RADIUS := 6
@@ -169,6 +182,12 @@ var _player_inventory: Dictionary = {}
 var _player_equipment: Dictionary = {}
 var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
+var _player_weapon_record: Dictionary = {}
+var _weapon_drawn := false
+var _arms: FirstPersonArms
+var _next_attack_left := false
+var _arrow_source_meshes: Array = []
+var _pending_cast: Dictionary = {}
 var _player_base_record: Dictionary = {}
 var _player_spell_form_ids: Array[int] = []
 var _player_selected_spell_form_id := 0
@@ -316,6 +335,7 @@ func _process(_delta: float) -> void:
 		if not _inventory_open:
 			_update_player_animation(_delta)
 		player.set_first_person_eye_anchor(_player_first_person_camera_anchor())
+		_update_first_person_arms(_delta)
 		if _player_first_person_mode != player.is_first_person:
 			_player_first_person_mode = player.is_first_person
 			_refresh_player_first_person_visibility()
@@ -341,10 +361,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		return
 	if is_instance_valid(player):
-		var grabber_handled_input := false
-		if not _world_loading and not _inventory_open and not player.face_preview_enabled:
+		var grabber_handled_input := _handle_combat_input(event)
+		if not grabber_handled_input and not _world_loading and not _inventory_open and not player.face_preview_enabled:
 			grabber_handled_input = physics_grabber.handle_input(event)
-		else:
+		elif not grabber_handled_input:
 			physics_grabber.release_without_throw()
 		if not grabber_handled_input:
 			player.handle_camera_input(event)
@@ -355,10 +375,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		for line: String in report:
 			print("OpenOB quest: " + line)
 	elif event.keycode == KEY_F:
+		_toggle_weapon_drawn()
+	elif event.keycode == KEY_X:
+		_cycle_player_weapon()
+	elif event.keycode == KEY_G:
 		_cycle_nearest_npc_face_expression()
 	elif event.keycode == KEY_N:
 		_cycle_player_face_profile()
-	elif event.keycode == KEY_G:
+	elif event.keycode == KEY_H:
 		_cycle_player_face_expression()
 	elif event.keycode == KEY_I:
 		if _gesture_panel_open():
@@ -1825,7 +1849,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nQ cycle spell · C cast self spell · I inventory · Hold Mouse1 to grab · release to drop · Mouse2 throw · wheel adjusts distance · Space interact · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nQ cycle spell · C cast spell · F draw/sheathe weapon · X next weapon · drawn: Mouse1 attack, Mouse2 block · I inventory · Hold Mouse1 to grab · release to drop · Mouse2 throw · wheel adjusts distance · Space interact · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
@@ -3033,6 +3057,11 @@ func _load_player_avatar() -> void:
 	_refresh_player_face_profile_hint()
 	print("OpenOB player FaceGen expressions: %s" % str(_player_face_state.expression_cycle))
 	var starting_gear_count := await _load_player_starting_gear()
+	_arms = FirstPersonArms.new(self, player.camera, game_units_to_meters)
+	_arms.clip_event.connect(_on_arms_clip_event)
+	await _arms.build()
+	_sync_arms_equipment()
+	_sync_arms_weapon(false)
 	_active_animation = ""
 	_player_was_on_floor = true
 	if part_count > 0:
@@ -3259,7 +3288,7 @@ func _refresh_player_face_profile_hint() -> void:
 		return
 	var profile: Dictionary = _player_face_profiles[_player_face_profile_index]
 	var expression := str(_player_face_state.get("face_expression", "")) if not _player_face_state.is_empty() else ""
-	face_profile_label.text = "C · Face: %s (%d/%d)\nG · Expression: %s" % [
+	face_profile_label.text = "N · Face: %s (%d/%d)\nH · Expression: %s" % [
 		str(profile.get("name", "Default")),
 		_player_face_profile_index + 1,
 		_player_face_profiles.size(),
@@ -3293,7 +3322,9 @@ func _equip_player_item(form_id: int) -> bool:
 		return false
 	var item_meshes: Array[MeshInstance3D]
 	if item_type == "WEAP":
-		item_meshes = await actors.add_actor_model(_player_avatar, _player_skeleton, model_path, "Bip01 R Hand")
+		var weapon_record := _find_weapon_record(form_id)
+		var mount_bone := _weapon_mount_bone(int(weapon_record.get("weapon_type", 0)))
+		item_meshes = await actors.add_actor_model(_player_avatar, _player_skeleton, model_path, mount_bone)
 		if item_meshes.is_empty():
 			return false
 		for previous_mesh in _player_weapon_meshes:
@@ -3301,6 +3332,8 @@ func _equip_player_item(form_id: int) -> bool:
 				previous_mesh.queue_free()
 		_player_weapon_meshes = item_meshes
 		_player_weapon_form_id = form_id
+		_player_weapon_record = weapon_record
+		_sync_arms_weapon(true)
 		return true
 	var slots := int(data_reader.get_item_biped_slots(form_id))
 	if slots == 0:
@@ -3321,10 +3354,66 @@ func _equip_player_item(form_id: int) -> bool:
 		replaced_item_ids.push_back(equipped_id)
 	for equipped_id in replaced_item_ids:
 		_player_equipment.erase(equipped_id)
-	_player_equipment[form_id] = {"slots": slots, "meshes": item_meshes}
+	_player_equipment[form_id] = {"slots": slots, "meshes": item_meshes, "model_path": model_path}
 	_refresh_player_hair_visibility()
 	_refresh_player_body_visibility()
+	_sync_arms_equipment()
 	return true
+
+func _find_weapon_record(form_id: int) -> Dictionary:
+	if data_reader == null or not data_reader.has_method("find_weapon"):
+		return {}
+	return data_reader.find_weapon(form_id)
+
+## The WEAP type of the weapon in hand, or -1 for bare hands.
+func _player_weapon_type() -> int:
+	if _player_weapon_form_id <= 0:
+		return -1
+	return int(_player_weapon_record.get("weapon_type", 0))
+
+func _weapon_mount_bone(weapon_type: int) -> String:
+	if _weapon_drawn:
+		return str(WEAPON_HOLD_BONES.get(weapon_type, "Weapon"))
+	return str(WEAPON_STOW_BONES.get(weapon_type, "BackWeapon"))
+
+## Moves the weapon on the third-person rig between its sheath and the hand.
+func _refresh_player_weapon_mount() -> void:
+	var bone_name := _weapon_mount_bone(_player_weapon_type())
+	for mesh in _player_weapon_meshes:
+		if not is_instance_valid(mesh):
+			continue
+		var attachment := mesh.get_parent() as BoneAttachment3D
+		if attachment != null:
+			attachment.bone_name = bone_name
+
+func _unequip_player_weapon() -> void:
+	for previous_mesh in _player_weapon_meshes:
+		if is_instance_valid(previous_mesh):
+			previous_mesh.queue_free()
+	_player_weapon_meshes = []
+	_player_weapon_form_id = 0
+	_player_weapon_record = {}
+	_sync_arms_weapon(true)
+	_refresh_inventory_hud()
+
+func _sync_arms_weapon(redraw: bool) -> void:
+	if _arms == null or not _arms.built:
+		return
+	var model_path := ""
+	if _player_weapon_form_id > 0:
+		model_path = str(data_reader.find_item_model_path(_player_weapon_form_id, false))
+	await _arms.set_weapon(_player_weapon_type(), model_path)
+	if redraw and _weapon_drawn:
+		_arms.draw(true)
+
+func _sync_arms_equipment() -> void:
+	if _arms == null or not _arms.built:
+		return
+	var entries: Array[Dictionary] = []
+	for equipment_value: Variant in _player_equipment.values():
+		var equipment: Dictionary = equipment_value
+		entries.push_back({"model_path": equipment.get("model_path", ""), "slots": equipment.get("slots", 0)})
+	_arms.set_equipment(entries)
 
 func _refresh_player_body_visibility() -> void:
 	var first_person: bool = player.is_first_person
@@ -3348,6 +3437,9 @@ func _refresh_player_body_visibility() -> void:
 
 func _refresh_player_first_person_visibility() -> void:
 	var first_person: bool = player.is_first_person
+	# The first-person view shows only the view model's arms, never the third-person body (it would show looking down).
+	if is_instance_valid(_player_avatar):
+		_player_avatar.visible = not first_person
 	for mesh: MeshInstance3D in _player_first_person_hidden_meshes:
 		if is_instance_valid(mesh):
 			mesh.visible = not first_person
@@ -4120,20 +4212,26 @@ func _cast_selected_spell() -> void:
 	if effects.is_empty():
 		_show_interaction_toast("Spell has no effects")
 		return
-	for effect_value: Variant in effects:
-		var effect: Dictionary = effect_value
-		var effect_flags := int(effect.get("magic_effect_flags", 0))
-		if int(effect.get("range_type", -1)) != 0 or (effect_flags & (1 << 4)) == 0:
-			_show_interaction_toast("This spell needs a target")
-			return
-		if str(effect.get("code", "")) not in ["REHE", "REMA", "REFA"] or (effect_flags & (1 << 3)) != 0:
-			_show_interaction_toast("This spell effect is not supported yet")
-			return
+	# Touch and target spells are cast for their animation and projectile; only self-range restore effects have an effect yet.
+	var cast_range := int((effects[0] as Dictionary).get("range_type", 0))
+	if cast_range == 0:
+		for effect_value: Variant in effects:
+			var effect: Dictionary = effect_value
+			var effect_flags := int(effect.get("magic_effect_flags", 0))
+			if int(effect.get("range_type", -1)) != 0 or (effect_flags & (1 << 4)) == 0:
+				_show_interaction_toast("This spell needs a target")
+				return
+			if str(effect.get("code", "")) not in ["REHE", "REMA", "REFA"] or (effect_flags & (1 << 3)) != 0:
+				_show_interaction_toast("This spell effect is not supported yet")
+				return
 	var magicka_cost := _spell_cast_cost(spell)
 	if not _player_actor_values.spend_magicka(float(magicka_cost)):
 		_show_interaction_toast("Not enough Magicka")
 		return
+	_play_spell_cast(cast_range, effects)
 	for effect_value: Variant in effects:
+		if cast_range != 0:
+			break
 		var effect: Dictionary = effect_value
 		var effect_flags := int(effect.get("magic_effect_flags", 0))
 		var duration := 1.0 if (effect_flags & (1 << 7)) != 0 else maxf(1.0, float(effect.get("duration", 0)))
@@ -4199,6 +4297,172 @@ func _magic_skill_cost_factor(school: int) -> float:
 	var multiplier := float(_player_game_settings.get("fMagicCasterSkillCostMult", 0.0))
 	var skill: float = _player_actor_values.school_skill(school)
 	return maxf(0.0, base + (1.0 - skill / 100.0) * multiplier)
+
+## F: draws or sheathes the weapon. Drawn, the first-person view shows the arms and the weapon in hand; the left button
+## attacks and the right button blocks.
+func _toggle_weapon_drawn() -> void:
+	if not _combat_menus_closed() or _player_skeleton == null:
+		return
+	_set_weapon_drawn(not _weapon_drawn)
+
+func _set_weapon_drawn(drawn: bool) -> void:
+	if drawn == _weapon_drawn:
+		return
+	_weapon_drawn = drawn
+	if physics_grabber.is_holding_object():
+		physics_grabber.release_without_throw()
+	_refresh_player_weapon_mount()
+	if _arms == null or not _arms.built:
+		return
+	if drawn:
+		_arms.draw()
+	else:
+		_pending_cast = {}
+		_arms.holster()
+
+func _combat_menus_closed() -> bool:
+	return not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition \
+		and not player.face_preview_enabled
+
+func _combat_input_allowed() -> bool:
+	return _weapon_drawn and _arms != null and _arms.built and _combat_menus_closed() \
+		and not player.controls_suspended and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+
+## While the weapon is drawn the mouse buttons fight instead of grabbing objects: left attacks, right blocks.
+func _handle_combat_input(event: InputEvent) -> bool:
+	if not (event is InputEventMouseButton) or not _combat_input_allowed():
+		return false
+	var mouse_button := event as InputEventMouseButton
+	if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
+		_player_attack()
+		get_viewport().set_input_as_handled()
+		return true
+	if mouse_button.button_index == MOUSE_BUTTON_RIGHT:
+		_arms.set_blocking(mouse_button.pressed)
+		get_viewport().set_input_as_handled()
+		return true
+	return false
+
+func _player_attack() -> void:
+	var side := "right"
+	if _player_weapon_type() != WEAPON_TYPE_BOW:
+		if _player_weapon_form_id <= 0:
+			side = "left" if _next_attack_left else "right"
+			_next_attack_left = not _next_attack_left
+		elif Input.is_action_pressed("move_left") and not Input.is_action_pressed("move_right"):
+			side = "left"
+	_arms.attack(side)
+
+func _update_first_person_arms(delta: float) -> void:
+	if _arms == null or not _arms.built:
+		return
+	var hidden: bool = not player.is_first_person or not _combat_menus_closed()
+	_arms.set_suppressed(hidden)
+	if hidden or not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		_arms.set_blocking(false)
+	var floor_contact: bool = player.is_on_floor() or player.is_stepping()
+	_arms.update(delta, {
+		"local_velocity": Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z),
+		"running": Input.is_action_pressed("run"),
+		"crouching": player.is_crouching,
+		"airborne": not floor_contact and absf(player.velocity.y) > 1.0,
+	})
+
+func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
+	if clip_kind == "attack" and event_name == "release":
+		_loose_arrow()
+	elif clip_kind == "attack" and event_name == "hit":
+		_melee_hit()
+	elif clip_kind == "cast" and event_name == "hit":
+		_release_pending_cast()
+
+## Where a shot from the hand goes: from `muzzle_offset` (camera space, first person) or the chest (third person) to
+## whatever the camera is pointing at.
+func _player_aim(muzzle_offset: Vector3) -> Dictionary:
+	var view: Camera3D = player.camera
+	var forward := -view.global_basis.z
+	var query := PhysicsRayQueryParameters3D.create(
+		view.global_position, view.global_position + forward * AIM_RAY_LENGTH_M, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
+	)
+	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+	var target: Vector3 = hit.position if not hit.is_empty() else view.global_position + forward * AIM_RAY_LENGTH_M
+	var origin: Vector3
+	if player.is_first_person:
+		origin = view.global_position + view.global_basis * muzzle_offset
+	else:
+		origin = player.global_position + Vector3.UP * 1.3 + Vector3(forward.x, 0.0, forward.z).normalized() * 0.5
+	var direction := target - origin
+	return {"origin": origin, "direction": forward if direction.length() < 0.5 else direction.normalized(), "hit": hit}
+
+func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
+	var excluded: Array[RID] = [player.get_rid()]
+	projectile.excluded_bodies = excluded
+	add_child(projectile)
+	projectile.global_position = aim.origin
+	projectile.look_at(aim.origin + (aim.direction as Vector3))
+
+func _loose_arrow() -> void:
+	var aim := _player_aim(Vector3(0.16, -0.14, -0.45))
+	var meshes := await CombatProjectile.build_arrow_meshes(assets, game_units_to_meters)
+	if meshes.is_empty():
+		return
+	_launch_projectile(CombatProjectile.new_arrow(meshes, (aim.direction as Vector3) * ARROW_SPEED_MPS), aim)
+
+## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
+func _melee_hit() -> void:
+	var reach := MELEE_BASE_REACH_M * float(_player_weapon_record.get("reach", 1.0))
+	var view: Camera3D = player.camera
+	var forward := -view.global_basis.z
+	var query := PhysicsRayQueryParameters3D.create(
+		view.global_position, view.global_position + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
+	)
+	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+	var body := hit.get("collider") as RigidBody3D
+	if body != null:
+		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
+
+func _play_spell_cast(cast_range: int, effects: Array) -> void:
+	if _arms == null or not _arms.built:
+		return
+	var effect_code := str((effects[0] as Dictionary).get("code", ""))
+	_pending_cast = {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code)}
+	_set_weapon_drawn(true)
+	_arms.cast(cast_range)
+
+func _release_pending_cast() -> void:
+	var cast := _pending_cast
+	_pending_cast = {}
+	if cast.is_empty() or int(cast.range_type) != 2:
+		return
+	var aim := _player_aim(Vector3(-0.16, -0.12, -0.5))
+	_launch_projectile(CombatProjectile.new_spell_bolt(cast.color, (aim.direction as Vector3) * SPELL_BOLT_SPEED_MPS), aim)
+
+var _weapon_switch_busy := false
+
+## X: the next weapon in the inventory, and bare hands after the last.
+func _cycle_player_weapon() -> void:
+	if _weapon_switch_busy or not _combat_menus_closed():
+		return
+	var weapon_ids: Array[int] = []
+	for form_id_value: Variant in _player_inventory.keys():
+		var form_id := int(form_id_value)
+		if str(data_reader.find_record_type(form_id)) == "WEAP":
+			weapon_ids.push_back(form_id)
+	if weapon_ids.is_empty():
+		_show_interaction_toast("No weapons")
+		return
+	weapon_ids.sort()
+	var choices := weapon_ids.duplicate()
+	choices.push_back(0)
+	var next_id: int = choices[(choices.find(_player_weapon_form_id) + 1) % choices.size()]
+	_weapon_switch_busy = true
+	if next_id == 0:
+		_unequip_player_weapon()
+		_show_interaction_toast("Unarmed")
+	elif await _equip_player_item(next_id):
+		_show_interaction_toast(_record_display_name(next_id))
+	_weapon_switch_busy = false
+	_refresh_inventory_hud()
 
 func _equip_inventory_item(form_id: int) -> void:
 	if _world_loading or not _inventory_open:
@@ -5682,50 +5946,13 @@ func _apply_animation_tracks(skeleton: Skeleton3D, animation: Dictionary, sample
 			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * scale_value)
 
 func _sample_vector_keys(keys: PackedFloat32Array, stride: int, time: float) -> Vector3:
-	var key_count := keys.size() / stride
-	if key_count <= 1:
-		return Vector3(keys[1], keys[2], keys[3])
-	for key_index in range(key_count - 1):
-		var left := key_index * stride
-		var right := (key_index + 1) * stride
-		if time <= keys[right]:
-			var span := keys[right] - keys[left]
-			var weight := 0.0 if span <= 0.0 else clampf((time - keys[left]) / span, 0.0, 1.0)
-			return Vector3(keys[left + 1], keys[left + 2], keys[left + 3]).lerp(
-				Vector3(keys[right + 1], keys[right + 2], keys[right + 3]), weight
-			)
-	var last := (key_count - 1) * stride
-	return Vector3(keys[last + 1], keys[last + 2], keys[last + 3])
+	return AnimationSampling.vector(keys, stride, time)
 
 func _sample_quaternion_keys(keys: PackedFloat32Array, time: float) -> Quaternion:
-	var key_count := keys.size() / 5
-	if key_count <= 1:
-		return Quaternion(keys[1], keys[2], keys[3], keys[4]).normalized()
-	for key_index in range(key_count - 1):
-		var left := key_index * 5
-		var right := (key_index + 1) * 5
-		if time <= keys[right]:
-			var span := keys[right] - keys[left]
-			var weight := 0.0 if span <= 0.0 else clampf((time - keys[left]) / span, 0.0, 1.0)
-			var first := Quaternion(keys[left + 1], keys[left + 2], keys[left + 3], keys[left + 4]).normalized()
-			var second := Quaternion(keys[right + 1], keys[right + 2], keys[right + 3], keys[right + 4]).normalized()
-			return first.slerp(second, weight).normalized()
-	var last := (key_count - 1) * 5
-	return Quaternion(keys[last + 1], keys[last + 2], keys[last + 3], keys[last + 4]).normalized()
+	return AnimationSampling.quaternion(keys, time)
 
 func _sample_scalar_keys(keys: PackedFloat32Array, time: float) -> float:
-	var key_count := keys.size() / 2
-	if key_count <= 1:
-		return keys[1]
-	for key_index in range(key_count - 1):
-		var left := key_index * 2
-		var right := (key_index + 1) * 2
-		if time <= keys[right]:
-			var span := keys[right] - keys[left]
-			var weight := 0.0 if span <= 0.0 else clampf((time - keys[left]) / span, 0.0, 1.0)
-			return lerpf(keys[left + 1], keys[right + 1], weight)
-	var last := (key_count - 1) * 2
-	return keys[last + 1]
+	return AnimationSampling.scalar(keys, time)
 
 func _reference_transform(reference: Dictionary) -> Transform3D:
 	var position: PackedFloat32Array = reference.get("position", PackedFloat32Array())

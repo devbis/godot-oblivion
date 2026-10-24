@@ -145,7 +145,7 @@ mouse_filter = 2
 theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
-text = "C · Face: Default\nG · Expression: Neutral"
+text = "N · Face: Default\nH · Expression: Neutral"
 horizontal_alignment = 2
 
 [node name="FaceView" type="Button" parent="StatusLayer"]
