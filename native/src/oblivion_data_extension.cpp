@@ -1219,13 +1219,21 @@ public:
         Array result;
         if (!game_ || !world_) return result;
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
-        std::unordered_set<std::uint32_t> visited;
-        for (const auto topic_id : game_->topic_order()) {
-            if (!visited.insert(topic_id).second) continue;
-            const auto* topic = game_->find_topic(topic_id);
-            if (!topic || topic->topic_type != 0 || topic->name.empty() || topic->editor_id == "GREETING"
-                    || choice_only_topic_ids_.contains(topic_id)
-                    || !world_->dialogue_topic_available(*topic, context)) continue;
+        // The topics that can ever be offered do not change with the speaker: filter them once, then only evaluate
+        // each one's conditions per call.
+        if (!topic_candidates_built_) {
+            std::unordered_set<std::uint32_t> visited;
+            for (const auto topic_id : game_->topic_order()) {
+                if (!visited.insert(topic_id).second) continue;
+                const auto* topic = game_->find_topic(topic_id);
+                if (!topic || topic->topic_type != 0 || topic->name.empty() || topic->editor_id == "GREETING"
+                        || choice_only_topic_ids_.contains(topic_id)) continue;
+                topic_candidates_.push_back(topic);
+            }
+            topic_candidates_built_ = true;
+        }
+        for (const auto* topic : topic_candidates_) {
+            if (!world_->dialogue_topic_available(*topic, context)) continue;
             result.push_back(topic_to_dictionary(*topic));
         }
         return result;
@@ -1316,6 +1324,10 @@ public:
         game_ = std::move(game);
         world_ = std::move(world);
         choice_only_topic_ids_.clear();
+        topic_candidates_.clear();
+        topic_candidates_built_ = false;
+        greeting_ = nullptr;
+        greeting_looked_up_ = false;
         if (game_) {
             for (const auto& [topic_id, topic] : game_->topics()) {
                 for (const auto& response : topic.responses) {
@@ -1359,6 +1371,8 @@ private:
     std::shared_ptr<const oblivion::GameData> game_;
     const oblivion::DialogTopic* greeting_ = nullptr;
     bool greeting_looked_up_ = false;
+    mutable std::vector<const oblivion::DialogTopic*> topic_candidates_;
+    mutable bool topic_candidates_built_ = false;
     std::unique_ptr<oblivion::QuestWorld> world_;
     // TCLT-linked topics are inline dialogue choices in TES4, not part of the general topic list.
     std::unordered_set<std::uint32_t> choice_only_topic_ids_;
