@@ -1278,7 +1278,7 @@ func _try_npc_initiated_dialogues() -> void:
 		if int(actor.get("npc_greet_attempted_package_id", 0)) == package_id:
 			continue
 		var actor_root := actor.get("root") as Node3D
-		if not is_instance_valid(actor_root):
+		if not is_instance_valid(actor_root) or not actor_root.visible or bool(actor_root.get("inactive")):
 			continue
 		var target_distance := int(package.get("target_distance", 0))
 		if target_distance <= 0:
