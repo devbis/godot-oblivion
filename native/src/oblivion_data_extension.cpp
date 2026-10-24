@@ -1196,7 +1196,12 @@ public:
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
         // Oblivion's authored greeting is the special GREETING DIAL, whose DATA type is Topic (0),
         // not Conversation (1). Other Conversation records are scripted exchanges, not NPC greetings.
-        const auto* greeting = game_->find_topic_by_editor_id("GREETING");
+        // Looked up once: the search walks every topic.
+        if (!greeting_looked_up_) {
+            greeting_ = game_->find_topic_by_editor_id("GREETING");
+            greeting_looked_up_ = true;
+        }
+        const auto* greeting = greeting_;
         if (greeting) {
             auto run = world_->run_dialogue_topic(*greeting, context, distance_function(distance));
             if (run.reply) return dialogue_result(*greeting, context, run);
@@ -1349,6 +1354,8 @@ private:
     Ref<OblivionData> owner_;
     // The game data the world's quests, scripts and topics point into. Declared before the world, so it outlives it.
     std::shared_ptr<const oblivion::GameData> game_;
+    const oblivion::DialogTopic* greeting_ = nullptr;
+    bool greeting_looked_up_ = false;
     std::unique_ptr<oblivion::QuestWorld> world_;
     // TCLT-linked topics are inline dialogue choices in TES4, not part of the general topic list.
     std::unordered_set<std::uint32_t> choice_only_topic_ids_;
