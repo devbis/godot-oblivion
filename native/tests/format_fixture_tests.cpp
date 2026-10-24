@@ -1489,6 +1489,75 @@ void test_subtraction_after_variable_parses() {
     CHECK(fragment.diagnostics.empty());
 }
 
+void test_subtraction_without_command_table() {
+    // With no command table a name followed by `-` and a number is a subtraction, not a call with a negative argument.
+    const auto fragment = oblivion::parse_fragment("set fTimer to fTimer - 1\n");
+    CHECK(fragment.diagnostics.empty());
+    CHECK(fragment.statements.size() == 1);
+    const auto& value = fragment.statements[0].children.at(0);
+    CHECK(value.kind == oblivion::ScriptExprKind::Binary && value.text == "-");
+    CHECK(value.children.size() == 2 && value.children[0].kind == oblivion::ScriptExprKind::Name);
+    // Arguments that are plain still make a call.
+    const auto call = oblivion::parse_fragment("setstage MyQuest 10\n");
+    CHECK(call.diagnostics.empty() && call.statements.at(0).children.at(0).kind == oblivion::ScriptExprKind::Call);
+}
+
+std::string operator_chain(int terms) {
+    std::string source = "set x to 1";
+    for (int i = 1; i < terms; ++i) source += " + 1";
+    return source + "\n";
+}
+
+void test_operator_chain_depth_is_bounded() {
+    // A long chain builds a left-deep tree in a loop; it must be reported, not recursed into until the stack ends.
+    CHECK(oblivion::parse_fragment(operator_chain(100)).diagnostics.empty());
+    const auto too_long = oblivion::parse_fragment(operator_chain(5000) + "set y to 2\n");
+    CHECK(!too_long.diagnostics.empty());
+    // The statement after the broken line still parses.
+    CHECK(!too_long.statements.empty() && too_long.statements.back().name == "y");
+    // The limit is per expression: many short statements are fine.
+    std::string many;
+    for (int i = 0; i < 50; ++i) many += operator_chain(100);
+    CHECK(oblivion::parse_fragment(many).diagnostics.empty());
+}
+
+// Folders that contain each other (A -> B, C; B -> A, C; C -> A, B) must end the walk, and each folder is asked once.
+void test_idle_folder_cycle_ends() {
+    oblivion::IdleRecord a, b, c;
+    a.form_id = 0x1;
+    b.form_id = 0x2;
+    c.form_id = 0x3;  // empty animation_file: all three are folders
+    const std::vector<const oblivion::IdleRecord*> roots{&a};
+    const std::vector<const oblivion::IdleRecord*> of_a{&b, &c}, of_b{&a, &c}, of_c{&a, &b};
+    const std::vector<const oblivion::IdleRecord*> none;
+    int lookups = 0;
+    const oblivion::IdleChildren children = [&](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& {
+        ++lookups;
+        switch (parent) {
+        case 0: return roots;
+        case 0x1: return of_a;
+        case 0x2: return of_b;
+        case 0x3: return of_c;
+        default: return none;
+        }
+    };
+    StageHost host;
+    CHECK(oblivion::select_idle(children, host) == nullptr);
+    CHECK(lookups == 4);
+
+    // An animation reachable through a folder reached twice is still found.
+    oblivion::IdleRecord clip;
+    clip.form_id = 0x4;
+    clip.animation_file = "Wave.kf";
+    const std::vector<const oblivion::IdleRecord*> of_c_with_clip{&a, &clip};
+    const oblivion::IdleChildren with_clip = [&](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& {
+        if (parent == 0x3) return of_c_with_clip;
+        return children(parent);
+    };
+    const auto* found = oblivion::select_idle(with_clip, host);
+    CHECK(found != nullptr && found->form_id == 0x4);
+}
+
 // Commands the review tests use, matched without regard to case.
 oblivion::ScriptCommandLookup review_commands() {
     return [](std::string_view name) -> std::optional<oblivion::ScriptCommandSignature> {
@@ -1942,6 +2011,9 @@ int main() {
         test_same_stage_is_ignored();
         test_dotted_condition_parses();
         test_subtraction_after_variable_parses();
+        test_subtraction_without_command_table();
+        test_operator_chain_depth_is_bounded();
+        test_idle_folder_cycle_ends();
         test_actor_variables_stay_out_of_quest();
         test_say_to_cycles_stop();
         test_stage_oscillation_is_deterministic();
