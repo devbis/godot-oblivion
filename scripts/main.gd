@@ -2756,7 +2756,7 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 
 func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
-	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx")
+	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx") and normalized.get_file() != "collisionbox01.nif"
 
 func _update_exterior_collision_streaming() -> void:
 	if (
@@ -2859,7 +2859,7 @@ func _material_for_reference(
 func _is_debug_service_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
 	var filename := normalized.get_file()
-	return filename in ["markerx.nif", "markerxheading.nif", "marker_north.nif"] or normalized.contains("trigzone") or normalized.contains("/triggers/")
+	return filename in ["markerx.nif", "markerxheading.nif", "marker_north.nif", "collisionbox01.nif"] or normalized.contains("trigzone") or normalized.contains("/triggers/")
 
 func _load_player_avatar() -> void:
 	if data_reader == null:
