@@ -54,7 +54,13 @@ static func load_or_build_digest(source_digest: String, resource_kind: String, b
 	var built: Resource = builder.call()
 	if built == null:
 		return null
-	var save_error := ResourceSaver.save(built, cache_path, ResourceSaver.FLAG_COMPRESS)
+	# Written beside the entry and renamed, so a crash or a second process never leaves a truncated .res behind.
+	var temp_path := cache_path.trim_suffix(".res") + "-" + str(OS.get_process_id()) + ".tmp.res"
+	var save_error := ResourceSaver.save(built, temp_path, ResourceSaver.FLAG_COMPRESS)
+	if save_error == OK:
+		save_error = DirAccess.rename_absolute(ProjectSettings.globalize_path(temp_path), ProjectSettings.globalize_path(cache_path))
+	if save_error != OK:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(temp_path))
 	if save_error != OK and not _warned_write:
 		_warned_write = true
 		push_warning("Could not write derived resource cache %s: %s" % [cache_path, error_string(save_error)])
