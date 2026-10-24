@@ -71,7 +71,7 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 		"moveto":
 			return _move_to(target, arguments, references, world, transform_of, label)
 		"kill", "disable":
-			return _deactivate(target, command, world, label)
+			return _deactivate(target, command, references, world, label)
 		"setopenstate":
 			return _set_open_state(target, arguments, references, world, label)
 		"lock", "unlock":
@@ -185,12 +185,17 @@ func _move_to(target: String, arguments: Array, references: Dictionary, world: N
 	return "applied: %s to %s" % [label, destination]
 
 
-func _deactivate(target: String, command: String, world: Node3D, label: String) -> String:
+func _deactivate(target: String, command: String, references: Dictionary, world: Node3D, label: String) -> String:
 	if target.is_empty():
 		return "not applied: %s needs a target" % label
 	var actor := _actor_node(target, world)
 	if actor == null:
-		return "not applied: %s, %s is not in this cell" % [label, target]
+		# Actors are streamed in lazily: remember the removal so the scene does not build the actor alive later.
+		var reference: Dictionary = references.get(target, {})
+		if reference.is_empty():
+			return "not applied: %s, %s is not in this cell" % [label, target]
+		removed_reference_ids[int(reference.get("form_id", 0))] = true
+		return "applied: %s, %s is not loaded yet and stays removed" % [label, target]
 	actor.visible = false
 	if actor is CollisionObject3D:
 		actor.collision_layer = 0
