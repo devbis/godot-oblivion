@@ -465,6 +465,43 @@ public:
         return result;
     }
 
+    Dictionary find_spell(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* spell = data_->find_spell(static_cast<std::uint32_t>(form_id));
+        if (!spell) return {};
+        Dictionary result;
+        result["form_id"] = static_cast<int64_t>(spell->form_id);
+        result["spell_type"] = spell->spell_type;
+        result["cost"] = spell->cost;
+        result["level"] = spell->level;
+        result["flags"] = spell->flags;
+        Array effects;
+        for (const auto& effect : spell->effects) {
+            Dictionary entry;
+            entry["code"] = as_string(effect.code);
+            entry["magnitude"] = effect.magnitude;
+            entry["area"] = effect.area;
+            entry["duration"] = effect.duration;
+            entry["range_type"] = effect.range_type;
+            entry["actor_value"] = effect.actor_value;
+            entry["magic_effect_flags"] = effect.magic_effect_flags;
+            entry["magic_school"] = effect.magic_school;
+            entry["base_cost"] = effect.base_cost;
+            effects.push_back(entry);
+        }
+        result["effects"] = effects;
+        return result;
+    }
+
+    double get_float_game_setting(const String& name, double default_value = 0.0) const {
+        const CharString utf8 = name.utf8();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return default_value;
+        const auto value = data_->find_float_game_setting(utf8.get_data());
+        return value ? static_cast<double>(*value) : default_value;
+    }
+
     Array get_outfit_items(int64_t form_id) const {
         Array result;
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -847,6 +884,9 @@ protected:
                              &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
+        ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
+        ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
+                             &OblivionData::get_float_game_setting, DEFVAL(0.0));
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);
         ClassDB::bind_method(D_METHOD("get_ai_package_info", "form_id"), &OblivionData::get_ai_package_info);
         ClassDB::bind_method(D_METHOD("find_item_model_path", "form_id", "female"), &OblivionData::find_item_model_path);

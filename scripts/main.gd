@@ -10,6 +10,12 @@ const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
+const PLAYER_DYNAMIC_GAME_SETTINGS := [
+	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
+	"fFatigueJumpBase", "fFatigueJumpMult", "fMagickaReturnBase", "fMagickaReturnMult",
+	"fMagicCostScale", "fMagicDurMagBaseCostMult", "fMagicAreaBaseCostMult",
+	"fMagicRangeTargetCostMult", "fMagicCasterSkillCostBase", "fMagicCasterSkillCostMult",
+]
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
@@ -160,6 +166,7 @@ var _player_spell_form_ids: Array[int] = []
 var _player_selected_spell_form_id := 0
 var _player_actor_values := PlayerActorValues.new()
 var _player_actor_values_ready := false
+var _player_game_settings: Dictionary = {}
 var _inventory_open := false
 var _placed_items: Dictionary = {}
 var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
@@ -191,6 +198,7 @@ var _fallback_support: StaticBody3D
 func _ready() -> void:
 	_setup_targeting()
 	physics_grabber.configure(player, self)
+	player.gameplay_frame.connect(_on_player_gameplay_frame)
 	player.set_physics_process(false)
 	face_view_button.disabled = true
 	face_view_button.pressed.connect(_toggle_face_view)
@@ -304,6 +312,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_toggle_inventory()
 	elif event.keycode == KEY_Q:
 		_cycle_player_spell()
+	elif event.keycode == KEY_C:
+		_cast_selected_spell()
 	elif event.keycode == KEY_M:
 		_toggle_gesture_panel()
 	elif event.keycode == KEY_COMMA:
@@ -394,6 +404,10 @@ func _initialize_player_game_state() -> void:
 		push_warning("Could not read actor values and inventory from the installed game's Player base record")
 		return
 	_player_actor_values_ready = _player_actor_values.initialize_from_base(_player_base_record)
+	_player_game_settings.clear()
+	for setting_name: String in PLAYER_DYNAMIC_GAME_SETTINGS:
+		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, 0.0)
+	_player_actor_values.configure_game_settings(_player_game_settings)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
 	for spell_value: Variant in _player_base_record.get("spell_form_ids", PackedInt64Array()):
@@ -1370,7 +1384,7 @@ func _load_cell_geometry(
 	var cell_label := str(cell.get("display_name", ""))
 	if cell_label.is_empty():
 		cell_label = "Cell %d,%d" % [int(cell.get("grid_x", 0)), int(cell.get("grid_y", 0))]
-	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nQ cycle spell · I inventory · Hold Mouse1 to grab · release to drop · Mouse2 throw · wheel adjusts distance · Space interact · Esc unlock" % [
+	status_label.text = "Cell: %s · %d refs · %d meshes · %d colliders\nWASD move · Shift run · E jump · Ctrl crouch · mouse look/zoom\nQ cycle spell · C cast self spell · I inventory · Hold Mouse1 to grab · release to drop · Mouse2 throw · wheel adjusts distance · Space interact · Esc unlock" % [
 		cell_label, cell.references.size(), instance_count, collision_count
 	]
 
@@ -2808,6 +2822,110 @@ func _cycle_player_spell() -> void:
 	var current_index := _player_spell_form_ids.find(_player_selected_spell_form_id)
 	var next_index := (current_index + 1) % _player_spell_form_ids.size()
 	_select_player_spell(_player_spell_form_ids[next_index])
+
+func _on_player_gameplay_frame(delta: float, is_running: bool, jumped: bool) -> void:
+	if not _player_actor_values_ready:
+		return
+	if jumped:
+		_player_actor_values.apply_jump_cost()
+	_player_actor_values.advance_time(delta, is_running)
+
+func _cast_selected_spell() -> void:
+	if _world_loading or _inventory_open or not _player_actor_values_ready:
+		return
+	if _player_selected_spell_form_id <= 0:
+		_show_interaction_toast("No spell selected")
+		return
+	var spell: Dictionary = data_reader.find_spell(_player_selected_spell_form_id)
+	if spell.is_empty():
+		_show_interaction_toast("Spell data unavailable")
+		return
+	if int(spell.get("spell_type", -1)) not in [0, 3]:
+		_show_interaction_toast("This spell cannot be cast directly")
+		return
+	var effects: Array = spell.get("effects", [])
+	if effects.is_empty():
+		_show_interaction_toast("Spell has no effects")
+		return
+	for effect_value: Variant in effects:
+		var effect: Dictionary = effect_value
+		var effect_flags := int(effect.get("magic_effect_flags", 0))
+		if int(effect.get("range_type", -1)) != 0 or (effect_flags & (1 << 4)) == 0:
+			_show_interaction_toast("This spell needs a target")
+			return
+		if str(effect.get("code", "")) not in ["REHE", "REMA", "REFA"] or (effect_flags & (1 << 3)) != 0:
+			_show_interaction_toast("This spell effect is not supported yet")
+			return
+	var magicka_cost := _spell_cast_cost(spell)
+	if not _player_actor_values.spend_magicka(float(magicka_cost)):
+		_show_interaction_toast("Not enough Magicka")
+		return
+	for effect_value: Variant in effects:
+		var effect: Dictionary = effect_value
+		var effect_flags := int(effect.get("magic_effect_flags", 0))
+		var duration := 1.0 if (effect_flags & (1 << 7)) != 0 else maxf(1.0, float(effect.get("duration", 0)))
+		var restored_amount := float(effect.get("magnitude", 0)) * duration
+		match str(effect.get("code", "")):
+			"REHE":
+				_player_actor_values.restore_health(restored_amount)
+			"REMA":
+				_player_actor_values.restore_magicka(restored_amount)
+			"REFA":
+				_player_actor_values.modify_fatigue(restored_amount)
+	_sync_player_actor_values_to_quest_world()
+	var spell_name := _record_display_name(_player_selected_spell_form_id)
+	_show_interaction_toast("Cast %s · %d Magicka" % [spell_name, magicka_cost])
+
+func _spell_cast_cost(spell: Dictionary) -> int:
+	var effects: Array = spell.get("effects", [])
+	var total_cost := 0.0
+	var dominant_effect_cost := -1.0
+	var dominant_school := -1
+	for effect_value: Variant in effects:
+		var effect: Dictionary = effect_value
+		var effect_flags := int(effect.get("magic_effect_flags", 0))
+		var base_cost := float(effect.get("base_cost", 0.0))
+		if base_cost <= 0.0:
+			continue
+		var magnitude_factor := 1.0
+		if (effect_flags & (1 << 8)) == 0:
+			magnitude_factor = pow(
+				maxf(1.0, float(effect.get("magnitude", 0))),
+				float(_player_game_settings.get("fMagicCostScale", 0.0))
+			)
+		var duration_factor := 1.0
+		if (effect_flags & (1 << 7)) == 0:
+			duration_factor = maxf(1.0, float(effect.get("duration", 0)))
+		var area_factor := 1.0
+		if (effect_flags & (1 << 9)) == 0:
+			area_factor = maxf(
+				1.0,
+				float(effect.get("area", 0)) * float(_player_game_settings.get("fMagicAreaBaseCostMult", 0.0))
+			)
+		var range_factor := 1.0
+		if int(effect.get("range_type", 0)) == 2:
+			range_factor = float(_player_game_settings.get("fMagicRangeTargetCostMult", 0.0))
+		var unscaled_effect_cost := maxf(
+			1.0,
+			base_cost
+				* float(_player_game_settings.get("fMagicDurMagBaseCostMult", 0.0))
+				* magnitude_factor * duration_factor * area_factor * range_factor
+		)
+		if unscaled_effect_cost > dominant_effect_cost:
+			dominant_effect_cost = unscaled_effect_cost
+			dominant_school = int(effect.get("magic_school", -1))
+		var skill_factor := _magic_skill_cost_factor(int(effect.get("magic_school", -1)))
+		total_cost += unscaled_effect_cost * skill_factor
+	if (int(spell.get("flags", 0)) & 1) != 0 or total_cost <= 0.0:
+		var manual_cost_factor := _magic_skill_cost_factor(dominant_school)
+		total_cost = float(spell.get("cost", 0)) * manual_cost_factor
+	return ceili(maxf(0.0, total_cost))
+
+func _magic_skill_cost_factor(school: int) -> float:
+	var base := float(_player_game_settings.get("fMagicCasterSkillCostBase", 0.0))
+	var multiplier := float(_player_game_settings.get("fMagicCasterSkillCostMult", 0.0))
+	var skill: float = _player_actor_values.school_skill(school)
+	return maxf(0.0, base + (1.0 - skill / 100.0) * multiplier)
 
 func _equip_inventory_item(form_id: int) -> void:
 	if _world_loading or not _inventory_open:

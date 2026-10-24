@@ -2,6 +2,8 @@ extends CharacterBody3D
 ## Third-person blockout controller. Values stay configurable until the
 ## original executable analysis and in-game comparison establish them.
 
+signal gameplay_frame(delta_seconds: float, running: bool, jumped: bool)
+
 @export var walk_speed_mps := 2.0
 @export var run_speed_mps := 3.4
 @export var jump_speed_mps := 4.7
@@ -228,6 +230,7 @@ func _physics_process(delta: float) -> void:
 		var speed := fly_fast_speed_mps if Input.is_action_pressed("run") else fly_speed_mps
 		velocity = direction * speed
 		global_position += velocity * delta
+		gameplay_frame.emit(delta, false, false)
 		return
 
 	_update_camera_clearance(delta)
@@ -236,9 +239,11 @@ func _physics_process(delta: float) -> void:
 	# While a step is in progress the capsule rolls over a tread's rounded nose,
 	# where it is not on the floor yet. Gravity is held off so it can finish the step,
 	# but a jump still starts from there.
+	var did_jump := false
 	if Input.is_action_just_pressed("jump") and (is_on_floor() or _stepper.is_stepping()):
 		_stepper.cancel()
 		velocity.y = jump_speed_mps
+		did_jump = true
 	elif _stepper.is_stepping():
 		velocity.y = 0.0
 	elif not is_on_floor():
@@ -263,6 +268,7 @@ func _physics_process(delta: float) -> void:
 		and _stepper.try_step_up(self, horizontal_motion, max_step_height_m, floor_max_angle)
 	):
 		_update_footstep_audio(previous_position)
+		gameplay_frame.emit(delta, _is_running_activity(previous_position, delta), did_jump)
 		return
 	_stepper.tick()
 	var was_on_floor := is_on_floor()
@@ -271,6 +277,7 @@ func _physics_process(delta: float) -> void:
 	if (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
 		_stepper.try_step_down(self, max_step_height_m)
 	_update_footstep_audio(previous_position)
+	gameplay_frame.emit(delta, _is_running_activity(previous_position, delta), did_jump)
 
 ## Crouch while the key is held. Standing back up waits until the full-height capsule fits.
 func _update_crouch(delta: float) -> void:
@@ -316,6 +323,14 @@ func _update_footstep_audio(previous_position: Vector3) -> void:
 	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
 	if audio_manager != null:
 		audio_manager.call("play_footstep", self, running)
+
+func _is_running_activity(previous_position: Vector3, delta: float) -> bool:
+	if delta <= 0.0 or not Input.is_action_pressed("run") or is_crouching:
+		return false
+	if not (is_on_floor() or _stepper.is_stepping()):
+		return false
+	var planar_distance := Vector2(global_position.x - previous_position.x, global_position.z - previous_position.z).length()
+	return planar_distance / delta > 0.05
 
 ## True while a step is in progress, so the actor is still treated as grounded.
 func is_stepping() -> bool:

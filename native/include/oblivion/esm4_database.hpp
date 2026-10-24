@@ -52,6 +52,27 @@ struct NpcInventoryEntry {
     std::int32_t count = 0;
 };
 
+struct SpellEffectRecord {
+    std::string code;
+    std::uint32_t magnitude = 0;
+    std::uint32_t area = 0;
+    std::uint32_t duration = 0;
+    std::uint32_t range_type = 0; // EFIT: 0 Self, 1 Touch, 2 Target
+    std::int32_t actor_value = -1;
+    std::uint32_t magic_effect_flags = 0; // MGEF DATA flags
+    std::uint32_t magic_school = 0; // Alteration through Restoration
+    float base_cost = 0.0f;
+};
+
+struct SpellRecord {
+    std::uint32_t form_id = 0;
+    std::uint8_t spell_type = 0;
+    std::uint32_t cost = 0;
+    std::uint8_t level = 0;
+    std::uint8_t flags = 0;
+    std::vector<SpellEffectRecord> effects;
+};
+
 struct NpcBaseRecord {
     std::uint32_t form_id = 0;
     std::uint32_t script_form_id = 0;  // SCRI: the script attached to every actor of this base
@@ -152,6 +173,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
@@ -186,6 +208,7 @@ public:
     // Form ID and owning cell ID (0 when the reference had no cell) of each reference that is not in any cell.
     [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>& unplaced_references() const noexcept { return unplaced_references_; }
     [[nodiscard]] const std::map<std::string, float>& float_game_settings() const noexcept { return float_game_settings_; }
+    [[nodiscard]] std::optional<float> find_float_game_setting(std::string_view name) const;
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
 private:
@@ -199,6 +222,7 @@ private:
     std::map<std::uint32_t, std::uint32_t> script_form_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
+    std::map<std::uint32_t, SpellRecord> spell_by_id_;
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;
@@ -223,6 +247,12 @@ private:
     std::map<std::string, std::uint32_t> quest_id_by_editor_id_;
     std::map<std::string, std::uint32_t> script_id_by_editor_id_;
     std::map<std::string, float> float_game_settings_;
+    struct MagicEffectRecord {
+        std::uint32_t flags = 0;
+        std::uint32_t school = 0;
+        float base_cost = 0.0f;
+    };
+    std::map<std::string, MagicEffectRecord, std::less<>> magic_effect_by_code_;
     std::map<std::uint32_t, float> global_value_by_id_;
     std::size_t record_count_ = 0;
     std::size_t unplaced_reference_count_ = 0;

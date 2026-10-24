@@ -146,6 +146,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
         std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
+        std::string_view("MGEF"),
         std::string_view("HAIR"), std::string_view("EYES"), std::string_view("ALCH"),
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
@@ -168,6 +169,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     script_form_id_by_id_.clear();
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
+    spell_by_id_.clear();
+    magic_effect_by_code_.clear();
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
@@ -284,6 +287,17 @@ const CellRecord* Esm4Database::find_cell(std::uint32_t form_id) const {
 const NpcBaseRecord* Esm4Database::find_npc_base(std::uint32_t form_id) const {
     const auto it = npc_by_id_.find(form_id);
     return it == npc_by_id_.end() ? nullptr : &it->second;
+}
+
+const SpellRecord* Esm4Database::find_spell(std::uint32_t form_id) const {
+    const auto it = spell_by_id_.find(form_id);
+    return it == spell_by_id_.end() ? nullptr : &it->second;
+}
+
+std::optional<float> Esm4Database::find_float_game_setting(std::string_view name) const {
+    const auto it = float_game_settings_.find(std::string(name));
+    if (it == float_game_settings_.end()) return std::nullopt;
+    return it->second;
 }
 
 const RaceFaceGenRecord* Esm4Database::find_race_face_gen(std::uint32_t form_id) const {
@@ -486,6 +500,16 @@ void Esm4Database::parse_file(const std::vector<std::uint8_t>& bytes, bool runti
     };
 
     walk(walk, records_begin, bytes.size(), 0, 0, false, 0);
+    for (auto& [form_id, spell] : spell_by_id_) {
+        (void)form_id;
+        for (auto& effect : spell.effects) {
+            const auto magic_effect = magic_effect_by_code_.find(lower_ascii(effect.code));
+            if (magic_effect == magic_effect_by_code_.end()) continue;
+            effect.magic_effect_flags = magic_effect->second.flags;
+            effect.magic_school = magic_effect->second.school;
+            effect.base_cost = magic_effect->second.base_cost;
+        }
+    }
     attach_references();
 }
 
@@ -550,6 +574,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_npc_base = type == "NPC_";
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
+    bool is_magic_effect = type == "MGEF";
     bool is_outfit = type == "OTFT";
     bool is_ai_package = type == "PACK";
     const bool is_idle = type == "IDLE";
@@ -580,6 +605,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     reference.form_id = form_id;
     NpcBaseRecord npc;
     npc.form_id = form_id;
+    SpellRecord spell;
+    spell.form_id = form_id;
+    MagicEffectRecord magic_effect;
     RaceFaceGenRecord race_face_gen;
     race_face_gen.form_id = form_id;
     OutfitRecord outfit;
@@ -627,7 +655,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_outfit || is_ai_package || is_tree)
+            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_script) script.editor_id = text;
@@ -660,6 +688,27 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "ICON" && (is_item_model || is_spell)) {
             const auto icon_path = read_zstring(value, subrecord_size);
             if (!icon_path.empty()) record_icon_path_by_id_[form_id] = icon_path;
+        } else if (tag == "SPIT" && is_spell && subrecord_size >= 16) {
+            spell.spell_type = value[0];
+            spell.cost = u32(value + 4);
+            spell.level = value[8];
+            spell.flags = value[12];
+        } else if (tag == "EFIT" && is_spell && subrecord_size >= 24) {
+            SpellEffectRecord effect;
+            const auto code = u32(value);
+            effect.code.resize(4);
+            for (std::size_t i = 0; i < 4; ++i)
+                effect.code[i] = static_cast<char>((code >> (i * 8)) & 0xff);
+            effect.magnitude = u32(value + 4);
+            effect.area = u32(value + 8);
+            effect.duration = u32(value + 12);
+            effect.range_type = u32(value + 16);
+            effect.actor_value = static_cast<std::int32_t>(u32(value + 20));
+            spell.effects.push_back(std::move(effect));
+        } else if (tag == "DATA" && is_magic_effect && subrecord_size >= 16) {
+            magic_effect.flags = u32(value);
+            magic_effect.base_cost = f32(value + 4);
+            magic_effect.school = u32(value + 12);
         } else if (tag == "DNAM" && is_worldspace && subrecord_size >= 8) {
             worldspace_water_level_by_id_[form_id] = f32(value + 4);
         } else if (tag == "VHGT" && is_land && subrecord_size >= 4 + 33 * 33) {
@@ -956,6 +1005,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_npc_base)
         npc_by_id_[form_id] = std::move(npc);
+    if (is_spell)
+        spell_by_id_[form_id] = std::move(spell);
+    if (is_magic_effect && !base_editor_id.empty())
+        magic_effect_by_code_[lower_ascii(base_editor_id)] = magic_effect;
     if (is_race)
         race_face_gen_by_id_[form_id] = std::move(race_face_gen);
     if (is_outfit)

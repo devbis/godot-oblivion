@@ -23,6 +23,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
     [[nodiscard]] const AiPackageRecord* find_ai_package(std::uint32_t form_id) const;
@@ -61,6 +62,9 @@ public:
     [[nodiscard]] std::size_t record_count() const noexcept { return esm_.record_count(); }
     [[nodiscard]] const std::map<std::string, float>& float_game_settings() const noexcept {
         return esm_.float_game_settings();
+    }
+    [[nodiscard]] std::optional<float> find_float_game_setting(std::string_view name) const {
+        return esm_.find_float_game_setting(name);
     }
     [[nodiscard]] const std::vector<std::filesystem::path>& archive_paths() const noexcept { return archive_paths_; }
 
