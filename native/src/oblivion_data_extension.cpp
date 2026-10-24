@@ -1175,6 +1175,8 @@ public:
         world_->set_speech_length([length](std::uint32_t speaker, std::string_view quest, std::string_view topic,
                                            std::uint32_t reply, std::uint8_t line_number,
                                            std::string_view text) -> std::optional<double> {
+            // The scene node behind the Callable may be freed while the world lives on.
+            if (!length.is_valid()) return std::nullopt;
             const Variant value = length.call(static_cast<int64_t>(speaker), utf8_text(std::string(quest)), utf8_text(std::string(topic)),
                                               static_cast<int64_t>(reply), static_cast<int64_t>(line_number),
                                               utf8_text(std::string(text)));
