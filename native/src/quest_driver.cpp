@@ -134,7 +134,7 @@ public:
             const auto listener = lower(arguments[0].text) == "player" ? kPlayerReference
                 : driver_.world_->reference_base(arguments[0].text).value_or(0);
             const auto speaker_reference = target && target->is_text ? std::string_view(target->text) : std::string_view();
-            const auto seconds = driver_.world_->say(arguments[1].text, speaker, listener, tick_, distance_, depth_,
+            const auto seconds = driver_.world_->say(arguments[1].text, speaker, listener, tick_, distance_, depth_ + 1,
                                                      speaker_reference);
             reload_variables();
             return ScriptValue::from_number(seconds);
@@ -144,7 +144,7 @@ public:
             const auto speaker = target && target->is_text
                 ? driver_.world_->reference_base(target->text).value_or(self_base) : self_base;
             const auto speaker_reference = target && target->is_text ? std::string_view(target->text) : std::string_view();
-            const auto seconds = driver_.world_->say(arguments[0].text, speaker, kPlayerReference, tick_, distance_, depth_,
+            const auto seconds = driver_.world_->say(arguments[0].text, speaker, kPlayerReference, tick_, distance_, depth_ + 1,
                                                      speaker_reference);
             reload_variables();
             return ScriptValue::from_number(seconds);
