@@ -223,6 +223,7 @@ public:
                 data->open(path, oblivion::GameData::LoadProfile::RuntimeVisuals);
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 data_ = std::move(data);
+                quest_state_ = oblivion::QuestState{};  // variables of the previous data must not leak into this one
             } catch (const std::exception& error) {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 error_ = error.what();
