@@ -6105,6 +6105,9 @@ const NPC_GESTURE_MIN_HOLD_S := 1.5
 const NPC_GESTURE_MAX_HOLD_S := 3.0
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
+## A momentary stair-edge floor miss should not start an NPC's jump cycle. Route hops are explicit; ordinary falls must
+## build meaningful downward speed first, after the stepper grace and floor snap have had time to recover.
+const NPC_ANIMATION_FALL_START_SPEED_MPS := 1.5
 
 func _gesture_hold_over(actor: Dictionary, audio_manager: Node) -> bool:
 	var held := float(Time.get_ticks_msec() - int(actor.get("idle_started_ms", 0))) * 0.001
@@ -6212,7 +6215,10 @@ func _npc_air_animation(actor: Dictionary, root: Node3D, grounded: bool) -> Stri
 	var stance_prefix := _npc_stance_prefix(actor) if in_combat else ""
 	var was_grounded := bool(actor.get("animation_was_grounded", true))
 	var phase := str(actor.get("air_animation_phase", ""))
-	if not grounded:
+	var route_hop: bool = root.has_method("is_hopping") and bool(root.call("is_hopping"))
+	var real_fall: bool = not grounded and root.velocity.y <= -NPC_ANIMATION_FALL_START_SPEED_MPS
+	var airborne: bool = route_hop or real_fall
+	if airborne:
 		if was_grounded:
 			phase = "start"
 		elif phase == "start":
