@@ -41,6 +41,11 @@ const FATIGUE_RETURN_BASE_SETTING := "fFatigueReturnBase"
 const FATIGUE_RETURN_MULT_SETTING := "fFatigueReturnMult"
 const FATIGUE_RUN_BASE_SETTING := "fFatigueRunBase"
 const ATTRIBUTE_ENDURANCE := 5
+## Blows between actors wear fatigue down by the damage they deal, not the player-sized minimum: with that, fights end in a
+## knockdown loop instead of a death.
+const ACTOR_HIT_FATIGUE_MULT := 1.0
+const ALLY_HELP_RADIUS_M := 25.0
+const AGGRESSION_DEFENDS := 5
 const ARCHER_RANGE_M := 14.0
 const ARCHER_MIN_RANGE_M := 4.0
 const ARROW_SPEED_MPS := 40.0
@@ -54,6 +59,7 @@ signal player_hit(attacker_name: String, damage: float)
 
 var host: Node3D
 var _check_timer := 0.0
+## Reference id of an actor ordered to fight -> the reference id it fights (0: the player).
 var _forced: Dictionary = {}
 var _provoked: Dictionary = {}
 var _calmed: Dictionary = {}
@@ -62,9 +68,9 @@ var _player_dead := false
 func _init(host_node: Node3D) -> void:
 	host = host_node
 
-## A script ordered the actor to fight the player (StartCombat).
-func force_combat(reference_id: int) -> void:
-	_forced[reference_id] = true
+## A script ordered the actor to fight the player, or the actor of `target_id` (StartCombat).
+func force_combat(reference_id: int, target_id: int = 0) -> void:
+	_forced[reference_id] = target_id
 	_calmed.erase(reference_id)
 
 ## The player attacked the actor: it fights back whatever its aggression.
@@ -84,6 +90,16 @@ func stop_combat(reference_id: int) -> void:
 func in_combat(actor: Dictionary) -> bool:
 	return actor.has("combat")
 
+func _actor_by_id(reference_id: int) -> Dictionary:
+	for candidate: Dictionary in host.get("_npc_actors"):
+		if int(candidate.get("reference_id", 0)) == reference_id:
+			return candidate
+	return {}
+
+func _actor_fighting(actor: Dictionary) -> bool:
+	var root := actor.get("root") as Node3D
+	return is_instance_valid(root) and not bool(root.get("inactive")) and root.visible and not bool(actor.get("dead", false))
+
 func update(delta: float) -> void:
 	if not bool(host.get("_player_actor_values_ready")):
 		return
@@ -100,7 +116,7 @@ func update(delta: float) -> void:
 		_check_timer = START_CHECK_S
 	for actor: Dictionary in host.get("_npc_actors"):
 		var root := actor.get("root") as Node3D
-		if not is_instance_valid(root) or bool(root.get("inactive")) or not root.visible:
+		if not is_instance_valid(root) or bool(root.get("inactive")) or not root.visible or bool(actor.get("dead", false)):
 			continue
 		_advance_actor_fatigue(actor, root, delta)
 		if str(actor.get("knockdown_state", "")) in ["falling", "downed", "getting_up"]:
@@ -113,12 +129,21 @@ func update(delta: float) -> void:
 			actor.erase("hit_reaction")
 			actor["active_animation"] = ""
 		if actor.has("combat"):
-			if _player_dead:
+			if _player_dead and int((actor.combat as Dictionary).get("target_id", 0)) == 0:
 				_end_combat(actor)
 			else:
 				_update_combat(actor, root, player, delta)
-		elif check_starts and not _player_dead and _wants_to_fight(actor, root, player):
-			_begin_combat(actor, root)
+		elif check_starts:
+			var reference_id := int(actor.get("reference_id", 0))
+			var forced_target := int(_forced.get(reference_id, 0))
+			if forced_target != 0:
+				var victim := _actor_by_id(forced_target)
+				if bool(victim.get("dead", false)):
+					_forced.erase(reference_id)
+				elif not _calmed.has(reference_id) and not victim.is_empty() and _actor_fighting(victim):
+					_begin_combat(actor, root, forced_target)
+			elif not _player_dead and _wants_to_fight(actor, root, player):
+				_begin_combat(actor, root)
 
 func _player_health() -> float:
 	var vitals: Dictionary = (host.get("_player_actor_values") as RefCounted).call("snapshot")
@@ -138,7 +163,7 @@ func _wants_to_fight(actor: Dictionary, root: Node3D, player: CharacterBody3D) -
 	var aggression := _aggression(actor)
 	var ordered := _forced.has(reference_id) or _provoked.has(reference_id)
 	if not ordered:
-		if aggression < AGGRESSION_ATTACKS_ON_SIGHT:
+		if aggression < AGGRESSION_ATTACKS_ON_SIGHT or _on_scripted_errand(actor):
 			return false
 		if distance > (DETECT_RADIUS_FRENZIED_M if aggression >= 80 else DETECT_RADIUS_M):
 			return false
@@ -146,7 +171,13 @@ func _wants_to_fight(actor: Dictionary, root: Node3D, player: CharacterBody3D) -
 		return false
 	return ordered or _sees_player(root, player)
 
-func _sees_player(root: Node3D, player: CharacterBody3D) -> bool:
+## An actor walking to the place its quest package names is not distracted by the player; it fights when the script says.
+func _on_scripted_errand(actor: Dictionary) -> bool:
+	var package: Dictionary = actor.get("package", {})
+	return not package.is_empty() and not bool(actor.get("package_done", false)) \
+		and int(host.call("_package_destination_form_id", package)) not in [0, int(host.get("PLAYER_REFERENCE_FORM_ID"))]
+
+func _sees_player(root: Node3D, player: CollisionObject3D) -> bool:
 	var camera: Camera3D = player.get("camera")
 	var to := camera.global_position if camera != null else player.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
 	var from := root.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
@@ -189,6 +220,35 @@ func receive_player_hit(reference_id: int, source_position: Vector3, fatigue_dam
 	if actor.is_empty():
 		return
 	provoke(reference_id)
+	_react_to_hit(actor, source_position, fatigue_damage, 0)
+
+## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
+func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) -> void:
+	if bool(victim.get("dead", false)):
+		return
+	var attacker_root := attacker.get("root") as Node3D
+	var attacker_id := int(attacker.get("reference_id", 0))
+	var health: Dictionary = victim.get("health", {})
+	if not health.is_empty():
+		var remaining := maxf(0.0, float(health.get("current", 0.0)) - damage)
+		if bool(victim.get("essential", false)):
+			remaining = maxf(remaining, 1.0)
+		health["current"] = remaining
+		victim["health"] = health
+		if remaining <= 0.0:
+			_run_actor_events(victim, "OnHit", str(attacker.get("reference_name", "")))
+			kill_actor(victim)
+			return
+	_run_actor_events(victim, "OnHit", "")
+	_run_actor_events(victim, "OnHit", str(attacker.get("reference_name", "")))
+	if bool(victim.get("dead", false)):
+		return
+	var fight_back := _aggression(victim) >= AGGRESSION_DEFENDS and not _calmed.has(int(victim.get("reference_id", 0)))
+	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
+	_react_to_hit(victim, source, damage * ACTOR_HIT_FATIGUE_MULT, attacker_id if fight_back else -1)
+	_call_allies(victim, attacker)
+
+func _react_to_hit(actor: Dictionary, source_position: Vector3, fatigue_damage: float, fight_target_id: int) -> void:
 	var root := actor.get("root") as Node3D
 	if is_instance_valid(root):
 		var away := root.global_position - source_position
@@ -205,13 +265,73 @@ func receive_player_hit(reference_id: int, source_position: Vector3, fatigue_dam
 	if _actor_fatigue_current(actor) <= 0.0:
 		_begin_knockdown(actor)
 	else:
-		if is_instance_valid(root) and not actor.has("combat"):
-			_begin_combat(actor, root)
+		if is_instance_valid(root) and not actor.has("combat") and fight_target_id >= 0:
+			_begin_combat(actor, root, fight_target_id)
 		_begin_stagger(actor)
+
+## Actors that share a faction with the victim come to its help against the attacker.
+func _call_allies(victim: Dictionary, attacker: Dictionary) -> void:
+	var victim_root := victim.get("root") as Node3D
+	var attacker_id := int(attacker.get("reference_id", 0))
+	var victim_factions: PackedInt64Array = victim.get("faction_form_ids", PackedInt64Array())
+	var attacker_factions: PackedInt64Array = attacker.get("faction_form_ids", PackedInt64Array())
+	if not is_instance_valid(victim_root) or victim_factions.is_empty():
+		return
+	for ally: Dictionary in host.get("_npc_actors"):
+		var ally_root := ally.get("root") as Node3D
+		if ally == victim or ally.has("combat") or not _actor_fighting(ally) or int(ally.get("reference_id", 0)) == attacker_id:
+			continue
+		if _aggression(ally) < AGGRESSION_DEFENDS or _calmed.has(int(ally.get("reference_id", 0))):
+			continue
+		if ally_root.global_position.distance_to(victim_root.global_position) > ALLY_HELP_RADIUS_M:
+			continue
+		var allied := false
+		var ally_factions: PackedInt64Array = ally.get("faction_form_ids", PackedInt64Array())
+		for faction_id: int in ally_factions:
+			if victim_factions.has(faction_id) and not attacker_factions.has(faction_id):
+				allied = true
+				break
+		if allied:
+			_begin_combat(ally, ally_root, attacker_id)
+
+## Runs an event block of the actor's own script (OnHit, OnDeath) and applies what it does.
+func _run_actor_events(actor: Dictionary, event: String, detail: String) -> void:
+	var quest_world: Object = host.get("quest_world")
+	var quest_id := str(host.get("route_quest_editor_id"))
+	if quest_world == null or quest_id.is_empty():
+		return
+	host.call("_sync_player_actor_values_to_quest_world")
+	var result: Dictionary = quest_world.call(
+		"run_actor_event", quest_id, str(actor.get("npc_editor_id", "")), event, detail, Callable(host, "_quest_distance")
+	)
+	host.call("fill_actor_event_target", result, actor)
+	for line: String in host.call("_apply_driver_result", result):
+		print("OpenOB combat %s: %s" % [event, line])
+	if bool(host.call("_needs_route_refresh", result)):
+		host.call("_refresh_npc_routes")
+
+## The actor dies: it falls and stays down, and its OnDeath script runs.
+func kill_actor(actor: Dictionary) -> void:
+	if bool(actor.get("dead", false)):
+		return
+	var root := actor.get("root") as Node3D
+	var reference_id := int(actor.get("reference_id", 0))
+	actor["dead"] = true
+	actor.erase("combat")
+	actor.erase("combat_anim")
+	_forced.erase(reference_id)
+	_provoked.erase(reference_id)
+	_set_weapon_drawn(actor, false)
+	_begin_knockdown(actor)
+	if is_instance_valid(root):
+		# The body lies where it fell but does not block the living (its layer is off; it still rests on the floor).
+		(root as CollisionObject3D).collision_layer = 0
+	print("OpenOB combat: %s dies" % str(actor.get("reference_name", "NPC")))
+	_run_actor_events(actor, "OnDeath", "")
 
 func _advance_actor_fatigue(actor: Dictionary, root: Node3D, delta: float) -> void:
 	var fatigue: Dictionary = actor.get("fatigue", {})
-	if fatigue.is_empty():
+	if fatigue.is_empty() or bool(actor.get("dead", false)):
 		return
 	var maximum := float(fatigue.get("max", 0.0))
 	if maximum <= 0.0:
@@ -322,8 +442,8 @@ func _request_special_clip(actor: Dictionary, clip_name: String, asset_path: Str
 			animations[clip_name] = animation
 		return
 
-func _begin_combat(actor: Dictionary, root: Node3D) -> void:
-	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true}
+func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0) -> void:
+	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true, "target_id": target_id}
 	actor["combat_anim"] = ""
 	_set_weapon_drawn(actor, true)
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
@@ -336,8 +456,10 @@ func _begin_combat(actor: Dictionary, root: Node3D) -> void:
 		_request_clip(actor, prefix + suffix)
 	_stop_route(root)
 	_cancel_package_route(actor)
-	print("OpenOB combat: %s attacks the player (aggression %d, weapon type %d)" % [
-		str(actor.get("reference_name", "NPC")), _aggression(actor), _weapon_type(actor)
+	print("OpenOB combat: %s attacks %s (aggression %d, weapon type %d)" % [
+		str(actor.get("reference_name", "NPC")),
+		"the player" if target_id == 0 else str(_actor_by_id(target_id).get("reference_name", "an actor")),
+		_aggression(actor), _weapon_type(actor)
 	])
 
 func _end_combat(actor: Dictionary) -> void:
@@ -376,7 +498,18 @@ func _set_weapon_drawn(actor: Dictionary, drawn: bool) -> void:
 
 func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, delta: float) -> void:
 	var combat: Dictionary = actor.combat
-	var to_player := player.global_position - root.global_position
+	var target: CollisionObject3D = player
+	var target_id := int(combat.get("target_id", 0))
+	var target_actor: Dictionary = {}
+	if target_id != 0:
+		target_actor = _actor_by_id(target_id)
+		if target_actor.is_empty() or not _actor_fighting(target_actor):
+			if bool(target_actor.get("dead", false)) and int(_forced.get(int(actor.get("reference_id", 0)), 0)) == target_id:
+				_forced.erase(int(actor.get("reference_id", 0)))
+			_end_combat(actor)
+			return
+		target = target_actor.root as CollisionObject3D
+	var to_player := target.global_position - root.global_position
 	var flat := Vector2(to_player.x, to_player.z)
 	var distance := flat.length()
 	if distance > LOSE_INTEREST_M or bool(host.get("_dialogue_active")):
@@ -385,12 +518,12 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 	combat.cooldown = maxf(float(combat.cooldown) - delta, 0.0)
 	var prefix := _prefix(actor)
 	if str(combat.state) == "swing":
-		_update_swing(actor, root, player, combat, delta, flat)
+		_update_swing(actor, root, target, target_actor, combat, delta, flat)
 		return
 	var archer := _is_archer(actor)
 	var in_attack_range := distance <= (ARCHER_RANGE_M if archer else _reach_m(actor) * 0.85)
 	if archer:
-		in_attack_range = in_attack_range and distance >= ARCHER_MIN_RANGE_M and _sees_player(root, player)
+		in_attack_range = in_attack_range and distance >= ARCHER_MIN_RANGE_M and _sees_player(root, target)
 	if in_attack_range:
 		_stop_route(root)
 		_face(root, flat, delta)
@@ -401,11 +534,11 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 	combat.repath = float(combat.repath) - delta
 	if float(combat.repath) <= 0.0:
 		combat.repath = REPATH_S
-		_chase(actor, root, player, archer)
+		_chase(actor, root, target, archer)
 	var speed := Vector2(root.velocity.x, root.velocity.z).length()
 	actor["combat_anim"] = prefix + ("fastforward" if speed > RUNNING_ANIMATION_SPEED_MPS else "forward")
 
-func _chase(actor: Dictionary, root: Node3D, player: CharacterBody3D, archer: bool) -> void:
+func _chase(actor: Dictionary, root: Node3D, player: Node3D, archer: bool) -> void:
 	var arrival := (ARCHER_RANGE_M * 0.7) if archer else _reach_m(actor) * 0.6
 	var path: PackedVector3Array = host.get("director").call(
 		"navigation_path", root.global_position, player.global_position, host.call("_actor_collision_radius", root), false, arrival
@@ -460,7 +593,7 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 	actor["animation_time"] = combat.time
 	actor["active_animation"] = ""
 
-func _update_swing(actor: Dictionary, root: Node3D, player: CharacterBody3D, combat: Dictionary, delta: float, flat: Vector2) -> void:
+func _update_swing(actor: Dictionary, root: Node3D, player: CollisionObject3D, target_actor: Dictionary, combat: Dictionary, delta: float, flat: Vector2) -> void:
 	var animation: Dictionary = (actor.animations as Dictionary).get(str(combat.clip), {})
 	if animation.is_empty():
 		combat.state = "chase"
@@ -472,7 +605,7 @@ func _update_swing(actor: Dictionary, root: Node3D, player: CharacterBody3D, com
 		var hit_time := _hit_time(animation)
 		if previous < hit_time and float(combat.time) >= hit_time:
 			combat.hit_done = true
-			_land_hit(actor, root, player, combat)
+			_land_hit(actor, root, player, target_actor, combat)
 	if float(combat.time) >= float(animation.get("stop_time", 0.0)):
 		combat.state = "chase"
 		combat.repath = 0.0
@@ -489,15 +622,18 @@ func _hit_time(animation: Dictionary) -> float:
 	var start := float(animation.get("start_time", 0.0))
 	return start + (float(animation.get("stop_time", start)) - start) * 0.55
 
-func _land_hit(actor: Dictionary, root: Node3D, player: CharacterBody3D, combat: Dictionary) -> void:
+func _land_hit(actor: Dictionary, root: Node3D, player: CollisionObject3D, target_actor: Dictionary, combat: Dictionary) -> void:
 	if _is_archer(actor):
-		_loose_arrow(actor, root, player)
+		_loose_arrow(actor, root, player, target_actor)
 		return
 	var distance := Vector2(player.global_position.x - root.global_position.x, player.global_position.z - root.global_position.z).length()
 	if distance > _reach_m(actor) + HIT_REACH_SLACK_M:
 		return
 	var damage := _damage(actor) * (POWER_ATTACK_DAMAGE_MULT if bool(combat.get("power", false)) else 1.0)
-	_hurt_player(actor, root, player, damage)
+	if target_actor.is_empty():
+		_hurt_player(actor, root, player as CharacterBody3D, damage)
+	else:
+		receive_actor_hit(target_actor, actor, damage)
 
 func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, damage: float, projectile_hit := false) -> void:
 	var blocking: bool = host.call("is_player_blocking")
@@ -523,7 +659,7 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked)
 	player_hit.emit(str(actor.get("reference_name", "NPC")), damage)
 
-func _loose_arrow(actor: Dictionary, root: Node3D, player: CharacterBody3D) -> void:
+func _loose_arrow(actor: Dictionary, root: Node3D, player: CollisionObject3D, target_actor: Dictionary) -> void:
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
 	if audio_manager != null:
 		audio_manager.call("play_bow_shot", root)
@@ -547,7 +683,10 @@ func _loose_arrow(actor: Dictionary, root: Node3D, player: CharacterBody3D) -> v
 		if impact_audio != null:
 			impact_audio.call("play_arrow_impact", hit_position)
 		if collider == player and is_instance_valid(root):
-			_hurt_player(actor, root, player, damage, true)
+			if target_actor.is_empty():
+				_hurt_player(actor, root, player as CharacterBody3D, damage, true)
+			else:
+				receive_actor_hit(target_actor, actor, damage)
 	)
 	host.add_child(arrow)
 	arrow.global_position = origin

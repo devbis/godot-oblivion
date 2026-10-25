@@ -33,13 +33,14 @@ func actor_value_override(actor_name: String, value_name: String) -> Variant:
 	return (av_overrides.get(actor_name.to_lower(), {}) as Dictionary).get(value_name.to_lower())
 
 
-func _combat_or_enable(command: String, target: String, world: Node3D, label: String) -> String:
+func _combat_or_enable(command: String, target: String, arguments: Array, world: Node3D, label: String) -> String:
 	if target.is_empty():
 		return "not applied: %s needs an actor" % label
 	var method := {"startcombat": "start_npc_combat", "stopcombat": "stop_npc_combat", "enable": "enable_npc_reference"}[command] as String
 	if not world.has_method(method):
 		return "not applied: %s, the scene has no %s" % [label, method]
-	return "%s: %s" % [label, str(world.call(method, target))]
+	var extra: Array = [str(arguments[0])] if command == "startcombat" and not arguments.is_empty() else []
+	return "%s: %s" % [label, str(world.callv(method, [target] + extra))]
 
 
 func is_actor_removed(reference_id: int) -> bool:
@@ -99,10 +100,12 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 				av_overrides[target.to_lower()] = overrides
 			return "applied state: %s" % label
 		"startcombat", "stopcombat", "enable":
-			return _combat_or_enable(command, target, world, label)
+			return _combat_or_enable(command, target, arguments, world, label)
 		"moveto":
 			return _move_to(target, arguments, references, world, transform_of, label)
 		"kill", "disable":
+			if command == "kill" and world.has_method("kill_npc") and bool(world.call("kill_npc", target)):
+				return "applied: %s" % label
 			return _deactivate(target, command, references, world, label)
 		"setopenstate":
 			return _set_open_state(target, arguments, references, world, label)

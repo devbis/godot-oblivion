@@ -860,7 +860,7 @@ var _player_route_timer := 0.0
 ## Player-targeted packages and Follow packages track their live target as it moves.
 func _update_dynamic_target_routes() -> void:
 	for actor: Dictionary in _npc_actors:
-		if _npc_combat != null and _npc_combat.in_combat(actor):
+		if (_npc_combat != null and _npc_combat.in_combat(actor)) or bool(actor.get("dead", false)):
 			continue
 		var package: Dictionary = actor.get("package", {})
 		var destination_form_id := _package_destination_form_id(package)
@@ -1032,6 +1032,13 @@ func _name_speakers(result: Dictionary) -> void:
 		if str(action.get("command", "")).to_lower() == "speech" and arguments.size() > 1:
 			arguments[1] = str(data_reader.find_editor_id(int(arguments[1])))
 
+## A command in an actor's own script has no `Ref.` prefix when it is about that actor (`startcombat baurusref`).
+func fill_actor_event_target(result: Dictionary, actor: Dictionary) -> void:
+	for action_value: Variant in result.get("actions", []):
+		var action: Dictionary = action_value
+		if str(action.get("target", "")).is_empty() and str(action.get("command", "")).to_lower() in ["startcombat", "stopcombat", "kill"]:
+			action["target"] = str(actor.get("reference_name", ""))
+
 ## True when a result asked the NPCs to re-evaluate their packages (evp). As in the game, a stage change alone does not
 ## re-evaluate them: the data asks for it with evp, so a package that is still the first to hold keeps its route.
 func _needs_route_refresh(result: Dictionary) -> bool:
@@ -1159,7 +1166,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if not is_instance_valid(root) or bool(root.get("inactive")):
 		return
 	# A fighting actor chases the player; its package resumes when the fight ends.
-	if _npc_combat != null and _npc_combat.in_combat(actor):
+	if (_npc_combat != null and _npc_combat.in_combat(actor)) or bool(actor.get("dead", false)):
 		return
 	var package: Dictionary = {}
 	var npc_id := str(actor.get("npc_editor_id", ""))
@@ -1317,6 +1324,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			_activate_ai_package_target(actor, package)
 		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
+		fill_actor_event_target(result, actor)
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
 		if _needs_route_refresh(result):
@@ -4434,6 +4442,12 @@ func _actor_reference_disabled(reference: Dictionary, depth: int = 0) -> bool:
 			return _actor_reference_disabled(parent, depth + 1) != bool(reference.get("enable_parent_inverted", false))
 	return bool(reference.get("initially_disabled", false)) and not _enabled_reference_ids.has(int(reference.get("form_id", 0)))
 
+func _reference_by_form_id(form_id: int) -> Dictionary:
+	for reference_value: Variant in current_cell.get("references", []):
+		if int((reference_value as Dictionary).get("form_id", 0)) == form_id:
+			return reference_value
+	return {}
+
 var _enabled_reference_ids: Dictionary = {}
 
 ## Enable: an actor the plan placed disabled appears (streamed in at once if the cell is loaded).
@@ -4449,15 +4463,30 @@ func enable_npc_reference(reference_name: String) -> String:
 	return "%s is not in this cell" % reference_name
 
 ## StartCombat: the actor fights the player.
-func start_npc_combat(reference_name: String) -> String:
+func start_npc_combat(reference_name: String, victim_name: String = "") -> String:
+	var victim_id := 0
+	if not victim_name.is_empty() and victim_name.to_lower() != "player":
+		victim_id = _reference_id_by_name(victim_name)
+		if victim_id == 0:
+			return "%s is not in this cell" % victim_name
 	var actor := _npc_actor_by_reference(reference_name.strip_edges().to_lower())
 	var reference_id := int(actor.get("reference_id", 0)) if not actor.is_empty() else _reference_id_by_name(reference_name)
 	if reference_id == 0:
 		return "%s is not in this cell" % reference_name
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
-	_npc_combat.force_combat(reference_id)
-	return "%s attacks the player" % reference_name
+	_npc_combat.force_combat(reference_id, victim_id)
+	return "%s attacks %s" % [reference_name, victim_name if victim_id != 0 else "the player"]
+
+## Kill: a loaded actor falls and stays down; false when it is not loaded (the caller then removes it).
+func kill_npc(reference_name: String) -> bool:
+	var actor := _npc_actor_by_reference(reference_name.strip_edges().to_lower())
+	if actor.is_empty():
+		return false
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	_npc_combat.kill_actor(actor)
+	return true
 
 func stop_npc_combat(reference_name: String) -> String:
 	var reference_id := _reference_id_by_name(reference_name)
@@ -4480,12 +4509,6 @@ func is_player_blocking() -> bool:
 func _combat_menus_closed() -> bool:
 	return not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition \
 		and not player.face_preview_enabled
-
-func _reference_by_form_id(form_id: int) -> Dictionary:
-	for reference_value: Variant in current_cell.get("references", []):
-		if int((reference_value as Dictionary).get("form_id", 0)) == form_id:
-			return reference_value
-	return {}
 
 func _combat_input_allowed() -> bool:
 	return _weapon_drawn and _arms != null and _arms.built and _combat_menus_closed() \
@@ -4949,6 +4972,13 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
+func _initial_actor_health(npc: Dictionary) -> Dictionary:
+	# The record's base health plus the endurance share (fHealthEndurMult is 2 in the original).
+	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
+	var maximum := float(npc.get("base_health", 0.0)) + (float(attributes[5]) * 2.0 if attributes.size() > 5 else 0.0)
+	maximum = maxf(maximum, 1.0)
+	return {"current": maximum, "max": maximum}
+
 func _initial_actor_fatigue(npc: Dictionary) -> Dictionary:
 	var maximum := float(npc.get("base_fatigue", 0.0))
 	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
@@ -5098,6 +5128,10 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"hit_reaction": {},
 			"hit_attack_lock_remaining": 0.0,
 			"aggression": int(npc.get("aggression", 0)),
+			"health": _initial_actor_health(npc),
+			"essential": (int(npc.get("flags", 0)) & 0x2) != 0,
+			"faction_form_ids": npc.get("faction_form_ids", PackedInt64Array()),
+			"dead": false,
 			"confidence": int(npc.get("confidence", 50)),
 			"weapon_form_id": int(assembled.get("weapon_form_id", 0)),
 			"weapon_meshes": assembled.get("weapon_meshes", []),
