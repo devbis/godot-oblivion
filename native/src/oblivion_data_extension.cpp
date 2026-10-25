@@ -1281,6 +1281,43 @@ public:
         return topic ? static_cast<int64_t>(topic->form_id) : 0;
     }
 
+    Dictionary find_dialogue_voice_line(const String& topic_editor_id, int64_t speaker_base,
+                                        int64_t listener_base, const String& listener_race,
+                                        bool listener_female) const {
+        if (!game_ || !world_) return {};
+        const std::string wanted_topic = lower_ascii(utf8_value(topic_editor_id));
+        const oblivion::DialogTopic* topic = nullptr;
+        for (const auto& topic_entry : game_->topics()) {
+            const auto& candidate = topic_entry.second;
+            if (lower_ascii(candidate.editor_id) == wanted_topic) {
+                topic = &candidate;
+                break;
+            }
+        }
+        if (!topic) return {};
+
+        const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
+        const auto* reply = world_->find_dialogue_topic_reply(*topic, context);
+        if (!reply) return {};
+        const auto* quest = game_->find_quest(reply->quest);
+        if (!quest) return {};
+
+        const oblivion::DialogResponseLine* line = nullptr;
+        for (const auto& candidate : reply->lines) {
+            if (!line) line = &candidate;
+            if (candidate.has_text) {
+                line = &candidate;
+                break;
+            }
+        }
+        Dictionary result;
+        result["quest_editor_id"] = utf8_text(quest->editor_id);
+        result["topic_editor_id"] = utf8_text(topic->editor_id);
+        result["reply_form_id"] = static_cast<int64_t>(reply->form_id);
+        result["line_number"] = line ? line->number : 1;
+        return result;
+    }
+
     Dictionary select_dialog_topic(int64_t topic_form_id, int64_t speaker_base, int64_t listener_base,
                                    const String& listener_race, bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
@@ -1403,6 +1440,9 @@ public:
         ClassDB::bind_method(D_METHOD("available_dialog_topics", "speaker_base", "listener_base", "listener_race", "listener_female"),
                              &OblivionQuestWorld::available_dialog_topics);
         ClassDB::bind_method(D_METHOD("find_topic_form_id", "editor_id"), &OblivionQuestWorld::find_topic_form_id);
+        ClassDB::bind_method(D_METHOD("find_dialogue_voice_line", "topic_editor_id", "speaker_base", "listener_base",
+                                      "listener_race", "listener_female"),
+                             &OblivionQuestWorld::find_dialogue_voice_line);
         ClassDB::bind_method(D_METHOD("select_dialog_topic", "topic_form_id", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),
                              &OblivionQuestWorld::select_dialog_topic);
         ClassDB::bind_method(D_METHOD("set_player_actor_values", "values"), &OblivionQuestWorld::set_player_actor_values);

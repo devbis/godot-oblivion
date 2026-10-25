@@ -256,6 +256,9 @@ public:
     bool is_started(const QuestDriver* driver) const { return started_.count(const_cast<QuestDriver*>(driver)) != 0; }
 
     bool dialogue_topic_available(const DialogTopic& topic, const DialogueContext& context) const;
+    // Returns the first eligible reply without running its result script. Combat voice cues use the same
+    // quest state and INFO conditions as dialogue, but must not trigger dialogue side effects.
+    const DialogResponse* find_dialogue_topic_reply(const DialogTopic& topic, const DialogueContext& context) const;
     TopicRun run_dialogue_topic(const DialogTopic& topic, const DialogueContext& context,
                                 const DistanceFunction& distance = {}, int depth = 0);
 

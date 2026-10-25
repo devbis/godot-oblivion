@@ -4884,11 +4884,17 @@ func _melee_hit() -> void:
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
 
-func _player_take_combat_hit(source: Node3D, damage: float, fatigue_damage: float, blocked := false) -> void:
+func _player_take_combat_hit(
+	source: Node3D, damage: float, fatigue_damage: float, blocked := false, source_base_form_id := 0
+) -> void:
 	if _player_actor_values_ready:
 		_player_actor_values.apply_damage(damage)
 		_player_actor_values.modify_fatigue(-fatigue_damage)
 		_sync_player_actor_values_to_quest_world()
+	if not blocked and source_base_form_id > 0:
+		AudioManager.play_combat_voice(
+			player, int(_player_base_record.get("form_id", 0)), source_base_form_id, "Hit"
+		)
 	if is_instance_valid(source):
 		var away := player.global_position - source.global_position
 		away.y = 0.0

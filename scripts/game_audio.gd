@@ -23,16 +23,19 @@ var _weapon_state_initialized := false
 var _last_weapon_form_id := 0
 var _observed_animations: Dictionary = {}
 var _dialogue_players: Dictionary = {}
-var _npc_female_cache: Dictionary = {}
 var _missing_voice_warnings: Dictionary = {}
 var _invalid_lip_warnings: Dictionary = {}
 var _reported_lip_files: Dictionary = {}
+var _combat_audio_rng := RandomNumberGenerator.new()
+var _last_combat_variant: Dictionary = {}
+var _combat_voice_candidates: Dictionary = {}
 var _last_world_loading := false
 var _last_interaction_toast := ""
 
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_combat_audio_rng.randomize()
 	set_process(true)
 
 
@@ -75,15 +78,76 @@ func play_footstep(actor: Node3D, running := false) -> void:
 		_play_asset_at(fallback, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6)
 
 
-## Plays a combat effort sound. Animation transitions into attack/block/hit states
-## are watched automatically; this method is also available to future combat code.
-func play_combat_effort(actor: Node3D, female := false) -> void:
-	if not is_instance_valid(actor) or not _reader_is_ready():
+## Plays the actor's authored Hit/Attack voice response, if the running quests have
+## an eligible INFO. The data query checks conditions without running its result script.
+func play_combat_voice(actor: Node3D, speaker_base_id: int, listener_base_id: int, topic_name: String) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready() or speaker_base_id <= 0 or listener_base_id <= 0:
 		return
-	var sex := "female" if female else "male"
-	var variant := randi_range(1, 4)
-	var asset_path := "sound\\fx\\npc\\human\\gasp\\%s\\voc_gasp_%s_%02d.wav" % [sex, sex, variant]
-	_play_asset_at(asset_path, actor.global_position + Vector3.UP * 1.1, actor, -2.0, 32.0, 2.0)
+	if not is_instance_valid(_scene_root):
+		return
+	var quest_world: Variant = _scene_root.get("quest_world")
+	var speaker: Dictionary = _data_reader.call("find_npc_base", speaker_base_id)
+	var listener: Dictionary = _data_reader.call("find_npc_base", listener_base_id)
+	if speaker.is_empty() or listener.is_empty():
+		return
+	var listener_race_id := int(listener.get("race_form_id", 0))
+	var listener_race := str(_data_reader.call("find_editor_id", listener_race_id)) if listener_race_id > 0 else ""
+	var listener_female := bool(listener.get("female", false))
+	var voice_line: Dictionary = {}
+	if quest_world != null and quest_world.has_method("find_dialogue_voice_line"):
+		voice_line = quest_world.call(
+			"find_dialogue_voice_line", topic_name, speaker_base_id, listener_base_id,
+			listener_race, listener_female
+		)
+	var speaker_race_id := int(speaker.get("race_form_id", 0))
+	var race_editor_id := str(_data_reader.call("find_editor_id", speaker_race_id)) if speaker_race_id > 0 else ""
+	var female := bool(speaker.get("female", false))
+	var sex := "f" if female else "m"
+	var voice_group_key := "voice_folder_female" if female else "voice_folder_male"
+	var mapped_voice_group := str(speaker.get(voice_group_key, "")).strip_edges().to_lower()
+	var voice_group := mapped_voice_group if not mapped_voice_group.is_empty() else _voice_group(race_editor_id)
+	var dialogue_file_name := ""
+	var groups_to_try: Array[String] = [voice_group]
+	if mapped_voice_group.is_empty():
+		for group: String in VOICE_GROUPS:
+			if group != voice_group:
+				groups_to_try.push_back(group)
+	if not voice_line.is_empty():
+		var quest := str(voice_line.get("quest_editor_id", "")).to_lower()
+		var topic := str(voice_line.get("topic_editor_id", topic_name)).to_lower()
+		var reply_id := int(voice_line.get("reply_form_id", 0))
+		var line_number := maxi(1, int(voice_line.get("line_number", 1)))
+		dialogue_file_name = "%s_%s_%08x_%d.mp3" % [quest, topic, reply_id, line_number]
+	for group: String in groups_to_try:
+		if not voice_line.is_empty():
+			var asset_path := "sound\\voice\\oblivion.esm\\%s\\%s\\%s" % [group, sex, dialogue_file_name]
+			var stream := _stream_for_asset(asset_path)
+			if stream != null:
+				_play_stream(stream, actor.global_position + Vector3.UP * 1.2, actor, voice_volume_db, 42.0, 2.0)
+				return
+		var candidates := _combat_voice_files(group, sex, topic_name.to_lower())
+		if candidates.is_empty():
+			continue
+		var variant := _next_combat_variant("voice_%s_%s_%s" % [group, sex, topic_name.to_lower()], candidates.size())
+		var candidate_stream := _stream_for_asset(candidates[variant - 1])
+		if candidate_stream != null:
+			_play_stream(candidate_stream, actor.global_position + Vector3.UP * 1.2, actor, voice_volume_db, 42.0, 2.0)
+			return
+
+
+func _combat_voice_files(group: String, sex: String, topic: String) -> Array[String]:
+	var cache_key := "%s:%s:%s" % [group, sex, topic]
+	if _combat_voice_candidates.has(cache_key):
+		var cached_candidates: Array[String] = _combat_voice_candidates[cache_key]
+		return cached_candidates
+	var prefix := "sound\\voice\\oblivion.esm\\%s\\%s\\" % [group, sex]
+	var candidates: Array[String] = []
+	for path: String in _data_reader.call("list_assets", prefix):
+		var file_name := path.get_file()
+		if file_name.ends_with(".mp3") and file_name.contains("_%s_" % topic):
+			candidates.push_back(path)
+	_combat_voice_candidates[cache_key] = candidates
+	return candidates
 
 ## Original Oblivion weapon foley. WEAP types 0/2 are one-handed, 1/3 two-handed,
 ## 4 staff, 5 bow, and -1 bare hands.
@@ -116,11 +180,14 @@ func play_weapon_swing(actor: Node3D, weapon_type: int) -> void:
 	elif weapon_type in [1, 3, 4]:
 		group = "large"
 		variant_count = 1
-	var variant := randi_range(1, variant_count)
+	var variant := _next_combat_variant("swish_" + group, variant_count)
 	var asset_path := "sound\\fx\\wpn\\swish\\%s\\wpn_swish_%s_%02d.wav" % [group, group, variant]
 	if group == "hand":
 		asset_path = "sound\\fx\\wpn\\swish\\hand\\wpn_swishhand_%02d.wav" % variant
-	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 30.0, 2.0)
+	# Oblivion ships one large-weapon swish, so vary its pitch very slightly instead
+	# of pretending there are missing archive variants.
+	var pitch_scale := _combat_audio_rng.randf_range(0.97, 1.03) if group == "large" else 1.0
+	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 30.0, 2.0, pitch_scale)
 
 func play_bow_shot(actor: Node3D) -> void:
 	if not is_instance_valid(actor) or not _reader_is_ready():
@@ -137,7 +204,7 @@ func play_weapon_block(actor: Node3D, weapon_type: int) -> void:
 		group = "blunt"
 	elif weapon_type == 4:
 		group = "staff"
-	var variant := randi_range(1, 3)
+	var variant := _next_combat_variant("block_" + group, 3)
 	var asset_path := "sound\\fx\\wpn\\weaponblock\\%s\\wpn_block_%s_%02d.wav" % [group, group, variant]
 	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 30.0, 2.0)
 
@@ -153,7 +220,7 @@ func play_weapon_impact(position: Vector3, weapon_type: int, flesh: bool, host: 
 		variant_count = 3 if flesh else 4
 	elif weapon_type in [2, 3, 4]:
 		group = "bluntflesh" if flesh else "blunt"
-	var variant := randi_range(1, variant_count)
+	var variant := _next_combat_variant("impact_" + group, variant_count)
 	var file_name := "wpn_hit_%s_%02d.wav" % [group, variant]
 	if group == "bladeflesh":
 		file_name = "wpn_hit_bladeflesh_%02d.wav" % variant
@@ -165,7 +232,7 @@ func play_weapon_impact(position: Vector3, weapon_type: int, flesh: bool, host: 
 func play_arrow_impact(position: Vector3) -> void:
 	if not _reader_is_ready():
 		return
-	var variant := randi_range(1, 3)
+	var variant := _next_combat_variant("arrow_impact", 3)
 	var asset_path := "sound\\fx\\wpn\\weaponhit\\arrow\\wpn_hit_arrow_%02d.wav" % variant
 	_play_asset_at(asset_path, position, null, effect_volume_db, 34.0, 2.0)
 
@@ -342,12 +409,13 @@ func _play_asset_at(
 	host: Node3D,
 	volume_db: float,
 	max_distance: float,
-	unit_size: float
+	unit_size: float,
+	pitch_scale := 1.0
 ) -> bool:
 	var stream := _stream_for_asset(asset_path)
 	if stream == null:
 		return false
-	_play_stream(stream, position, host, volume_db, max_distance, unit_size)
+	_play_stream(stream, position, host, volume_db, max_distance, unit_size, "", pitch_scale)
 	return true
 
 
@@ -358,12 +426,14 @@ func _play_stream(
 	volume_db: float,
 	max_distance: float,
 	unit_size: float,
-	audio_bus := ""
+	audio_bus := "",
+	pitch_scale := 1.0
 ) -> AudioStreamPlayer3D:
 	var player := AudioStreamPlayer3D.new()
 	player.name = "OriginalGameAudio"
 	player.stream = stream
 	player.volume_db = volume_db
+	player.pitch_scale = pitch_scale
 	player.max_distance = max_distance
 	player.unit_size = unit_size
 	if not audio_bus.is_empty():
@@ -636,7 +706,7 @@ func _watch_combat_animations() -> void:
 	var player_node := _scene_root.get_node_or_null("Player") as Node3D
 	var player_animation := str(_scene_root.get("_active_animation"))
 	var player_time := float(_scene_root.get("_animation_time"))
-	_watch_animation("player", player_animation, player_time, player_node, false, -1, false, false)
+	_watch_animation("player", player_animation, player_time, player_node, -1, false)
 	var actor_states: Variant = _scene_root.get("_npc_actors")
 	if not actor_states is Array:
 		return
@@ -648,10 +718,9 @@ func _watch_combat_animations() -> void:
 		var actor_id := str(actor_state.get("reference_id", actor.get_instance_id()))
 		var animation := str(actor_state.get("active_animation", ""))
 		var animation_time := float(actor_state.get("animation_time", 0.0))
-		var base_form_id := int(actor_state.get("base_form_id", 0))
 		var weapon_record: Dictionary = actor_state.get("weapon_record", {})
 		_watch_animation(
-			"npc_" + actor_id, animation, animation_time, actor, _npc_is_female(base_form_id),
+			"npc_" + actor_id, animation, animation_time, actor,
 			int(weapon_record.get("weapon_type", -1)), true
 		)
 
@@ -682,18 +751,9 @@ func _watch_world_feedback() -> void:
 	_last_interaction_toast = toast
 
 
-func _npc_is_female(base_form_id: int) -> bool:
-	if _npc_female_cache.has(base_form_id):
-		return bool(_npc_female_cache[base_form_id])
-	var npc: Dictionary = _data_reader.call("find_npc_base", base_form_id)
-	var female := bool(npc.get("female", false))
-	_npc_female_cache[base_form_id] = female
-	return female
-
-
 func _watch_animation(
-	key: String, animation: String, animation_time: float, actor: Node3D, female: bool,
-	weapon_type := -1, swing_sound := false, effort_sound := true
+	key: String, animation: String, animation_time: float, actor: Node3D,
+	weapon_type := -1, swing_sound := false
 ) -> void:
 	var previous: Dictionary = _observed_animations.get(key, {})
 	var started := animation != str(previous.get("name", "")) or animation_time + 0.02 < float(previous.get("time", 0.0))
@@ -702,17 +762,18 @@ func _watch_animation(
 		return
 	if swing_sound and _is_attack_animation(animation):
 		play_weapon_swing(actor, weapon_type)
-	if effort_sound and _is_combat_effort_animation(animation):
-		play_combat_effort(actor, female)
 
 
 func _is_attack_animation(animation: String) -> bool:
 	return animation.to_lower().contains("attack")
 
 
-func _is_combat_effort_animation(animation: String) -> bool:
-	var normalized := animation.to_lower()
-	for word: String in ["attack", "block", "hit", "stagger", "combat"]:
-		if normalized.contains(word):
-			return true
-	return false
+func _next_combat_variant(group: String, count: int) -> int:
+	if count <= 1:
+		return 1
+	var variant := _combat_audio_rng.randi_range(1, count)
+	var previous := int(_last_combat_variant.get(group, 0))
+	if variant == previous:
+		variant = variant % count + 1
+	_last_combat_variant[group] = variant
+	return variant

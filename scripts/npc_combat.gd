@@ -228,7 +228,7 @@ func receive_player_hit(reference_id: int, source_position: Vector3, fatigue_dam
 	if actor.is_empty():
 		return
 	provoke(reference_id)
-	_react_to_hit(actor, source_position, fatigue_damage, 0)
+	_react_to_hit(actor, source_position, fatigue_damage, 0, _player_base_form_id())
 
 ## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
 func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) -> void:
@@ -253,16 +253,27 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 		return
 	var fight_back := _aggression(victim) >= AGGRESSION_DEFENDS and not _calmed.has(int(victim.get("reference_id", 0)))
 	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
-	_react_to_hit(victim, source, damage * ACTOR_HIT_FATIGUE_MULT, attacker_id if fight_back else -1)
+	_react_to_hit(
+		victim, source, damage * ACTOR_HIT_FATIGUE_MULT, attacker_id if fight_back else -1,
+		int(attacker.get("base_form_id", 0))
+	)
 	_call_allies(victim, attacker)
 
-func _react_to_hit(actor: Dictionary, source_position: Vector3, fatigue_damage: float, fight_target_id: int) -> void:
+func _react_to_hit(
+	actor: Dictionary, source_position: Vector3, fatigue_damage: float,
+	fight_target_id: int, listener_base_form_id: int
+) -> void:
 	var root := actor.get("root") as Node3D
 	if is_instance_valid(root):
 		var away := root.global_position - source_position
 		away.y = 0.0
 		if away.length_squared() > 0.0001:
 			root.call("apply_hit_impulse", away.normalized() * NPC_HIT_KNOCKBACK_MPS)
+		var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
+		if audio_manager != null:
+			audio_manager.call(
+				"play_combat_voice", root, int(actor.get("base_form_id", 0)), listener_base_form_id, "Hit"
+			)
 	var knockdown_state := str(actor.get("knockdown_state", ""))
 	if knockdown_state in ["falling", "downed"]:
 		return
@@ -274,7 +285,7 @@ func _react_to_hit(actor: Dictionary, source_position: Vector3, fatigue_damage: 
 		_begin_knockdown(actor)
 	else:
 		if is_instance_valid(root) and not actor.has("combat") and fight_target_id >= 0:
-			_begin_combat(actor, root, fight_target_id)
+			_begin_combat(actor, root, fight_target_id, false)
 		_begin_stagger(actor)
 
 ## Actors that share a faction with the victim come to its help against the attacker.
@@ -452,13 +463,18 @@ func _request_special_clip(actor: Dictionary, clip_name: String, asset_path: Str
 			animations[clip_name] = animation
 		return
 
-func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0) -> void:
+func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_attack_voice := true) -> void:
 	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true, "target_id": target_id}
 	actor["combat_anim"] = ""
 	_set_weapon_drawn(actor, true)
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
 	if audio_manager != null:
 		audio_manager.call("play_weapon_ready", root, _weapon_type(actor), true)
+		if play_attack_voice:
+			audio_manager.call(
+				"play_combat_voice", root, int(actor.get("base_form_id", 0)),
+				_combat_target_base_form_id(target_id), "Attack"
+			)
 	var prefix := _prefix(actor)
 	var suffixes: Array[String] = ["idle", "fastforward", "forward"]
 	suffixes.append_array(_attack_suffixes(prefix))
@@ -673,8 +689,20 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 				"play_weapon_impact", player.global_position + Vector3.UP, _weapon_type(actor), true, player
 			)
 	var fatigue_damage := maxf(8.0 if blocked else FATIGUE_HIT_MIN, damage * FATIGUE_HIT_COST_MULT)
-	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked)
+	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked, int(actor.get("base_form_id", 0)))
 	player_hit.emit(str(actor.get("reference_name", "NPC")), damage)
+
+func _player_base_form_id() -> int:
+	var player_base: Dictionary = host.get("_player_base_record")
+	return int(player_base.get("form_id", 0))
+
+func _combat_target_base_form_id(reference_id: int) -> int:
+	if reference_id == 0:
+		return _player_base_form_id()
+	for actor: Dictionary in host.get("_npc_actors"):
+		if int(actor.get("reference_id", 0)) == reference_id:
+			return int(actor.get("base_form_id", 0))
+	return 0
 
 func _loose_arrow(actor: Dictionary, root: Node3D, player: CollisionObject3D, target_actor: Dictionary) -> void:
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node

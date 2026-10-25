@@ -722,6 +722,16 @@ bool QuestWorld::dialogue_topic_available(const DialogTopic& topic, const Dialog
     return false;
 }
 
+const DialogResponse* QuestWorld::find_dialogue_topic_reply(const DialogTopic& topic,
+                                                            const DialogueContext& context) const {
+    for (const auto& response : topic.responses) {
+        const auto* quest = find_form(response.quest);
+        if (!quest || !is_started(quest)) continue;
+        if (quest->topic_reply_conditions_hold(response, context)) return &response;
+    }
+    return nullptr;
+}
+
 TopicRun QuestWorld::run_dialogue_topic(const DialogTopic& topic, const DialogueContext& context,
                                         const DistanceFunction& distance, int depth) {
     RunGuard guard(*this);
