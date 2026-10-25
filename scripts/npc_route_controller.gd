@@ -21,6 +21,9 @@ const HOP_TIMEOUT_S := 5.0
 const YIELD_CLEARANCE_PAUSE_S := 0.45
 const YIELD_RETRY_COOLDOWN_S := 0.8
 const YIELD_BLOCKED_WAIT_S := 0.65
+## A sidestep point comes from the navigation mesh, which can lie a little inside a wall the capsule cannot enter.
+const YIELD_ARRIVAL_M := 0.25
+const YIELD_STUCK_GIVE_UP_S := 0.6
 const YIELD_REQUEST_COOLDOWN_S := 1.0
 const ROUTE_BLOCKED_REPORT_S := 0.8
 const NPC_NAVIGATION_LAYERS := 3
@@ -53,6 +56,7 @@ var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
 var _yield_path := PackedVector3Array()
 var _yield_waypoint_index := 0
+var _yield_stuck_elapsed := 0.0
 var _yield_cooldown_remaining := 0.0
 var _route_blocked_elapsed := 0.0
 var _route_blocked_reported := false
@@ -361,7 +365,7 @@ func _physics_process(delta: float) -> void:
 	elif not _yield_path.is_empty() and _yield_waypoint_index < _yield_path.size():
 		var offset := _yield_path[_yield_waypoint_index] - global_position
 		offset.y = 0.0
-		if offset.length() <= arrival_distance:
+		if offset.length() <= maxf(arrival_distance, YIELD_ARRIVAL_M):
 			_yield_waypoint_index += 1
 			if _yield_waypoint_index >= _yield_path.size():
 				_yield_path.clear()
@@ -445,6 +449,19 @@ func _physics_process(delta: float) -> void:
 	horizontal_displacement.y = 0.0
 	if not _yield_path.is_empty():
 		_route_blocked_elapsed = 0.0
+		# Pressed against a wall on the way to the sidestep point: give the sidestep up and take the route again.
+		var yield_expected := desired_horizontal_velocity.length() * delta
+		if yield_expected > 0.0 and horizontal_displacement.length() < yield_expected * 0.35:
+			_yield_stuck_elapsed += delta
+			if _yield_stuck_elapsed >= YIELD_STUCK_GIVE_UP_S:
+				print("OpenOB AI avoidance: %s gives up its sidestep at %s (blocked)" % [name, str(global_position)])
+				_yield_path.clear()
+				_yield_waypoint_index = 0
+				_yield_stuck_elapsed = 0.0
+				_rejoin_route_after_yield()
+				_yield_cooldown_remaining = YIELD_RETRY_COOLDOWN_S
+		else:
+			_yield_stuck_elapsed = 0.0
 	elif desired_horizontal_velocity.length_squared() > 0.0001:
 		var expected_progress := desired_horizontal_velocity.length() * delta
 		var actual_progress := horizontal_displacement.dot(desired_horizontal_velocity.normalized())
