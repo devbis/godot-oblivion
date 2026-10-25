@@ -4425,7 +4425,13 @@ func _update_npc_combat(delta: float) -> void:
 		_npc_combat = NpcCombat.new(self)
 	_npc_combat.update(delta)
 
-func _actor_reference_disabled(reference: Dictionary) -> bool:
+## A reference with an enable parent (XESP) follows that reference's state; one without is disabled only by its flag.
+func _actor_reference_disabled(reference: Dictionary, depth: int = 0) -> bool:
+	var parent_id := int(reference.get("enable_parent_form_id", 0))
+	if parent_id != 0 and depth < 8:
+		var parent := _reference_by_form_id(parent_id)
+		if not parent.is_empty():
+			return _actor_reference_disabled(parent, depth + 1) != bool(reference.get("enable_parent_inverted", false))
 	return bool(reference.get("initially_disabled", false)) and not _enabled_reference_ids.has(int(reference.get("form_id", 0)))
 
 var _enabled_reference_ids: Dictionary = {}
@@ -4474,6 +4480,12 @@ func is_player_blocking() -> bool:
 func _combat_menus_closed() -> bool:
 	return not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition \
 		and not player.face_preview_enabled
+
+func _reference_by_form_id(form_id: int) -> Dictionary:
+	for reference_value: Variant in current_cell.get("references", []):
+		if int((reference_value as Dictionary).get("form_id", 0)) == form_id:
+			return reference_value
+	return {}
 
 func _combat_input_allowed() -> bool:
 	return _weapon_drawn and _arms != null and _arms.built and _combat_menus_closed() \

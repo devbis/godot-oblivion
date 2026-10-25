@@ -1022,6 +1022,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 reference.position[i] = f32(value + 4 * i);
                 reference.rotation[i] = f32(value + 12 + 4 * i);
             }
+        } else if (tag == "XESP" && is_reference && subrecord_size >= 5) {
+            reference.enable_parent_form_id = u32(value);
+            reference.enable_parent_inverted = (value[4] & 0x01) != 0;
         } else if (tag == "XLOC" && is_reference && subrecord_size >= 8) {
             reference.lock_level = value[0];
             reference.lock_key_form_id = u32(value + 4);

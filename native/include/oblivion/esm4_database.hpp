@@ -37,6 +37,8 @@ struct PlacedReference {
     std::string editor_id;
     std::string model_path;
     bool initially_disabled = false;  // record flag 0x0800: a script enables the reference later
+    std::uint32_t enable_parent_form_id = 0;  // XESP: the reference follows this one's enabled state (0 when none)
+    bool enable_parent_inverted = false;      // XESP flag 1: it is enabled while the parent is disabled
     bool is_tree = false;
     float tree_billboard_width = 0.0f;
     float tree_billboard_height = 0.0f;

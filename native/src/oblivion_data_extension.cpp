@@ -1030,6 +1030,8 @@ private:
         entry["script_form_id"] = static_cast<int64_t>(reference.script_form_id);
         entry["record_type"] = as_string(reference.record_type);
         entry["initially_disabled"] = reference.initially_disabled;
+        entry["enable_parent_form_id"] = static_cast<int64_t>(reference.enable_parent_form_id);
+        entry["enable_parent_inverted"] = reference.enable_parent_inverted;
         entry["reference_name"] = as_string(reference.reference_name);
         entry["base_editor_id"] = as_string(reference.base_editor_id);
         entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};
