@@ -65,6 +65,7 @@ var _check_timer := 0.0
 var _forced: Dictionary = {}
 var _provoked: Dictionary = {}
 var _calmed: Dictionary = {}
+var _logged_waiting: Dictionary = {}
 var _player_dead := false
 
 func _init(host_node: Node3D) -> void:
@@ -140,6 +141,11 @@ func update(delta: float) -> void:
 			var forced_target := int(_forced.get(reference_id, 0))
 			if forced_target != 0:
 				var victim := _actor_by_id(forced_target)
+				if victim.is_empty() and not _logged_waiting.has(reference_id):
+					_logged_waiting[reference_id] = true
+					print("OpenOB combat: %s is ordered to fight reference 0x%08X, which is not loaded; it waits" % [
+						str(actor.get("reference_name", "NPC")), forced_target
+					])
 				if bool(victim.get("dead", false)):
 					_forced.erase(reference_id)
 				elif not _calmed.has(reference_id) and not victim.is_empty() and _actor_fighting(victim):
@@ -301,12 +307,14 @@ func _run_actor_events(actor: Dictionary, event: String, detail: String) -> void
 	var quest_world: Object = host.get("quest_world")
 	var quest_id := str(host.get("route_quest_editor_id"))
 	if quest_world == null or quest_id.is_empty():
+		print("OpenOB combat %s: %s runs nothing, no quest has started" % [event, str(actor.get("reference_name", "NPC"))])
 		return
 	host.call("_sync_player_actor_values_to_quest_world")
 	var result: Dictionary = quest_world.call(
 		"run_actor_event", quest_id, str(actor.get("npc_editor_id", "")), event, detail, Callable(host, "_quest_distance")
 	)
 	host.call("fill_actor_event_target", result, actor)
+	host.call("log_missing_actor_event", actor, event, detail, result)
 	for line: String in host.call("_apply_driver_result", result):
 		print("OpenOB combat %s: %s" % [event, line])
 	if bool(host.call("_needs_route_refresh", result)):

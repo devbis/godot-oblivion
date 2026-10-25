@@ -1349,7 +1349,12 @@ public:
         const auto* game = game_.get();
         const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
         const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
-        if (!driver || !script) return Dictionary();
+        if (!driver || !script) {
+            // Said apart from an event the script has no block for, so the caller can log which one it was.
+            Dictionary missing;
+            missing["missing"] = String(!driver ? "quest" : (!npc ? "npc" : "script"));
+            return missing;
+        }
         return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance), npc->form_id));
     }
 
@@ -1520,6 +1525,7 @@ private:
         Array actions;
         for (const auto& action : tick.actions) actions.push_back(action_to_dictionary(action));
         result["actions"] = actions;
+        result["event_found"] = tick.event_found;
         PackedStringArray unanswered;
         for (const auto& name : tick.unanswered) unanswered.push_back(utf8_text(name));
         result["unanswered"] = unanswered;

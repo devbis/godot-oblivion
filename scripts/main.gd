@@ -1034,6 +1034,29 @@ func _name_speakers(result: Dictionary) -> void:
 		if str(action.get("command", "")).to_lower() == "speech" and arguments.size() > 1:
 			arguments[1] = str(data_reader.find_editor_id(int(arguments[1])))
 
+var _logged_missing_actor_events: Dictionary = {}
+
+## Says in the log when an actor event found nothing to run (no quest, no NPC record, no script, or no block for the
+## event), once for each actor and event, instead of skipping silently.
+func log_missing_actor_event(actor: Dictionary, event: String, detail: String, result: Dictionary) -> void:
+	var reason := ""
+	if result.has("missing"):
+		reason = "no %s" % str(result.get("missing"))
+	elif result.has("event_found") and not bool(result.get("event_found")):
+		reason = "its script has no %s block%s" % [event, (" for " + detail) if not detail.is_empty() else ""]
+	if reason.is_empty():
+		return
+	# A hit block for one named attacker is optional by design: say it once for the event, not for each attacker.
+	var key_detail := "" if event == "OnHit" else detail
+	var key := "%s|%s|%s|%s" % [str(actor.get("reference_name", "")), event, key_detail, reason]
+	if _logged_missing_actor_events.has(key):
+		return
+	_logged_missing_actor_events[key] = true
+	print("OpenOB event %s%s: %s (%s) runs nothing, %s" % [
+		event, (" " + detail) if not detail.is_empty() else "", str(actor.get("reference_name", "NPC")),
+		str(actor.get("npc_editor_id", "")), reason
+	])
+
 ## A command in an actor's own script has no `Ref.` prefix when it is about that actor (`startcombat baurusref`).
 func fill_actor_event_target(result: Dictionary, actor: Dictionary) -> void:
 	for action_value: Variant in result.get("actions", []):
@@ -1271,17 +1294,29 @@ func hop_down_waypoint(waypoints: Array[Dictionary], landing: Vector3, max_horiz
 	if waypoints.is_empty():
 		return false
 	var edge: Vector3 = waypoints[waypoints.size() - 1].position
-	if Vector2(edge.x - landing.x, edge.z - landing.z).length() > max_horizontal_m:
+	var horizontal := Vector2(edge.x - landing.x, edge.z - landing.z).length()
+	if horizontal > max_horizontal_m:
+		_log_no_hop("the landing is %.1f m from the end of the route (limit %.1f)" % [horizontal, max_horizontal_m], edge, landing)
 		return false
 	var query := PhysicsRayQueryParameters3D.create(landing + Vector3.UP * 1.5, landing + Vector3.DOWN * 4.0, 3)
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit.is_empty():
+		_log_no_hop("no floor under the landing", edge, landing)
 		return false
 	var floor_position: Vector3 = hit.position
 	if edge.y - floor_position.y < HOP_MIN_DROP_M:
 		return false
 	waypoints[waypoints.size() - 1]["hop_to"] = floor_position + Vector3.UP * 0.05
 	return true
+
+var _last_no_hop_reason := ""
+
+## Logged when a route that ends short of a lower target could not get a jump (the same reason is not repeated).
+func _log_no_hop(reason: String, edge: Vector3, landing: Vector3) -> void:
+	if reason == _last_no_hop_reason:
+		return
+	_last_no_hop_reason = reason
+	print("OpenOB route: no jump from %s toward %s: %s" % [str(edge), str(landing), reason])
 
 const LEDGE_DROP_MAX_HORIZONTAL_M := 6.0
 const HOP_MIN_DROP_M := 0.5
@@ -1365,6 +1400,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			_activate_ai_package_target(actor, package)
 		_sync_player_actor_values_to_quest_world()
 		var result: Dictionary = quest_world.run_actor_event(route_quest_editor_id, str(actor.get("npc_editor_id", "")), "OnPackageDone", str(package.get("editor_id", "")), Callable(self, "_quest_distance"))
+		log_missing_actor_event(actor, "OnPackageDone", str(package.get("editor_id", "")), result)
 		fill_actor_event_target(result, actor)
 		for line: String in _apply_driver_result(result):
 			print("OpenOB quest: " + line)
@@ -4528,7 +4564,10 @@ func start_npc_combat(reference_name: String, victim_name: String = "") -> Strin
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
 	_npc_combat.force_combat(reference_id, victim_id)
-	return "%s attacks %s" % [reference_name, victim_name if victim_id != 0 else "the player"]
+	var target_text: String = victim_name if victim_id != 0 else "the player"
+	if actor.is_empty():
+		return "%s is not loaded: it attacks %s once it is" % [reference_name, target_text]
+	return "%s attacks %s" % [reference_name, target_text]
 
 ## Kill: a loaded actor falls and stays down; false when it is not loaded (the caller then removes it).
 func kill_npc(reference_name: String) -> bool:

@@ -43,6 +43,7 @@ struct QuestTick {
     std::vector<std::string> unanswered;         // functions the driver could not answer (value 0)
     std::vector<std::string> parse_errors;
     unsigned stage_entries = 0;                  // stages entered so far in this tick, counted against kMaxStageEntriesPerTick
+    bool event_found = false;                    // an actor event ran a block of the script (false: the script has none for it)
 };
 
 // Total stages one tick may enter, over every branch of its stage chains. The depth limit alone bounds a chain, but a

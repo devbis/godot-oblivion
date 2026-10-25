@@ -460,6 +460,7 @@ QuestTick QuestDriver::run_actor_event(const ScriptRecord& actor_script, std::st
     host.self_base = actor_base;
     host.interpreter = &interpreter;
     const auto result = interpreter.run_event(event, detail, host);
+    tick.event_found = result.found_block;
     host.flush_variables();
     for (const auto& [key, value] : interpreter.variables())
         if (!value.is_text && key.find('.') == std::string::npos) cached.variables[key] = value.number;
