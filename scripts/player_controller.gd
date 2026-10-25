@@ -1,6 +1,13 @@
 extends CharacterBody3D
 
 const HIT_IMPULSE_CAP_MPS := 0.4
+const SWIM_ENTER_DEPTH_M := 1.1
+const SWIM_EXIT_DEPTH_M := 0.8
+const SWIM_BODY_SUBMERGE_M := 1.25
+const SWIM_SPEED_SCALE := 0.72
+const SWIM_RUN_MULT := 1.35
+const SWIM_VERTICAL_SPEED_MPS := 1.8
+const SWIM_BUOYANCY_RESPONSE := 2.8
 ## Third-person blockout controller. Values stay configurable until the
 ## original executable analysis and in-game comparison establish them.
 
@@ -62,6 +69,8 @@ var _footstep_distance_m := 0.0
 var _knockdown_camera_drop := 0.0
 var _hit_velocity := Vector3.ZERO
 var is_crouching := false
+var is_swimming := false
+var _water_surface_y := -INF
 var _crouch_blend := 0.0
 var _standing_capsule_height := 1.6
 @onready var _collision_shape: CollisionShape3D = $CollisionShape3D
@@ -117,6 +126,12 @@ func set_controls_suspended(suspended: bool) -> void:
 
 func set_knocked_down(value: bool) -> void:
 	knocked_down = value
+	if value:
+		is_swimming = false
+
+## The loaded cell supplies a water surface height in world metres, or -INF when this actor is outside water.
+func set_water_surface_world(surface_y: float) -> void:
+	_water_surface_y = surface_y
 
 func apply_hit_impulse(impulse: Vector3) -> void:
 	_hit_velocity = (_hit_velocity + Vector3(impulse.x, 0.0, impulse.z)).limit_length(HIT_IMPULSE_CAP_MPS)
@@ -260,6 +275,7 @@ func _physics_process(delta: float) -> void:
 		gameplay_frame.emit(delta, false, false)
 		return
 	if is_flying:
+		is_swimming = false
 		var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		var vertical := Input.get_action_strength("jump") - Input.get_action_strength("crouch")
 		var view_yaw := _camera_yaw + (PI if face_preview_enabled else 0.0)
@@ -275,6 +291,11 @@ func _physics_process(delta: float) -> void:
 
 	_update_camera_clearance(delta)
 	_update_crouch(delta)
+	_update_swimming_state()
+	if is_swimming:
+		_update_swimming(delta)
+		gameplay_frame.emit(delta, false, false)
+		return
 
 	# While a step is in progress the capsule rolls over a tread's rounded nose,
 	# where it is not on the floor yet. Gravity is held off so it can finish the step,
@@ -322,6 +343,34 @@ func _physics_process(delta: float) -> void:
 		_stepper.try_step_down(self, max_step_height_m)
 	_update_footstep_audio(previous_position)
 	gameplay_frame.emit(delta, _is_running_activity(previous_position, delta), did_jump)
+
+func _update_swimming_state() -> void:
+	if not is_finite(_water_surface_y) or knocked_down or controls_suspended:
+		is_swimming = false
+		return
+	var depth := _water_surface_y - global_position.y
+	is_swimming = depth > (SWIM_EXIT_DEPTH_M if is_swimming else SWIM_ENTER_DEPTH_M)
+
+func _update_swimming(delta: float) -> void:
+	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var direction := (Basis(Vector3.UP, rotation.y) * Vector3(input.x, 0.0, input.y)).normalized()
+	var speed := walk_speed_mps * SWIM_SPEED_SCALE
+	if Input.is_action_pressed("run"):
+		speed *= SWIM_RUN_MULT
+	velocity.x = direction.x * speed
+	velocity.z = direction.z * speed
+	_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)
+	velocity.x += _hit_velocity.x
+	velocity.z += _hit_velocity.z
+	var vertical_input := Input.get_action_strength("jump") - Input.get_action_strength("crouch")
+	if absf(vertical_input) > 0.05:
+		velocity.y = vertical_input * SWIM_VERTICAL_SPEED_MPS
+	else:
+		var target_y := _water_surface_y - SWIM_BODY_SUBMERGE_M
+		velocity.y = clampf((target_y - global_position.y) * SWIM_BUOYANCY_RESPONSE, -SWIM_VERTICAL_SPEED_MPS, SWIM_VERTICAL_SPEED_MPS)
+	_stepper.tick()
+	move_and_slide()
+	_update_camera_clearance(0.0)
 
 ## Crouch while the key is held. Standing back up waits until the full-height capsule fits.
 func _update_crouch(delta: float) -> void:

@@ -67,6 +67,61 @@ const PLAYER_JUMP_KFS := {
 	"JumpLoop": ["Characters/_male/jumploop.kf", "JumpLoop"],
 	"JumpLand": ["Characters/_male/jumpland.kf", "JumpLand"],
 }
+const PLAYER_TURN_KFS := {
+	"TurnLeft": ["Characters/_male/walkturnleft.kf", "TurnLeft"],
+	"TurnRight": ["Characters/_male/walkturnright.kf", "TurnRight"],
+}
+const PLAYER_SNEAK_TURN_KFS := {
+	"SneakTurnLeft": ["Characters/_male/sneakturnleft.kf", "TurnLeft"],
+	"SneakTurnRight": ["Characters/_male/sneakturnright.kf", "TurnRight"],
+}
+const PLAYER_SWIM_KFS := {
+	"swimhandtohandidle": ["Characters/_male/swimhandtohandidle.kf", "Idle"],
+	"swimhandtohandforward": ["Characters/_male/swimhandtohandforward.kf", "Forward"],
+	"swimhandtohandbackward": ["Characters/_male/swimhandtohandbackward.kf", "Backward"],
+	"swimhandtohandleft": ["Characters/_male/swimhandtohandleft.kf", "Left"],
+	"swimhandtohandright": ["Characters/_male/swimhandtohandright.kf", "Right"],
+	"swimhandtohandfastforward": ["Characters/_male/swimhandtohandfastforward.kf", "FastForward"],
+	"swimhandtohandfastbackward": ["Characters/_male/swimhandtohandfastbackward.kf", "FastBackward"],
+	"swimhandtohandfastleft": ["Characters/_male/swimhandtohandfastleft.kf", "FastLeft"],
+	"swimhandtohandfastright": ["Characters/_male/swimhandtohandfastright.kf", "FastRight"],
+	"swimidle": ["Characters/_male/swimidle.kf", "Idle"],
+	"swimforward": ["Characters/_male/swimforward.kf", "Forward"],
+	"swimbackward": ["Characters/_male/swimbackward.kf", "Backward"],
+	"swimleft": ["Characters/_male/swimleft.kf", "Left"],
+	"swimright": ["Characters/_male/swimright.kf", "Right"],
+	"swimfastforward": ["Characters/_male/swimfastforward.kf", "FastForward"],
+	"swimfastbackward": ["Characters/_male/swimfastbackward.kf", "FastBackward"],
+	"swimfastleft": ["Characters/_male/swimfastleft.kf", "FastLeft"],
+	"swimfastright": ["Characters/_male/swimfastright.kf", "FastRight"],
+	"swimstagger": ["Characters/_male/swimstagger.kf", "Stagger"],
+}
+const NPC_MOVEMENT_KFS := {
+	"Backward": ["Characters/_male/walkbackward.kf", "Backward"],
+	"Left": ["Characters/_male/walkleft.kf", "Left"],
+	"Right": ["Characters/_male/walkright.kf", "Right"],
+	"FastForward": ["Characters/_male/walkfastforward.kf", "FastForward"],
+	"FastBackward": ["Characters/_male/walkfastbackward.kf", "FastBackward"],
+	"FastLeft": ["Characters/_male/walkfastleft.kf", "FastLeft"],
+	"FastRight": ["Characters/_male/walkfastright.kf", "FastRight"],
+	"SneakIdle": ["Characters/_male/sneakidle.kf", "Idle"],
+	"SneakForward": ["Characters/_male/sneakforward.kf", "Forward"],
+	"SneakBackward": ["Characters/_male/sneakbackward.kf", "Backward"],
+	"SneakLeft": ["Characters/_male/sneakleft.kf", "Left"],
+	"SneakRight": ["Characters/_male/sneakright.kf", "Right"],
+	"JumpStart": ["Characters/_male/jumpstart.kf", "JumpStart"],
+	"JumpLoop": ["Characters/_male/jumploop.kf", "JumpLoop"],
+	"JumpLand": ["Characters/_male/jumpland.kf", "JumpLand"],
+	"TurnLeft": ["Characters/_male/walkturnleft.kf", "TurnLeft"],
+	"TurnRight": ["Characters/_male/walkturnright.kf", "TurnRight"],
+	"SneakTurnLeft": ["Characters/_male/sneakturnleft.kf", "TurnLeft"],
+	"SneakTurnRight": ["Characters/_male/sneakturnright.kf", "TurnRight"],
+}
+const PLAYER_CAST_KFS := {
+	"castself": ["Characters/_male/castself.kf", "CastSelf"],
+	"casttouch": ["Characters/_male/casttouch.kf", "CastTouch"],
+	"casttarget": ["Characters/_male/casttarget.kf", "CastTarget"],
+}
 ## Original third-person combat clips are split by the weapon's grip class. These
 ## are loaded lazily for the equipped stance; some stances do not ship every clip.
 const PLAYER_COMBAT_STANCE_PREFIXES := {
@@ -74,15 +129,23 @@ const PLAYER_COMBAT_STANCE_PREFIXES := {
 }
 const PLAYER_COMBAT_CLIP_SUFFIXES := [
 	"idle", "equip", "unequip", "blockidle", "blockhit", "attack", "attackright", "attackleft",
+	"attackright_chop", "attackleft_chop", "attackright_hook", "attackleft_hook", "attackright_jab", "attackleft_jab",
+	"attackrightpower", "attackleftpower", "attackpower", "attackforwardpower", "attackbackpower",
+	"skill1attackpower", "skill2attackleftpower", "skill2attackrightpower", "skill3attackbackpower", "skill4attackforwardpower",
 	"forward", "backward", "left", "right", "fastforward", "fastbackward", "fastleft", "fastright",
 	"sneakidle", "sneakforward", "sneakbackward", "sneakleft", "sneakright",
 	"sneakfastforward", "sneakfastbackward", "sneakfastleft", "sneakfastright",
 	"jumpstart", "jumploop", "jumpland", "turnleft", "turnright", "stagger",
+	"swimidle", "swimforward", "swimbackward", "swimleft", "swimright",
+	"swimfastforward", "swimfastbackward", "swimfastleft", "swimfastright",
+	"castself", "casttouch", "casttarget",
 ]
 const PLAYER_COMBAT_LOOPING_CLIPS := [
 	"idle", "blockidle", "forward", "backward", "left", "right", "fastforward", "fastbackward", "fastleft", "fastright",
 	"sneakidle", "sneakforward", "sneakbackward", "sneakleft", "sneakright",
 	"sneakfastforward", "sneakfastbackward", "sneakfastleft", "sneakfastright", "jumploop",
+	"swimidle", "swimforward", "swimbackward", "swimleft", "swimright",
+	"swimfastforward", "swimfastbackward", "swimfastleft", "swimfastright",
 ]
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const ANIMATION_BLEND_DURATION := 0.18
@@ -220,6 +283,7 @@ var _player_blocking := false
 var _player_combat_action := ""
 var _player_combat_action_kind := ""
 var _player_combat_action_sound_pending := false
+var _player_unarmed_attack_index := 0
 var _player_hit_reaction: Dictionary = {}
 var _player_hit_attack_lock_remaining := 0.0
 var _player_knockdown_state := ""
@@ -279,6 +343,8 @@ var _dialogue_listener_female := false
 var _dialogue_line_generation := 0
 var _player_first_person_mode := false
 var _active_animation := ""
+var _player_animation_heading := -INF
+var _player_turn_animation := ""
 var _gesture_clips: Array[Dictionary] = []
 var _gesture_index := -1
 var _gesture_active := false
@@ -378,6 +444,7 @@ func _process(_delta: float) -> void:
 	if not _world_loading and not current_cell.is_empty() and not bool(current_cell.get("interior", true)):
 		await _stream_exterior_if_needed()
 	if _player_skeleton != null and not _world_loading:
+		_sync_actor_water_surfaces()
 		if _gesture_panel_open() and (_world_loading or _inventory_open or player.face_preview_enabled):
 			_toggle_gesture_panel()
 		if not _inventory_open:
@@ -2474,6 +2541,36 @@ func _add_water_region(water_cells: Array) -> bool:
 		cell_visual_root.add_child(instance)
 	return true
 
+func _sync_actor_water_surfaces() -> void:
+	if current_cell.is_empty() or player == null:
+		return
+	player.set_water_surface_world(_water_surface_height_at(player.global_position))
+	for actor: Dictionary in _npc_actors:
+		var root := actor.get("root") as Node3D
+		if is_instance_valid(root) and root.has_method("set_water_surface_world"):
+			root.call("set_water_surface_world", _water_surface_height_at(root.global_position))
+
+func _water_surface_height_at(world_position: Vector3) -> float:
+	if bool(current_cell.get("interior", true)):
+		if bool(current_cell.get("has_water_level", false)):
+			return float(current_cell.get("water_height", 0.0)) * game_units_to_meters
+		if bool(current_cell.get("has_worldspace_water_level", false)):
+			return float(current_cell.get("worldspace_water_height", 0.0)) * game_units_to_meters
+		return -INF
+	var cell_size_m := EXTERIOR_CELL_SIZE * game_units_to_meters
+	for water_value: Variant in current_cell.get("water_cells", []):
+		var water: Dictionary = water_value
+		var grid_x := int(water.get("grid_x", 0))
+		var grid_y := int(water.get("grid_y", 0))
+		var min_x := float(grid_x) * cell_size_m
+		var max_x := float(grid_x + 1) * cell_size_m
+		var min_z := -float(grid_y + 1) * cell_size_m
+		var max_z := -float(grid_y) * cell_size_m
+		if world_position.x >= min_x and world_position.x < max_x \
+				and world_position.z >= min_z and world_position.z < max_z:
+			return float(water.get("height", 0.0)) * game_units_to_meters
+	return -INF
+
 func _tree_billboard_mesh(width: float, height: float, single_billboard: bool) -> ArrayMesh:
 	var normalized_width := snappedf(width, 0.1)
 	var normalized_height := snappedf(height, 0.1)
@@ -3553,6 +3650,38 @@ func _load_deferred_player_assets() -> void:
 		var asset_path := str(animation_info[0])
 		await assets.meshes_for_model(asset_path)
 		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	for animation_name: String in PLAYER_TURN_KFS:
+		var animation_info: Array = PLAYER_TURN_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await assets.meshes_for_model(asset_path)
+		var animation := _animation_sequence(asset_path, str(animation_info[1]))
+		if not animation.is_empty():
+			animation["loops"] = false
+			_player_animations[animation_name] = animation
+	for animation_name: String in PLAYER_SNEAK_TURN_KFS:
+		var animation_info: Array = PLAYER_SNEAK_TURN_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await assets.meshes_for_model(asset_path)
+		var animation := _animation_sequence(asset_path, str(animation_info[1]))
+		if not animation.is_empty():
+			animation["loops"] = false
+			_player_animations[animation_name] = animation
+	for animation_name: String in PLAYER_SWIM_KFS:
+		var animation_info: Array = PLAYER_SWIM_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await assets.meshes_for_model(asset_path)
+		var animation := _animation_sequence(asset_path, str(animation_info[1]))
+		if not animation.is_empty():
+			animation["loops"] = animation_name != "swimstagger"
+			_player_animations[animation_name] = animation
+	for animation_name: String in PLAYER_CAST_KFS:
+		var animation_info: Array = PLAYER_CAST_KFS[animation_name]
+		var asset_path := str(animation_info[0])
+		await assets.meshes_for_model(asset_path)
+		var animation := _animation_sequence(asset_path, str(animation_info[1]))
+		if not animation.is_empty():
+			animation["loops"] = false
+			_player_animations[animation_name] = animation
 	await _preload_player_combat_stance(_player_weapon_type())
 	print("OpenOB loaded deferred player face parts and %d original movement animations" % _player_animations.size())
 
@@ -3577,6 +3706,24 @@ func _preload_player_combat_stance(weapon_type: int) -> void:
 		var animation := await _gesture_animation("Characters/_male/" + clip_name + ".kf")
 		if not animation.is_empty():
 			animation["loops"] = suffix in PLAYER_COMBAT_LOOPING_CLIPS
+			_player_animations[clip_name] = animation
+	for suffix: String in [
+		"idle", "forward", "backward", "left", "right", "fastforward", "fastbackward", "fastleft", "fastright",
+	]:
+		var clip_name := "swim" + prefix + suffix
+		if not _player_combat_available_clips.has(clip_name):
+			continue
+		var animation := await _gesture_animation("Characters/_male/" + clip_name + ".kf")
+		if not animation.is_empty():
+			animation["loops"] = true
+			_player_animations[clip_name] = animation
+	for suffix: String in ["turnleft", "turnright"]:
+		var clip_name := "sneak" + prefix + suffix
+		if not _player_combat_available_clips.has(clip_name):
+			continue
+		var animation := await _gesture_animation("Characters/_male/" + clip_name + ".kf")
+		if not animation.is_empty():
+			animation["loops"] = false
 			_player_animations[clip_name] = animation
 	_player_combat_stances_loading.erase(prefix)
 	_player_combat_stances_loaded[prefix] = true
@@ -4643,6 +4790,8 @@ func _on_player_gameplay_frame(delta: float, is_running: bool, jumped: bool) -> 
 func _cast_selected_spell() -> void:
 	if _world_loading or _inventory_open or not _player_actor_values_ready:
 		return
+	if not player.is_first_person and (not _player_combat_action.is_empty() or not _pending_cast.is_empty()):
+		return
 	if _player_selected_spell_form_id <= 0:
 		_show_interaction_toast("No spell selected")
 		return
@@ -4902,20 +5051,24 @@ func _player_attack() -> void:
 		if player.is_first_person and _arms != null:
 			_arms.interrupt_hit_reaction()
 	var side := "right"
+	var unarmed_variant := ""
 	if _player_weapon_type() != WEAPON_TYPE_BOW:
 		if _player_weapon_form_id <= 0:
 			side = "left" if _next_attack_left else "right"
 			_next_attack_left = not _next_attack_left
 		elif Input.is_action_pressed("move_left") and not Input.is_action_pressed("move_right"):
 			side = "left"
+		if _player_weapon_type() < 0:
+			unarmed_variant = "jab" if _player_unarmed_attack_index % 2 == 0 else "hook"
+			_player_unarmed_attack_index += 1
 	if player.is_first_person:
-		if _arms.attack(side):
+		if _arms.attack(side, unarmed_variant):
 			AudioManager.play_weapon_swing(player, _player_weapon_type())
 			_spend_player_attack_fatigue()
 		return
 	if not _player_combat_action.is_empty():
 		return
-	var attack_animation := _player_attack_animation(side)
+	var attack_animation := _player_attack_animation(side, unarmed_variant)
 	if attack_animation.is_empty():
 		return
 	_player_combat_action = attack_animation
@@ -4936,10 +5089,14 @@ func _spend_player_attack_fatigue() -> void:
 	_player_actor_values.modify_fatigue(-fatigue_cost)
 	_update_player_knockdown_state()
 
-func _player_attack_animation(side: String) -> String:
+func _player_attack_animation(side: String, unarmed_variant := "") -> String:
 	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
 	if _player_weapon_type() == WEAPON_TYPE_BOW:
 		return prefix + "attack" if _player_combat_available_clips.has(prefix + "attack") else ""
+	if prefix == "handtohand" and unarmed_variant in ["jab", "hook"]:
+		var variant_clip := prefix + "attack" + side.to_lower() + "_" + unarmed_variant
+		if _player_combat_available_clips.has(variant_clip):
+			return variant_clip
 	var requested := prefix + "attack" + side.to_lower()
 	if _player_combat_available_clips.has(requested):
 		return requested
@@ -4954,12 +5111,13 @@ func _update_first_person_arms(delta: float) -> void:
 	_arms.set_suppressed(hidden)
 	if hidden or not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_arms.set_blocking(false)
-	var floor_contact: bool = player.is_on_floor() or player.is_stepping()
+	var floor_contact: bool = player.is_on_floor() or player.is_stepping() or _has_nearby_walkable_support()
 	_arms.update(delta, {
 		"local_velocity": Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z),
 		"running": Input.is_action_pressed("run"),
 		"crouching": player.is_crouching,
-		"airborne": not floor_contact and absf(player.velocity.y) > 1.0,
+		"airborne": not player.is_swimming and not floor_contact,
+		"swimming": player.is_swimming,
 	})
 
 func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
@@ -5063,7 +5221,8 @@ func _player_take_combat_hit(
 	if _player_knockdown_state.is_empty():
 		var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
 		_preload_player_combat_stance(_player_weapon_type())
-		var reaction_animation := prefix + ("blockhit" if blocked else "stagger")
+		var reaction_animation := "swimstagger" if player.is_swimming and not blocked \
+			else prefix + ("blockhit" if blocked else "stagger")
 		if not _player_combat_available_clips.is_empty() and not _player_combat_available_clips.has(reaction_animation):
 			reaction_animation = prefix + "blockhit" if _player_combat_available_clips.has(prefix + "blockhit") else "blockhit"
 		_player_hit_reaction = {"kind": "stagger", "animation": reaction_animation}
@@ -5173,11 +5332,37 @@ func _provoke_actor(collider: Object, fatigue_damage: float = -1.0) -> void:
 	)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
-	if _arms == null or not _arms.built:
+	if effects.is_empty():
 		return
 	var effect_code := str((effects[0] as Dictionary).get("code", ""))
-	_pending_cast = {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code)}
-	_arms.cast(cast_range)
+	var pending_cast := {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code)}
+	if player.is_first_person:
+		if _arms == null or not _arms.built:
+			return
+		_pending_cast = pending_cast
+		_arms.cast(cast_range)
+		return
+	var cast_suffixes: Array[String] = ["castself", "casttouch", "casttarget"]
+	var cast_suffix: String = cast_suffixes[clampi(cast_range, 0, 2)]
+	var preferred: String = "onehand" + cast_suffix if _weapon_drawn and _player_weapon_type() in [0, 2] else cast_suffix
+	if preferred.begins_with("onehand") and not _player_animations.has(preferred):
+		await _preload_player_combat_stance(_player_weapon_type())
+	if not _player_animations.has(cast_suffix):
+		var cast_info: Array = PLAYER_CAST_KFS[cast_suffix]
+		var cast_path := str(cast_info[0])
+		await assets.meshes_for_model(cast_path)
+		var cast_animation := _animation_sequence(cast_path, str(cast_info[1]))
+		if not cast_animation.is_empty():
+			cast_animation["loops"] = false
+			_player_animations[cast_suffix] = cast_animation
+	var animation_name: String = preferred if _player_animations.has(preferred) else cast_suffix
+	if not _player_animations.has(animation_name):
+		return
+	_pending_cast = pending_cast
+	_player_combat_action = animation_name
+	_player_combat_action_kind = "cast"
+	_player_combat_action_sound_pending = false
+	_player_blocking = false
 
 func _release_pending_cast() -> void:
 	var cast := _pending_cast
@@ -5506,6 +5691,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"animation_time": 0.0,
 			"animation_from_pose": [],
 			"animation_blend_elapsed": ANIMATION_BLEND_DURATION,
+			"animation_clip_requests": {},
+			"animation_heading": actor_root.rotation.y,
+			"animation_was_grounded": true,
+			"air_animation_phase": "",
+			"turn_animation": "",
 		}
 		_npc_actors.push_back(actor_state)
 		_register_quest_actor(actor_state)
@@ -5924,6 +6114,193 @@ func _actor_is_speaking(audio_manager: Node, actor: Dictionary) -> bool:
 	return is_instance_valid(audio_manager) and audio_manager.has_method("is_dialogue_playing") \
 			and bool(audio_manager.call("is_dialogue_playing", int(actor.get("reference_id", 0))))
 
+func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
+	var animations: Dictionary = actor.get("animations", {})
+	if animations.has(clip_name):
+		return
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	if requests.has(clip_name):
+		return
+	var asset_path := "Characters/_male/" + clip_name + ".kf"
+	var sequence_name := ""
+	if NPC_MOVEMENT_KFS.has(clip_name):
+		var info: Array = NPC_MOVEMENT_KFS[clip_name]
+		asset_path = str(info[0])
+		sequence_name = str(info[1])
+	elif PLAYER_SWIM_KFS.has(clip_name):
+		var info: Array = PLAYER_SWIM_KFS[clip_name]
+		asset_path = str(info[0])
+		sequence_name = str(info[1])
+	requests[clip_name] = "loading"
+	actor["animation_clip_requests"] = requests
+	_load_npc_animation(actor, clip_name, asset_path, sequence_name)
+
+func _load_npc_animation(actor: Dictionary, clip_name: String, asset_path: String, sequence_name: String) -> void:
+	await assets.meshes_for_model(asset_path)
+	var root := actor.get("root") as Node3D
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	if not is_instance_valid(root) or not is_instance_valid(skeleton):
+		requests[clip_name] = "missing"
+		actor["animation_clip_requests"] = requests
+		return
+	var metadata: Dictionary = assets.nif_metadata_cache.get(asset_path.to_lower(), {})
+	var sequences: Array = metadata.get("animations", [])
+	if sequence_name.is_empty() and not sequences.is_empty():
+		sequence_name = str((sequences[0] as Dictionary).get("name", ""))
+	var animation := _animation_sequence(asset_path, sequence_name, skeleton)
+	if animation.is_empty():
+		requests[clip_name] = "missing"
+		actor["animation_clip_requests"] = requests
+		return
+	animation["loops"] = int(animation.get("cycle_type", 0)) == 0
+	if "turn" in clip_name.to_lower() or clip_name in ["JumpStart", "JumpLand"]:
+		animation["loops"] = false
+	var animations: Dictionary = actor.get("animations", {})
+	animations[clip_name] = animation
+	actor["animations"] = animations
+	requests[clip_name] = "loaded"
+	actor["animation_clip_requests"] = requests
+
+func _npc_stance_prefix(actor: Dictionary) -> String:
+	var weapon_record: Dictionary = actor.get("weapon_record", {})
+	var weapon_type := int(weapon_record.get("weapon_type", -1))
+	return str(NpcCombat.STANCE_PREFIXES.get(weapon_type, "handtohand"))
+
+func _npc_locomotion_animation(actor: Dictionary, root: Node3D, horizontal_speed: float) -> String:
+	var animations: Dictionary = actor.get("animations", {})
+	var local_velocity := Basis(Vector3.UP, root.rotation.y).inverse() * Vector3(root.velocity.x, 0.0, root.velocity.z)
+	var direction := "Forward"
+	if absf(local_velocity.x) > absf(local_velocity.z):
+		direction = "Left" if local_velocity.x < 0.0 else "Right"
+	elif local_velocity.z > 0.0:
+		direction = "Backward"
+	var sneaking := bool(actor.get("sneaking", false))
+	var fast := horizontal_speed > 2.2 and not sneaking
+	var in_combat := actor.has("combat")
+	var stance_prefix := _npc_stance_prefix(actor)
+	if bool(root.get("is_swimming")):
+		var swim_direction := direction.to_lower()
+		if horizontal_speed <= 0.08:
+			swim_direction = "idle"
+		var swim_fast := "fast" if fast and swim_direction != "idle" else ""
+		var swim_clip := "swim" + (stance_prefix if in_combat else "") + swim_fast + swim_direction
+		_request_npc_animation(actor, swim_clip)
+		if animations.has(swim_clip):
+			return swim_clip
+		var generic_swim_clip := "swim" + swim_fast + swim_direction
+		_request_npc_animation(actor, generic_swim_clip)
+		if animations.has(generic_swim_clip):
+			return generic_swim_clip
+		return "Idle"
+	var movement_clip := ""
+	if in_combat:
+		movement_clip = ("sneak" if sneaking else "") + stance_prefix + ("fast" if fast else "") + direction.to_lower()
+	else:
+		movement_clip = ("Sneak" if sneaking else "") + (("Fast" if fast else "") + direction)
+	_request_npc_animation(actor, movement_clip)
+	if animations.has(movement_clip):
+		return movement_clip
+	var fallback := (("sneak" if sneaking else "") + stance_prefix + ("fast" if fast else "") + "forward") \
+		if in_combat else (("Sneak" if sneaking else "") + ("FastForward" if fast else "Forward"))
+	_request_npc_animation(actor, fallback)
+	return fallback if animations.has(fallback) else "Forward"
+
+func _npc_air_animation(actor: Dictionary, root: Node3D, grounded: bool) -> String:
+	var animations: Dictionary = actor.get("animations", {})
+	var in_combat := actor.has("combat")
+	var stance_prefix := _npc_stance_prefix(actor) if in_combat else ""
+	var was_grounded := bool(actor.get("animation_was_grounded", true))
+	var phase := str(actor.get("air_animation_phase", ""))
+	if not grounded:
+		if was_grounded:
+			phase = "start"
+		elif phase == "start":
+			var start_name := stance_prefix + "jumpstart" if in_combat else "JumpStart"
+			var start_clip: Dictionary = animations.get(start_name, {})
+			if start_clip.is_empty() and bool(actor.get("animation_clip_requests", {}).get(start_name, "") == "missing"):
+				start_name = "JumpStart"
+				start_clip = animations.get(start_name, {})
+			if str(actor.get("active_animation", "")) == start_name \
+					and float(actor.get("animation_time", 0.0)) >= float(start_clip.get("stop_time", INF)):
+				phase = "loop"
+		elif phase.is_empty():
+			phase = "loop"
+		actor["animation_was_grounded"] = false
+		actor["air_animation_phase"] = phase
+		var suffix := "jumpstart" if phase == "start" else "jumploop"
+		var clip_name := stance_prefix + suffix if in_combat else ("JumpStart" if phase == "start" else "JumpLoop")
+		_request_npc_animation(actor, clip_name)
+		if animations.has(clip_name):
+			return clip_name
+		if in_combat:
+			var generic_name := "JumpStart" if phase == "start" else "JumpLoop"
+			_request_npc_animation(actor, generic_name)
+			if animations.has(generic_name):
+				return generic_name
+		return "Idle"
+	if not was_grounded:
+		phase = "land"
+	elif phase == "land":
+		var land_name := stance_prefix + "jumpland" if in_combat else "JumpLand"
+		var land_clip: Dictionary = animations.get(land_name, {})
+		if land_clip.is_empty() and bool(actor.get("animation_clip_requests", {}).get(land_name, "") == "missing"):
+			land_name = "JumpLand"
+			land_clip = animations.get(land_name, {})
+		if str(actor.get("active_animation", "")) != land_name \
+				or float(actor.get("animation_time", 0.0)) < float(land_clip.get("stop_time", 0.0)):
+			actor["air_animation_phase"] = phase
+			actor["animation_was_grounded"] = true
+			_request_npc_animation(actor, land_name)
+			return land_name if animations.has(land_name) else "Idle"
+		phase = ""
+	actor["air_animation_phase"] = phase
+	actor["animation_was_grounded"] = true
+	return ""
+
+func _npc_turn_animation(actor: Dictionary, root: Node3D, allowed: bool) -> String:
+	var heading := root.rotation.y
+	var previous_heading := float(actor.get("animation_heading", heading))
+	var heading_delta := wrapf(heading - previous_heading, -PI, PI)
+	actor["animation_heading"] = heading
+	if not allowed:
+		actor["turn_animation"] = ""
+		return ""
+	var animations: Dictionary = actor.get("animations", {})
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	var pending := str(actor.get("turn_animation", ""))
+	if not pending.is_empty():
+		_request_npc_animation(actor, pending)
+		if animations.has(pending):
+			var turn_clip: Dictionary = animations[pending]
+			if str(actor.get("active_animation", "")) != pending \
+					or float(actor.get("animation_time", 0.0)) < float(turn_clip.get("stop_time", 0.0)):
+				return pending
+			actor["turn_animation"] = ""
+		elif requests.get(pending, "") == "missing":
+			actor["turn_animation"] = ""
+	if absf(heading_delta) < 0.025:
+		return ""
+	var side := "left" if heading_delta > 0.0 else "right"
+	var prefix := _npc_stance_prefix(actor)
+	var candidates: Array[String] = []
+	if actor.has("combat"):
+		var sneak_prefix := "sneak" if bool(actor.get("sneaking", false)) else ""
+		candidates = [sneak_prefix + prefix + "turn" + side, prefix + "turn" + side, "Turn" + side.capitalize()]
+	elif bool(actor.get("sneaking", false)):
+		candidates = ["SneakTurn" + side.capitalize(), "Turn" + side.capitalize()]
+	else:
+		candidates = ["Turn" + side.capitalize()]
+	for candidate: String in candidates:
+		_request_npc_animation(actor, candidate)
+		if animations.has(candidate):
+			actor["turn_animation"] = candidate
+			return candidate
+		if requests.get(candidate, "") != "missing":
+			actor["turn_animation"] = candidate
+			return ""
+	return ""
+
 func _update_npc_actors(delta: float) -> void:
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
@@ -5951,22 +6328,27 @@ func _update_npc_actors(delta: float) -> void:
 		_update_face_expression(actor, delta)
 		_update_face_talk(actor, delta, audio_manager)
 		var walking := bool(actor_root.get("is_walking"))
+		var swimming := bool(actor_root.get("is_swimming"))
+		var grounded := bool(actor_root.call("is_animation_grounded")) if actor_root.has_method("is_animation_grounded") else true
 		var horizontal_speed := Vector2(actor_root.velocity.x, actor_root.velocity.z).length()
-		var requested_animation := "Idle"
 		var animations: Dictionary = actor.get("animations", {})
+		var requested_animation := "Idle"
 		var base_name := "Idle"
+		if bool(actor.get("sneaking", false)):
+			requested_animation = "SneakIdle"
+			base_name = "SneakIdle"
 		var upper_body_idle := bool(actor.get("idle_active", false)) and bool(actor.get("idle_upper_body", false))
-		if walking:
-			requested_animation = "FastForward" if horizontal_speed > 2.2 else "Forward"
-			if animations.get(requested_animation, {}).is_empty():
-				requested_animation = "Forward"
-			base_name = requested_animation
+		var locomotion_animation := ""
+		if walking or swimming:
+			locomotion_animation = _npc_locomotion_animation(actor, actor_root, horizontal_speed)
+			requested_animation = locomotion_animation
+			base_name = locomotion_animation
 			if not upper_body_idle:
 				_end_npc_idle(actor)
 		if bool(actor.get("idle_active", false)):
 			var idle_animation: Dictionary = animations.get(NPC_IDLE_KEY, {})
-			# A clip that plays once ends at its last key and the actor returns to its default idle.
-			if idle_animation.is_empty() or (
+			# Scripted idles yield to water movement, hops, and a route that actually moves the actor.
+			if swimming or not grounded or (walking and not upper_body_idle) or idle_animation.is_empty() or (
 				not bool(idle_animation.get("loops", true)) and str(actor.get("active_animation", "")) == NPC_IDLE_KEY
 				and float(actor.get("animation_time", 0.0)) >= float(idle_animation.get("stop_time", 0.0))
 				and _gesture_hold_over(actor, audio_manager)
@@ -5975,26 +6357,54 @@ func _update_npc_actors(delta: float) -> void:
 			else:
 				requested_animation = NPC_IDLE_KEY
 		var combat_animation := str(actor.get("combat_anim", ""))
-		if actor.has("combat") and (combat_animation.is_empty() or animations.get(combat_animation, {}).is_empty()):
-			var weapon_record: Dictionary = actor.get("weapon_record", {})
-			var weapon_type := int(weapon_record.get("weapon_type", -1))
-			var stance_prefix := str(NpcCombat.STANCE_PREFIXES.get(weapon_type, "handtohand")) \
-				if weapon_type >= 0 else "handtohand"
-			combat_animation = stance_prefix + "idle"
-		if not combat_animation.is_empty() and not (animations.get(combat_animation, {}) as Dictionary).is_empty():
-			requested_animation = combat_animation
-			base_name = combat_animation
+		if actor.has("combat"):
+			var stance_prefix := _npc_stance_prefix(actor)
+			if combat_animation.is_empty():
+				combat_animation = ("sneak" if bool(actor.get("sneaking", false)) else "") + stance_prefix + "idle"
+			elif (walking or swimming) and not combat_animation.contains("attack") \
+					and not combat_animation.contains("stagger") and not combat_animation.contains("block"):
+				combat_animation = locomotion_animation if not locomotion_animation.is_empty() else stance_prefix + "idle"
+			_request_npc_animation(actor, combat_animation)
+			if animations.has(combat_animation):
+				requested_animation = combat_animation
+				base_name = combat_animation
+			elif combat_animation.contains("attack") or combat_animation.contains("stagger"):
+				var fallback_combat_idle := stance_prefix + "idle"
+				_request_npc_animation(actor, fallback_combat_idle)
+				requested_animation = fallback_combat_idle if animations.has(fallback_combat_idle) else "Idle"
+			else:
+				requested_animation = locomotion_animation if not locomotion_animation.is_empty() else "Idle"
+			base_name = requested_animation
 			_end_npc_idle(actor)
 		var hit_reaction: Dictionary = actor.get("hit_reaction", {})
 		var hit_reaction_animation := str(hit_reaction.get("animation", ""))
 		if not hit_reaction_animation.is_empty():
+			_request_npc_animation(actor, hit_reaction_animation)
 			requested_animation = hit_reaction_animation
 			base_name = hit_reaction_animation
 			_end_npc_idle(actor)
+		var combat_state: Dictionary = actor.get("combat", {})
+		var attack_action_active := str(combat_state.get("state", "")) == "swing"
+		if hit_reaction_animation.is_empty() and not attack_action_active and not swimming:
+			var air_animation := _npc_air_animation(actor, actor_root, grounded)
+			if not air_animation.is_empty():
+				requested_animation = air_animation
+				base_name = air_animation
+		if hit_reaction_animation.is_empty() and not walking and grounded and not swimming \
+				and not attack_action_active and not bool(actor.get("idle_active", false)):
+			var turn_animation := _npc_turn_animation(actor, actor_root, true)
+			if not turn_animation.is_empty():
+				requested_animation = turn_animation
+				base_name = turn_animation
+		else:
+			_npc_turn_animation(actor, actor_root, false)
 		var animation: Dictionary = animations.get(requested_animation, {})
-		if animation.is_empty() and requested_animation == "FastForward":
-			requested_animation = "Forward"
-			animation = animations.get(requested_animation, {})
+		if animation.is_empty():
+			_request_npc_animation(actor, requested_animation)
+			if requested_animation != "Idle" and animations.has("Idle"):
+				requested_animation = "Idle"
+				base_name = "Idle"
+				animation = animations.get("Idle", {})
 		if animation.is_empty():
 			_update_npc_head_look(actor, skeleton, delta, look_target_active)
 			continue
@@ -6418,6 +6828,10 @@ func _animation_sequence(asset_path: String, sequence_name: String, target_skele
 func _update_player_animation(delta: float) -> void:
 	if _player_skeleton == null:
 		return
+	var heading_delta := 0.0
+	if is_finite(_player_animation_heading):
+		heading_delta = wrapf(player.rotation.y - _player_animation_heading, -PI, PI)
+	_player_animation_heading = player.rotation.y
 	_player_hit_attack_lock_remaining = maxf(0.0, _player_hit_attack_lock_remaining - delta)
 	_update_player_knockdown_state()
 	if _player_hit_attack_lock_remaining <= 0.0 and _player_knockdown_state.is_empty() \
@@ -6434,7 +6848,7 @@ func _update_player_animation(delta: float) -> void:
 		if not active_reaction_clip.is_empty() and _animation_time >= float(active_reaction_clip.get("stop_time", 0.0)):
 			_finish_player_hit_reaction()
 	var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
-	var is_on_floor_now: bool = player.is_on_floor() or player.is_stepping()
+	var is_on_floor_now: bool = player.is_swimming or player.is_on_floor() or player.is_stepping()
 	if not is_on_floor_now and player.velocity.y <= 0.1:
 		is_on_floor_now = _has_nearby_walkable_support()
 	if _gesture_active and _gesture_should_end(horizontal_speed, is_on_floor_now):
@@ -6467,7 +6881,7 @@ func _update_player_animation(delta: float) -> void:
 			wanted_animation = GESTURE_KEY
 		elif _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
 			wanted_animation = _player_jump_clip("jumpstart", "JumpStart", "jumploop", "JumpLoop")
-		elif not _player_was_on_floor and is_on_floor_now:
+		elif not _player_was_on_floor and is_on_floor_now and not player.is_swimming:
 			wanted_animation = _player_jump_clip("jumpland", "JumpLand", "", _player_locomotion_animation(horizontal_speed))
 		elif not is_on_floor_now:
 			var jump_start := _player_jump_clip("jumpstart", "JumpStart", "jumploop", "JumpLoop")
@@ -6483,6 +6897,13 @@ func _update_player_animation(delta: float) -> void:
 				if _animation_time >= float(jump_land_clip.get("stop_time", 0.0)) else _active_animation
 		else:
 			wanted_animation = _player_locomotion_animation(horizontal_speed)
+	var turn_animation := _player_turn_transition(
+		heading_delta,
+		horizontal_speed <= 0.08 and is_on_floor_now and not player.is_swimming
+			and not _player_blocking and _player_combat_action.is_empty() and hit_reaction.is_empty()
+	)
+	if not turn_animation.is_empty():
+		wanted_animation = turn_animation
 	if not wanted_animation.is_empty():
 		_set_player_animation(wanted_animation)
 	if _player_combat_action_sound_pending and _active_animation == _player_combat_action:
@@ -6537,6 +6958,8 @@ func _has_nearby_walkable_support() -> bool:
 	return support_normal.dot(Vector3.UP) >= cos(player.floor_max_angle)
 
 func _player_locomotion_animation(horizontal_speed: float) -> String:
+	if player.is_swimming:
+		return _player_swim_animation(horizontal_speed)
 	var sneaking: bool = player.is_crouching
 	if horizontal_speed <= 0.08:
 		var idle_animation := "SneakIdle" if sneaking and _player_animations.has("SneakIdle") else "Idle"
@@ -6556,6 +6979,52 @@ func _player_locomotion_animation(horizontal_speed: float) -> String:
 	if sneaking and _player_animations.has("Sneak" + direction_name):
 		return "Sneak" + direction_name
 	return ("Fast" + direction_name) if is_fast else direction_name
+
+func _player_turn_transition(heading_delta: float, allowed: bool) -> String:
+	if player.is_first_person or not allowed:
+		_player_turn_animation = ""
+		return ""
+	if not _player_turn_animation.is_empty():
+		var active_turn: Dictionary = _player_animations.get(_player_turn_animation, {})
+		if _active_animation == _player_turn_animation and not active_turn.is_empty() \
+				and _animation_time < float(active_turn.get("stop_time", 0.0)):
+			return _player_turn_animation
+		_player_turn_animation = ""
+	if absf(heading_delta) < 0.025:
+		return ""
+	var side := "left" if heading_delta > 0.0 else "right"
+	var side_name := side.capitalize()
+	var candidates: Array[String] = []
+	if _weapon_drawn:
+		var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+		candidates.push_back(("sneak" if player.is_crouching else "") + prefix + "turn" + side)
+	if player.is_crouching:
+		candidates.push_back("SneakTurn" + side_name)
+	candidates.push_back("Turn" + side_name)
+	for turn_name: String in candidates:
+		if _player_animations.has(turn_name):
+			_player_turn_animation = turn_name
+			return turn_name
+	return ""
+
+func _player_swim_animation(horizontal_speed: float) -> String:
+	var local_velocity := Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z)
+	var direction := "idle"
+	if horizontal_speed > 0.08:
+		if absf(local_velocity.x) > absf(local_velocity.z):
+			direction = "left" if local_velocity.x < 0.0 else "right"
+		elif local_velocity.z > 0.0:
+			direction = "backward"
+		else:
+			direction = "forward"
+	var fast := "fast" if direction != "idle" and Input.is_action_pressed("run") else ""
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand")) \
+		if _weapon_drawn else "handtohand"
+	var candidate := "swim" + prefix + fast + direction
+	if _player_animations.has(candidate):
+		return candidate
+	var generic_candidate := "swim" + fast + direction
+	return generic_candidate if _player_animations.has(generic_candidate) else "swimhandtohandidle"
 
 func _player_combat_clip(suffix: String) -> String:
 	if not _weapon_drawn or suffix.is_empty():
@@ -6591,12 +7060,21 @@ func _finish_player_combat_action() -> void:
 	_player_combat_action_sound_pending = false
 
 func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time: float) -> void:
+	var cast_event_authored := false
+	if _player_combat_action_kind == "cast":
+		for key_value: Variant in animation.get("text_keys", []):
+			var key: Dictionary = key_value
+			if str(key.get("name", "")).strip_edges().to_lower() in ["hit", "release"]:
+				cast_event_authored = true
+				break
 	for key_value: Variant in animation.get("text_keys", []):
 		var key: Dictionary = key_value
 		var key_time := float(key.get("time", 0.0))
 		if key_time <= from_time or key_time > to_time:
 			continue
 		var key_name := str(key.get("name", "")).strip_edges().to_lower()
+		if _player_combat_action_kind == "cast" and key_name in ["hit", "release"]:
+			_release_pending_cast()
 		if key_name == "attach":
 			if _player_combat_action_kind == "equip":
 				_player_weapon_is_held = true
@@ -6609,6 +7087,12 @@ func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time
 		elif key_name == "release" and _player_combat_action_kind == "attack" and _player_weapon_type() == WEAPON_TYPE_BOW:
 			AudioManager.play_bow_shot(player)
 			_loose_arrow()
+	if _player_combat_action_kind == "cast" and not cast_event_authored and not _pending_cast.is_empty():
+		var start_time := float(animation.get("start_time", 0.0))
+		var stop_time := float(animation.get("stop_time", start_time))
+		var fallback_release := start_time + (stop_time - start_time) * 0.55
+		if from_time < fallback_release and to_time >= fallback_release:
+			_release_pending_cast()
 
 func _blend_duration_between(from_animation: String, to_animation: String) -> float:
 	if from_animation == GESTURE_KEY or from_animation == NPC_IDLE_KEY:

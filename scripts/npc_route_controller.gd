@@ -8,6 +8,12 @@ const HOP_RUN_SPEED_MPS := 3.4
 const HOP_ARRIVAL_M := 0.6
 const HOP_VOID_DEPTH_M := 3.0
 const HOP_TIMEOUT_S := 5.0
+const SWIM_ENTER_DEPTH_M := 1.1
+const SWIM_EXIT_DEPTH_M := 0.8
+const SWIM_BODY_SUBMERGE_M := 1.25
+const SWIM_SPEED_SCALE := 0.72
+const SWIM_BUOYANCY_RESPONSE := 2.8
+const SWIM_VERTICAL_SPEED_MPS := 1.8
 
 @export var walk_speed_mps := 1.3
 @export var gravity_mps2 := 9.8
@@ -51,6 +57,8 @@ var check_floor_ahead := true
 var inactive := false
 var dialogue_paused := false
 var knocked_down := false
+var is_swimming := false
+var _water_surface_y := -INF
 var _pause_remaining := 0.0
 var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
@@ -334,6 +342,27 @@ func set_knocked_down(value: bool) -> void:
 		is_walking = false
 		set_physics_process(not inactive and grounding_enabled)
 
+## The loaded cell supplies a water surface height in world metres, or -INF when this actor is outside water.
+func set_water_surface_world(surface_y: float) -> void:
+	_water_surface_y = surface_y
+	_update_swimming_state()
+	set_physics_process(not inactive and (grounding_enabled or not waypoints.is_empty() or is_swimming))
+
+func is_hopping() -> bool:
+	return _hop_active
+
+func is_animation_grounded() -> bool:
+	if is_swimming or _hop_active:
+		return false
+	return not grounding_enabled or is_on_floor() or _stepper.is_stepping()
+
+func _update_swimming_state() -> void:
+	if not is_finite(_water_surface_y) or inactive or knocked_down or _hop_active:
+		is_swimming = false
+		return
+	var depth := _water_surface_y - global_position.y
+	is_swimming = depth > (SWIM_EXIT_DEPTH_M if is_swimming else SWIM_ENTER_DEPTH_M)
+
 func _physics_process(delta: float) -> void:
 	_yield_cooldown_remaining = maxf(0.0, _yield_cooldown_remaining - delta)
 	_yield_request_cooldown_remaining = maxf(0.0, _yield_request_cooldown_remaining - delta)
@@ -419,6 +448,11 @@ func _physics_process(delta: float) -> void:
 			desired_horizontal_velocity = Vector3.ZERO
 	else:
 		velocity.y = 0.0
+	_update_swimming_state()
+	if is_swimming:
+		desired_horizontal_velocity *= SWIM_SPEED_SCALE
+		var target_y := _water_surface_y - SWIM_BODY_SUBMERGE_M
+		velocity.y = clampf((target_y - global_position.y) * SWIM_BUOYANCY_RESPONSE, -SWIM_VERTICAL_SPEED_MPS, SWIM_VERTICAL_SPEED_MPS)
 	velocity.x = desired_horizontal_velocity.x + _hit_velocity.x
 	velocity.z = desired_horizontal_velocity.z + _hit_velocity.z
 	_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)

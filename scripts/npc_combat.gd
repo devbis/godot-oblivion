@@ -435,6 +435,9 @@ func _apply_actor_fatigue(actor: Dictionary, amount: float) -> void:
 	actor["fatigue"] = fatigue
 
 func _stagger_animation(actor: Dictionary) -> String:
+	var root := actor.get("root") as Node3D
+	if is_instance_valid(root) and bool(root.get("is_swimming")):
+		return "swimstagger"
 	var prefix := _prefix(actor)
 	return "bowblockhit" if prefix == "bow" else prefix + "stagger"
 
@@ -529,6 +532,8 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 	var prefix := _prefix(actor)
 	var suffixes: Array[String] = ["idle", "fastforward", "forward"]
 	suffixes.append_array(_attack_suffixes(prefix))
+	if prefix == "handtohand":
+		suffixes.append_array(["attackright_jab", "attackleft_jab", "attackright_hook", "attackleft_hook"])
 	for suffix: String in suffixes:
 		_request_clip(actor, prefix + suffix)
 	_stop_route(root)
@@ -652,19 +657,37 @@ func _attack_suffixes(prefix: String) -> Array[String]:
 	return ["attackright", "attackleft", "attackpower"]
 
 func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void:
-	var options := _attack_suffixes(prefix)
-	if prefix in ["onehand", "twohand"] and randf() < POWER_ATTACK_CHANCE:
-		options = ["attackpower"]
+	var animations: Dictionary = actor.animations
+	var clip_key := ""
+	var unarmed_index := int(combat.get("unarmed_attack_index", 0))
+	if prefix == "handtohand":
+		var side := "right" if unarmed_index % 2 == 0 else "left"
+		var variant := "jab" if int(unarmed_index / 2) % 2 == 0 else "hook"
+		clip_key = prefix + "attack" + side + "_" + variant
+		if animations.get(clip_key, {}).is_empty():
+			_request_clip(actor, clip_key)
+			var fallback := prefix + "attack" + side
+			if animations.get(fallback, {}).is_empty():
+				_request_clip(actor, fallback)
+				combat.cooldown = 0.15
+				return
+			clip_key = fallback
 	else:
-		options.erase("attackpower")
-	var clip_key := prefix + options[randi() % options.size()]
-	var animation: Dictionary = (actor.animations as Dictionary).get(clip_key, {})
+		var options := _attack_suffixes(prefix)
+		if prefix in ["onehand", "twohand"] and randf() < POWER_ATTACK_CHANCE:
+			options = ["attackpower"]
+		else:
+			options.erase("attackpower")
+		clip_key = prefix + options[randi() % options.size()]
+	var animation: Dictionary = animations.get(clip_key, {})
 	if animation.is_empty():
 		# The clip is still loading: ask again and try shortly.
 		_request_clip(actor, clip_key)
 		combat.cooldown = 0.15
 		return
 	combat.state = "swing"
+	if prefix == "handtohand":
+		combat["unarmed_attack_index"] = unarmed_index + 1
 	combat.clip = clip_key
 	combat.time = float(animation.get("start_time", 0.0))
 	combat.hit_done = false
@@ -790,6 +813,9 @@ func _loose_arrow(actor: Dictionary, root: Node3D, player: CollisionObject3D, ta
 
 ## Loads a combat clip into the actor's animations (the first sequence of the original KF), once.
 func _request_clip(actor: Dictionary, clip_name: String) -> void:
+	if host.has_method("_request_npc_animation"):
+		host.call("_request_npc_animation", actor, clip_name)
+		return
 	var animations: Dictionary = actor.animations
 	var requested: Dictionary = actor.get("combat_clips_requested", {})
 	if animations.has(clip_name) or requested.has(clip_name):

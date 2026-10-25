@@ -95,6 +95,8 @@ var _camera_rest := Vector3.ZERO
 var _bob_phase := 0.0
 var _bob_weight := 0.0
 var _bob_offset := Vector3.ZERO
+var _was_airborne := false
+var _movement_transition := ""
 var _hand_lag := Quaternion.IDENTITY
 var _last_camera_basis := Basis.IDENTITY
 
@@ -325,13 +327,17 @@ func _refresh_visibility() -> void:
 		root.visible = _mode != Mode.HIDDEN and _posed and not _suppressed
 
 ## An attack with the stance's clips; `side` is "right", "left" or "power". Does nothing while another clip runs.
-func attack(side: String) -> bool:
+func attack(side: String, variant := "") -> bool:
 	if _mode != Mode.READY or is_busy():
 		return false
 	var prefix := str(_stance.prefix)
 	var candidates: Array[String] = []
 	if prefix == "bow":
 		candidates = ["bowattack"]
+	elif prefix == UNARMED_STANCE.prefix and variant in ["jab", "hook"]:
+		candidates = [prefix + "attack" + side + "_" + variant, prefix + "attack" + side]
+	elif side == "power":
+		candidates = [prefix + "attackpower", prefix + "attackrightpower", prefix + "attackright"]
 	else:
 		candidates = [prefix + "attack" + side, prefix + "attackright"]
 	_begin_one_shot(candidates, "attack")
@@ -384,6 +390,7 @@ func update(delta: float, motion: Dictionary) -> void:
 	if _mode == Mode.HIDDEN or skeleton == null or not built:
 		return
 	_resolve_one_shot(delta)
+	_update_movement_transition(motion)
 	var wanted := _one_shot if not _one_shot.is_empty() else _base_clip(motion)
 	if wanted != _active_clip:
 		var wanted_clip: Dictionary = _clips.get(wanted, {})
@@ -409,14 +416,29 @@ func update(delta: float, motion: Dictionary) -> void:
 	_refresh_visibility()
 	if not _one_shot.is_empty():
 		_fire_events(clip, previous_time, minf(_time, stop_time))
+		if _one_shot_kind == "cast" and not _clip_has_event(clip, ["hit", "release"]):
+			var fallback_release := start_time + (stop_time - start_time) * 0.55
+			if previous_time < fallback_release and _time >= fallback_release:
+				clip_event.emit("hit", "cast")
 		if _time >= stop_time:
 			_finish_one_shot()
+
+func _clip_has_event(clip: Dictionary, event_names: Array[String]) -> bool:
+	for key_value: Variant in clip.get("text_keys", []):
+		var key: Dictionary = key_value
+		if str(key.get("name", "")).strip_edges().to_lower() in event_names:
+			return true
+	return false
 
 func _base_clip(motion: Dictionary) -> String:
 	var prefix := str(_stance.prefix)
 	var sneak := "sneak" if bool(motion.get("crouching", false)) else ""
 	if _blocking:
 		return prefix + "blockidle"
+	if bool(motion.get("swimming", false)):
+		return _swim_clip(motion, prefix)
+	if not _movement_transition.is_empty():
+		return _movement_transition
 	if bool(motion.get("airborne", false)):
 		return prefix + "jumploop"
 	var local_velocity: Vector3 = motion.get("local_velocity", Vector3.ZERO)
@@ -432,8 +454,65 @@ func _base_clip(motion: Dictionary) -> String:
 	var fast := "fast" if bool(motion.get("running", false)) and sneak.is_empty() else ""
 	return sneak + prefix + fast + direction
 
+func _swim_clip(motion: Dictionary, prefix: String) -> String:
+	var local_velocity: Vector3 = motion.get("local_velocity", Vector3.ZERO)
+	var direction := "idle"
+	if Vector2(local_velocity.x, local_velocity.z).length() > WALK_SPEED_EPSILON:
+		if absf(local_velocity.x) > absf(local_velocity.z):
+			direction = "left" if local_velocity.x < 0.0 else "right"
+		elif local_velocity.z > 0.0:
+			direction = "backward"
+		else:
+			direction = "forward"
+	var fast := "fast" if direction != "idle" and bool(motion.get("running", false)) else ""
+	return "swim" + prefix + fast + direction
+
+func _update_movement_transition(motion: Dictionary) -> void:
+	var airborne := bool(motion.get("airborne", false))
+	if bool(motion.get("swimming", false)):
+		_was_airborne = false
+		_movement_transition = ""
+		return
+	if not _one_shot.is_empty() or not _one_shot_candidates.is_empty():
+		_was_airborne = airborne
+		return
+	var prefix := str(_stance.prefix)
+	if airborne:
+		if not _was_airborne:
+			_movement_transition = prefix + "jumpstart"
+		elif _movement_transition.ends_with("jumpstart"):
+			var start_clip: Dictionary = _clips.get(_movement_transition, {})
+			if start_clip.is_empty():
+				_request_clip(_movement_transition)
+			elif _active_clip == _movement_transition and _time >= float(start_clip.get("stop_time", 0.0)):
+				_movement_transition = prefix + "jumploop"
+		else:
+			_movement_transition = prefix + "jumploop"
+		_was_airborne = true
+		return
+	if _was_airborne:
+		_movement_transition = prefix + "jumpland"
+		_was_airborne = false
+	elif _movement_transition.ends_with("jumpland"):
+		var land_clip: Dictionary = _clips.get(_movement_transition, {})
+		if land_clip.is_empty():
+			_request_clip(_movement_transition)
+		elif _active_clip == _movement_transition and _time >= float(land_clip.get("stop_time", 0.0)):
+			_movement_transition = ""
+	if not _movement_transition.is_empty() and _clips.get(_movement_transition, {}).is_empty():
+		_request_clip(_movement_transition)
+		if _clips_requested.get(_movement_transition, "") == "missing":
+			if _movement_transition.ends_with("jumpstart"):
+				_movement_transition = prefix + "jumploop"
+			else:
+				_movement_transition = ""
+
 func _fallback_clip(motion: Dictionary) -> String:
 	var prefix := str(_stance.prefix)
+	if bool(motion.get("swimming", false)):
+		for candidate: String in ["swim" + prefix + "idle", "swimidle", prefix + "idle", "handtohandidle", "idle"]:
+			if not (_clips.get(candidate, {}) as Dictionary).is_empty():
+				return candidate
 	for candidate: String in [prefix + "idle", "handtohandidle", "idle"]:
 		if not (_clips.get(candidate, {}) as Dictionary).is_empty():
 			return candidate
@@ -567,6 +646,7 @@ func _update_sway(delta: float, motion: Dictionary, clip: Dictionary) -> void:
 	var walking := (
 		_one_shot.is_empty()
 		and not _blocking
+		and not bool(motion.get("swimming", false))
 		and not bool(motion.get("airborne", false))
 		and Vector2(local_velocity.x, local_velocity.z).length() > WALK_SPEED_EPSILON
 	)
@@ -666,7 +746,11 @@ func _preload_stance() -> void:
 	for suffix: String in [
 		"idle", "equip", "unequip", "forward", "backward", "left", "right",
 		"fastforward", "fastbackward", "fastleft", "fastright", "blockidle",
-		"attackright", "attackleft", "attack", "jumploop",
+		"attackright", "attackleft", "attack", "attackright_chop", "attackleft_chop",
+		"attackright_hook", "attackleft_hook", "attackright_jab", "attackleft_jab",
+		"jumploop", "jumpstart", "jumpland", "turnleft", "turnright",
+		"swimidle", "swimforward", "swimbackward", "swimleft", "swimright",
+		"swimfastforward", "swimfastbackward", "swimfastleft", "swimfastright",
 	]:
 		_request_clip(prefix + suffix)
 	for cast_name: String in ["castself", "casttouch", "casttarget"]:
