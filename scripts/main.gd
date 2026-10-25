@@ -30,6 +30,17 @@ const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fMagicCostScale", "fMagicDurMagBaseCostMult", "fMagicAreaBaseCostMult",
 	"fMagicRangeTargetCostMult", "fMagicCasterSkillCostBase", "fMagicCasterSkillCostMult",
 ]
+## Melee damage settings and the defaults Oblivion.exe registers for the ones the ESM does not set (FUN_00547070 and
+## FUN_00547280 read them; see docs/research/original_exe.md).
+const COMBAT_DAMAGE_SETTINGS := {
+	"fDamageWeaponMult": 0.5, "fDamageSkillBase": 0.2, "fDamageSkillMult": 1.5,
+	"fDamageStrengthBase": 0.75, "fDamageStrengthMult": 0.5,
+	"fDamageWeaponConditionBase": 0.5, "fDamageWeaponConditionMult": 0.5, "fDamagePowerAttackBonus": 2.5,
+	"fHandHealthMin": 1.0, "fHandHealthMax": 20.0, "fHandDamageSkillBase": 0.0, "fHandDamageSkillMult": 1.0,
+	"fHandDamageStrengthBase": 0.0, "fHandDamageStrengthMult": 0.75,
+	"fHandFatigueDamageMult": 0.5, "fHandFatigueDamageBase": 1.0, "fNPCAttributeHealthMult": 0.5,
+	"fFatigueBase": 1.0, "fFatigueMult": 0.5,
+}
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
@@ -523,6 +534,8 @@ func _initialize_player_game_state() -> void:
 	_player_game_settings.clear()
 	for setting_name: String in PLAYER_DYNAMIC_GAME_SETTINGS:
 		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, 0.0)
+	for setting_name: String in COMBAT_DAMAGE_SETTINGS:
+		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, float(COMBAT_DAMAGE_SETTINGS[setting_name]))
 	_player_actor_values.configure_game_settings(_player_game_settings)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
@@ -5180,9 +5193,10 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
 func _initial_actor_health(npc: Dictionary) -> Dictionary:
-	# The record's base health plus the endurance share (fHealthEndurMult is 2 in the original).
+	# The record's base health plus the endurance share (fNPCAttributeHealthMult; how the original combines them is not traced).
 	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
-	var maximum := float(npc.get("base_health", 0.0)) + (float(attributes[5]) * 2.0 if attributes.size() > 5 else 0.0)
+	var maximum := float(npc.get("base_health", 0.0)) \
+		+ (float(attributes[5]) * float(_player_game_settings.get("fNPCAttributeHealthMult", 0.5)) if attributes.size() > 5 else 0.0)
 	maximum = maxf(maximum, 1.0)
 	return {"current": maximum, "max": maximum}
 
@@ -5330,6 +5344,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"blink_remaining": 0.0,
 			"animations": animations,
 			"attributes": npc.get("attributes", PackedInt64Array()),
+			"skills": npc.get("skills", PackedInt64Array()),
 			"fatigue": _initial_actor_fatigue(npc),
 			"knockdown_state": "",
 			"hit_reaction": {},

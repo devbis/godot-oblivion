@@ -24,7 +24,6 @@ const CLIP_FOLDER := "Characters/_male/"
 const HIT_REACH_SLACK_M := 0.5
 const BLOCKED_DAMAGE_SHARE := 0.3
 const POWER_ATTACK_CHANCE := 0.2
-const POWER_ATTACK_DAMAGE_MULT := 1.5
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
 const HIT_ATTACK_LOCK_S := 0.45
@@ -40,7 +39,12 @@ const FATIGUE_ATTACK_WEAPON_MULT_SETTING := "fFatigueAttackWeaponMult"
 const FATIGUE_RETURN_BASE_SETTING := "fFatigueReturnBase"
 const FATIGUE_RETURN_MULT_SETTING := "fFatigueReturnMult"
 const FATIGUE_RUN_BASE_SETTING := "fFatigueRunBase"
+const ATTRIBUTE_STRENGTH := 0
 const ATTRIBUTE_ENDURANCE := 5
+const SKILL_BLADE := 2
+const SKILL_HAND_TO_HAND := 5
+## WEAP type -> the skill a blow uses: blades, blunt weapons and staves, bows (Marksman, 16).
+const WEAPON_SKILLS := {0: 2, 1: 2, 2: 4, 3: 4, 4: 4, 5: 16}
 ## Blows between actors wear fatigue down by the damage they deal, not the player-sized minimum: with that, fights end in a
 ## knockdown loop instead of a death.
 const ACTOR_HIT_FATIGUE_MULT := 1.0
@@ -208,9 +212,56 @@ func _reach_m(actor: Dictionary) -> float:
 		return UNARMED_REACH_M
 	return host.MELEE_BASE_REACH_M * float(record.get("reach", 1.0))
 
+## The weapon's own damage stat (what fatigue costs of an attack read), not what a blow takes off.
 func _damage(actor: Dictionary) -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	return float(record.get("damage", UNARMED_DAMAGE)) if not record.is_empty() else UNARMED_DAMAGE
+
+func _setting(setting_name: String) -> float:
+	return float((host.get("_player_game_settings") as Dictionary).get(setting_name, 0.0))
+
+func _attribute_value(actor: Dictionary, index: int) -> float:
+	var attributes: PackedInt64Array = actor.get("attributes", PackedInt64Array())
+	return minf(float(attributes[index]) if attributes.size() > index else 50.0, 100.0)
+
+func _skill_value(actor: Dictionary, index: int) -> float:
+	var skills: PackedInt64Array = actor.get("skills", PackedInt64Array())
+	return minf(float(skills[index]) if skills.size() > index else 30.0, 100.0)
+
+## The fatigue term of a blow (FUN_00547f00): half of it at no fatigue.
+func _fatigue_damage_modifier(actor: Dictionary) -> float:
+	var fatigue: Dictionary = actor.get("fatigue", {})
+	var maximum := float(fatigue.get("max", 0.0))
+	var ratio := clampf(float(fatigue.get("current", maximum)) / maximum, 0.0, 1.0) if maximum > 0.0 else 1.0
+	return _setting("fFatigueBase") - (1.0 - ratio) * _setting("fFatigueMult")
+
+## The health one landed blow takes off, as Oblivion.exe computes it. A weapon (FUN_00547070):
+##   condition x weapon damage x fDamageWeaponMult x (skill base + skill mult x skill/100)
+##   x (strength base + strength mult x strength/100) x fatigue x power attack bonus
+## Bare hands (FUN_00547280): hand health min + t x (max - min), t = strength x skill x fatigue terms, at most 1.
+func _hit_damage(actor: Dictionary, power: bool) -> float:
+	var record: Dictionary = actor.get("weapon_record", {})
+	var strength := _attribute_value(actor, ATTRIBUTE_STRENGTH)
+	var fatigue_modifier := _fatigue_damage_modifier(actor)
+	if record.is_empty():
+		var hand_term := (_setting("fHandDamageStrengthBase") + _setting("fHandDamageStrengthMult") * strength * 0.01) \
+			* (_setting("fHandDamageSkillBase") + _setting("fHandDamageSkillMult") * _skill_value(actor, SKILL_HAND_TO_HAND) * 0.01) \
+			* fatigue_modifier
+		var minimum := _setting("fHandHealthMin")
+		return minimum + minf(hand_term, 1.0) * (_setting("fHandHealthMax") - minimum)
+	var skill := _skill_value(actor, int(WEAPON_SKILLS.get(_weapon_type(actor), SKILL_BLADE)))
+	var damage := float(record.get("damage", 0.0)) * _setting("fDamageWeaponMult")
+	damage *= _setting("fDamageWeaponConditionBase") + _setting("fDamageWeaponConditionMult")  # an undamaged weapon
+	damage *= _setting("fDamageSkillBase") + _setting("fDamageSkillMult") * skill * 0.01
+	damage *= _setting("fDamageStrengthBase") + _setting("fDamageStrengthMult") * strength * 0.01
+	damage *= fatigue_modifier
+	return damage * (_setting("fDamagePowerAttackBonus") if power else 1.0)
+
+## The fatigue a bare-handed blow takes off the target (a weapon's blow takes as much as its damage here).
+func _hit_fatigue_damage(attacker: Dictionary, damage: float) -> float:
+	if (attacker.get("weapon_record", {}) as Dictionary).is_empty():
+		return damage * _setting("fHandFatigueDamageMult") + _setting("fHandFatigueDamageBase")
+	return damage * ACTOR_HIT_FATIGUE_MULT
 
 func _attack_fatigue_cost(actor: Dictionary) -> float:
 	if _weapon_type(actor) < 0:
@@ -254,7 +305,7 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 	var fight_back := _aggression(victim) >= AGGRESSION_DEFENDS and not _calmed.has(int(victim.get("reference_id", 0)))
 	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
 	_react_to_hit(
-		victim, source, damage * ACTOR_HIT_FATIGUE_MULT, attacker_id if fight_back else -1,
+		victim, source, _hit_fatigue_damage(attacker, damage), attacker_id if fight_back else -1,
 		int(attacker.get("base_form_id", 0))
 	)
 	_call_allies(victim, attacker)
@@ -662,7 +713,7 @@ func _land_hit(actor: Dictionary, root: Node3D, player: CollisionObject3D, targe
 	var distance := Vector2(player.global_position.x - root.global_position.x, player.global_position.z - root.global_position.z).length()
 	if distance > _reach_m(actor) + HIT_REACH_SLACK_M:
 		return
-	var damage := _damage(actor) * (POWER_ATTACK_DAMAGE_MULT if bool(combat.get("power", false)) else 1.0)
+	var damage := _hit_damage(actor, bool(combat.get("power", false)))
 	if target_actor.is_empty():
 		_hurt_player(actor, root, player as CharacterBody3D, damage)
 	else:
@@ -722,7 +773,7 @@ func _loose_arrow(actor: Dictionary, root: Node3D, player: CollisionObject3D, ta
 	var arrow := CombatProjectile.new_arrow(meshes, direction * ARROW_SPEED_MPS)
 	var excluded: Array[RID] = [(root as CollisionObject3D).get_rid()]
 	arrow.excluded_bodies = excluded
-	var damage := _damage(actor)
+	var damage := _hit_damage(actor, false)
 	arrow.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
 		var impact_audio := host.get_node_or_null("/root/AudioManager") as Node
 		if impact_audio != null:
