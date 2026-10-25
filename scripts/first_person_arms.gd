@@ -390,7 +390,9 @@ func _base_clip(motion: Dictionary) -> String:
 	if bool(motion.get("airborne", false)):
 		return prefix + "jumploop"
 	var local_velocity: Vector3 = motion.get("local_velocity", Vector3.ZERO)
-	if Vector2(local_velocity.x, local_velocity.z).length() <= WALK_SPEED_EPSILON:
+	# The bare-hand walk and run clips lower the fists about 7 units and push them forward (and are the same clip for walking
+	# and running), which the original does not do: the fists stay where they are at rest, so they use the idle clip.
+	if Vector2(local_velocity.x, local_velocity.z).length() <= WALK_SPEED_EPSILON or prefix == UNARMED_STANCE.prefix:
 		return sneak + prefix + "idle"
 	var direction := "forward"
 	if absf(local_velocity.x) > absf(local_velocity.z):
