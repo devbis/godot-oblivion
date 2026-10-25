@@ -22,6 +22,7 @@ public:
               std::ostream* log = nullptr);
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
+    [[nodiscard]] std::uint32_t cell_of_reference(std::uint32_t reference_form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const { return esm_.find_weapon(form_id); }

@@ -178,6 +178,10 @@ const CellRecord* GameData::find_cell(std::string_view editor_id) const {
     return esm_.find_cell(editor_id);
 }
 
+std::uint32_t GameData::cell_of_reference(std::uint32_t reference_form_id) const {
+    return esm_.cell_of_reference(reference_form_id);
+}
+
 const CellRecord* GameData::find_cell(std::uint32_t form_id) const {
     return esm_.find_cell(form_id);
 }

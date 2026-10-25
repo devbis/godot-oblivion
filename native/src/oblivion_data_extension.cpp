@@ -417,6 +417,12 @@ public:
         return cell ? cell_to_dictionary(*cell) : Dictionary{};
     }
 
+    // The form ID of the cell a placed reference (a marker, a door, an actor) lies in, 0 when there is none.
+    int64_t find_reference_cell(int64_t reference_form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return data_ ? static_cast<int64_t>(data_->cell_of_reference(form_id_arg(reference_form_id))) : 0;
+    }
+
     Dictionary find_pathgrid(int64_t cell_form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
@@ -979,6 +985,7 @@ protected:
         ClassDB::bind_method(D_METHOD("run_quest_stage", "quest_editor_id", "stage", "executable_path", "cache_dir"),
                              &OblivionData::run_quest_stage);
         ClassDB::bind_method(D_METHOD("find_cell_by_id", "form_id"), &OblivionData::find_cell_by_id);
+        ClassDB::bind_method(D_METHOD("find_reference_cell", "reference_form_id"), &OblivionData::find_reference_cell);
         ClassDB::bind_method(D_METHOD("find_pathgrid", "cell_form_id"), &OblivionData::find_pathgrid);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);

@@ -204,6 +204,11 @@ public:
     void open(const std::filesystem::path& path, bool runtime_visuals_only = false);
     [[nodiscard]] const CellRecord* find_cell(std::string_view editor_id) const;
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
+    // The cell a placed reference lies in, or 0 when the form is not a placed reference.
+    [[nodiscard]] std::uint32_t cell_of_reference(std::uint32_t reference_form_id) const {
+        const auto found = cell_by_reference_id_.find(reference_form_id);
+        return found == cell_by_reference_id_.end() ? 0u : found->second;
+    }
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;

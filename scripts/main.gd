@@ -1230,6 +1230,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
 		actor["package_done"] = false
 		actor["package_target_activated"] = false
+		actor.erase("cross_cell")
 		actor.erase("package_arrival_distance")
 		actor.erase("follow_hold_target_form_id")
 	if int(package.get("form_id", 0)) != int(previous.get("form_id", 0)):
@@ -1252,10 +1253,27 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if not package.is_empty() and destination_form_id != 0:
 		var position = _package_destination_position(package)
 		if position == null:
-			print("OpenOB package %s for %s: target %s is not available in this cell" % [
-				str(package.get("editor_id", "")), str(actor.get("name", "")), _package_location_label(destination_form_id)
-			])
+			var door := _door_toward_destination_cell(destination_form_id)
+			if door.is_empty():
+				print("OpenOB package %s for %s: target %s is not available in this cell and no door leads to its cell" % [
+					str(package.get("editor_id", "")), str(actor.get("name", "")), _package_location_label(destination_form_id)
+				])
+			else:
+				actor["cross_cell"] = {"door_form_id": int(door.get("form_id", 0)), "destination_form_id": destination_form_id}
+				final_arrival_distance = CROSS_CELL_DOOR_ARRIVAL_M
+				route_path = director.navigation_path(
+					(root as Node3D).global_position, _reference_transform(door).origin, _actor_collision_radius(root as Node3D),
+					true, final_arrival_distance
+				)
+				route_uses_pathgrid = bool(director.get("last_navigation_path_uses_pathgrid"))
+				var door_flags := int(package.get("flags", 0))
+				waypoints = _navigation_waypoints(route_path, 3.4 if (door_flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3)
+				print("OpenOB package %s for %s: target %s is in another cell; it walks to door 0x%08X and goes through" % [
+					str(package.get("editor_id", "")), str(actor.get("name", "")),
+					_package_location_label(destination_form_id), int(door.get("form_id", 0))
+				])
 		else:
+			actor.erase("cross_cell")
 			final_arrival_distance = _package_destination_arrival_distance(package, root as Node3D)
 			var destination: Vector3 = position
 			if destination_form_id == PLAYER_REFERENCE_FORM_ID or _is_dynamic_follow_package(package):
@@ -1349,6 +1367,8 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root):
 			return
+		if actor.has("cross_cell"):
+			_leave_cell_through_door(actor)
 		var destination_form_id := _package_destination_form_id(package)
 		var location = _package_destination_position(package)
 		if location != null:
@@ -1422,6 +1442,103 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		_greet_package_target_actor(actor, package)
 		return
 
+
+const CROSS_CELL_DOOR_ARRIVAL_M := 1.2
+const CROSS_CELL_SEARCH_LIMIT := 40
+
+## Actors that went through a door while the player was elsewhere: reference id -> {cell_form_id, reference} (the placed
+## reference moved to where its package ended). They are absent from the cell they left and appear in that one.
+var _relocated_actors: Dictionary = {}
+
+## The first door of the current cell on the way to the cell the destination reference lies in ({} when none leads there).
+func _door_toward_destination_cell(destination_form_id: int) -> Dictionary:
+	var destination_cell := int(data_reader.find_reference_cell(destination_form_id))
+	var start_cell := int(current_cell.get("form_id", 0))
+	if destination_cell == 0 or destination_cell == start_cell:
+		return {}
+	var queue: Array[Dictionary] = [{"cell": start_cell, "first_door": {}}]
+	var seen := {start_cell: true}
+	while not queue.is_empty() and seen.size() <= CROSS_CELL_SEARCH_LIMIT:
+		var item: Dictionary = queue.pop_front()
+		var references: Array = current_cell.get("references", []) if int(item.cell) == start_cell \
+			else data_reader.find_cell_by_id(int(item.cell)).get("references", [])
+		for reference_value: Variant in references:
+			var reference: Dictionary = reference_value
+			var target_cell := int(reference.get("teleport_cell_id", 0))
+			if target_cell == 0 or seen.has(target_cell):
+				continue
+			seen[target_cell] = true
+			var first_door: Dictionary = item.first_door if not (item.first_door as Dictionary).is_empty() else reference
+			if target_cell == destination_cell:
+				return first_door
+			queue.push_back({"cell": target_cell, "first_door": first_door})
+	return {}
+
+func _reference_in_cell(cell_form_id: int, reference_form_id: int) -> Dictionary:
+	for reference_value: Variant in data_reader.find_cell_by_id(cell_form_id).get("references", []):
+		if int((reference_value as Dictionary).get("form_id", 0)) == reference_form_id:
+			return reference_value
+	return {}
+
+## The actor reached the door that leads toward its package's place: it goes through. It leaves this cell and is placed at
+## the destination in its own cell, where it stands when that cell is loaded (the walk there is not simulated).
+func _leave_cell_through_door(actor: Dictionary) -> void:
+	var crossing: Dictionary = actor.get("cross_cell", {})
+	actor.erase("cross_cell")
+	var destination_form_id := int(crossing.get("destination_form_id", 0))
+	var destination_cell := int(data_reader.find_reference_cell(destination_form_id))
+	var marker := _reference_in_cell(destination_cell, destination_form_id)
+	var reference_id := int(actor.get("reference_id", 0))
+	var placed: Dictionary = {}
+	for reference_value: Variant in current_cell.get("references", []):
+		if int((reference_value as Dictionary).get("form_id", 0)) == reference_id:
+			placed = reference_value
+			break
+	if marker.is_empty() or placed.is_empty():
+		print("OpenOB cell crossing: %s cannot leave: %s" % [
+			str(actor.get("reference_name", "NPC")), "no destination marker 0x%08X" % destination_form_id if marker.is_empty() else "its placed reference is missing"
+		])
+		return
+	var moved: Dictionary = placed.duplicate(true)
+	moved["position"] = marker.get("position")
+	moved["rotation"] = marker.get("rotation")
+	_relocated_actors[reference_id] = {"cell_form_id": destination_cell, "reference": moved}
+	print("OpenOB cell crossing: %s goes through door 0x%08X to cell 0x%08X, where it waits at 0x%08X" % [
+		str(actor.get("reference_name", "NPC")), int(crossing.get("door_form_id", 0)), destination_cell, destination_form_id
+	])
+	var root := actor.get("root") as Node3D
+	if is_instance_valid(root):
+		root.visible = false
+		if root is CollisionObject3D:
+			(root as CollisionObject3D).collision_layer = 0
+			(root as CollisionObject3D).collision_mask = 0
+		root.set("inactive", true)
+	_remove_relocated_actor.call_deferred(reference_id)
+
+func _remove_relocated_actor(reference_id: int) -> void:
+	for index in range(_npc_actors.size() - 1, -1, -1):
+		if int(_npc_actors[index].get("reference_id", 0)) != reference_id:
+			continue
+		var root := _npc_actors[index].get("root") as Node
+		_npc_actors.remove_at(index)
+		if is_instance_valid(root):
+			root.queue_free()
+
+## Puts the actors that went through a door into the cell they went to.
+func _inject_relocated_actors(cell: Dictionary) -> void:
+	var references: Array = cell.get("references", [])
+	for relocated: Dictionary in _relocated_actors.values():
+		if int(relocated.get("cell_form_id", 0)) != int(cell.get("form_id", 0)):
+			continue
+		var reference: Dictionary = relocated.reference
+		var known := false
+		for existing_value: Variant in references:
+			if int((existing_value as Dictionary).get("form_id", 0)) == int(reference.get("form_id", 0)):
+				known = true
+				break
+		if not known:
+			references.push_back(reference)
+	cell["references"] = references
 
 ## A Find package that reached an actor (Baurus finding the Emperor) ends with the finder's HELLO to that actor.
 func _greet_package_target_actor(actor: Dictionary, package: Dictionary) -> void:
@@ -4646,6 +4763,9 @@ func _update_npc_combat(delta: float) -> void:
 
 ## A reference with an enable parent (XESP) follows that reference's state; one without is disabled only by its flag.
 func _actor_reference_disabled(reference: Dictionary, depth: int = 0) -> bool:
+	var relocated: Dictionary = _relocated_actors.get(int(reference.get("form_id", 0)), {})
+	if not relocated.is_empty() and int(relocated.get("cell_form_id", 0)) != int(current_cell.get("form_id", 0)):
+		return true
 	var parent_id := int(reference.get("enable_parent_form_id", 0))
 	if parent_id != 0 and depth < 8:
 		var parent := _reference_by_form_id(parent_id)
@@ -6853,6 +6973,7 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 	_clear_cell_actors()
 	player.global_position = destination_position
 	current_cell = target
+	_inject_relocated_actors(current_cell)
 	await _load_cell_geometry(
 		current_cell, 0.0,
 		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
