@@ -43,7 +43,7 @@ const CAMERA_FOLLOW_MULT := 0.5
 const VIEW_MODEL_OFFSET := Vector3(0.0, 0.0, 0.02)
 ## The clips hold the arms almost still while walking (the original adds the sway in code): a step bob, in metres at the
 ## view model's scale, one side-to-side and one up-down swing per step. Running swings more, sneaking less.
-const BOB_SWAY_M := Vector2(0.006, 0.008)
+const BOB_SWAY_M := Vector2(0.003, 0.004)
 const BOB_RUN_MULT := 1.6
 const BOB_SNEAK_MULT := 0.5
 const BOB_BLEND_PER_S := 5.0
@@ -545,8 +545,10 @@ func _update_sway(delta: float, motion: Dictionary, clip: Dictionary) -> void:
 	var turn := Quaternion(_last_camera_basis.inverse() * camera_basis)
 	_last_camera_basis = camera_basis
 	var turn_angle := turn.get_angle()
-	if turn_angle > 0.0 and turn_angle < 1.0:
-		var followed := Quaternion(turn.get_axis(), -turn_angle * HAND_FOLLOW_MULT)
+	var turn_axis := turn.get_axis()
+	# A turn too small to have an axis (the view is still) leaves the trail alone.
+	if turn_angle > 0.0001 and turn_angle < 1.0 and turn_axis.is_normalized():
+		var followed := Quaternion(turn_axis, -turn_angle * HAND_FOLLOW_MULT)
 		_hand_lag = (followed * _hand_lag).normalized()
 		if _hand_lag.get_angle() > HAND_FOLLOW_MAX_RAD:
 			_hand_lag = Quaternion.IDENTITY.slerp(_hand_lag, HAND_FOLLOW_MAX_RAD / _hand_lag.get_angle())
