@@ -706,6 +706,7 @@ func _physics_process(delta: float) -> void:
 	if _player_route_timer <= 0.0:
 		_player_route_timer = 0.5
 		_update_dynamic_target_routes()
+		_update_cross_cell_departures()
 	_open_doors_on_npc_routes()
 
 ## Trigger zones of the cell: a reference whose base has an object script with an OnTrigger block. The zone's OnTrigger
@@ -1443,7 +1444,30 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 		return
 
 
-const CROSS_CELL_DOOR_ARRIVAL_M := 1.2
+const CROSS_CELL_DOOR_ARRIVAL_M := 1.5
+## Near the door the actor goes through even if its route has not ended: crowded at the door or held by the frame.
+const CROSS_CELL_NEAR_DOOR_M := 2.2
+const CROSS_CELL_STUCK_NEAR_DOOR_M := 6.0
+const CROSS_CELL_STUCK_S := 2.5
+
+func _update_cross_cell_departures() -> void:
+	for actor: Dictionary in _npc_actors:
+		if not actor.has("cross_cell") or bool(actor.get("dead", false)):
+			continue
+		var root := actor.get("root") as Node3D
+		var door := _reference_by_form_id(int((actor.cross_cell as Dictionary).get("door_form_id", 0)))
+		if not is_instance_valid(root) or door.is_empty():
+			continue
+		var door_origin := _reference_transform(door).origin
+		var distance := Vector2(root.global_position.x - door_origin.x, root.global_position.z - door_origin.z).length()
+		var blocked_s := float(root.get("_route_blocked_elapsed"))
+		if distance <= CROSS_CELL_NEAR_DOOR_M or (distance <= CROSS_CELL_STUCK_NEAR_DOOR_M and blocked_s >= CROSS_CELL_STUCK_S):
+			print("OpenOB cell crossing: %s is %.1f m from door 0x%08X%s, so it goes through" % [
+				str(actor.get("reference_name", "NPC")), distance, int((actor.cross_cell as Dictionary).get("door_form_id", 0)),
+				" and blocked for %.1f s" % blocked_s if blocked_s >= CROSS_CELL_STUCK_S else ""
+			])
+			_on_actor_route_finished(int(actor.get("reference_id", 0)))
+			return
 const CROSS_CELL_SEARCH_LIMIT := 40
 
 ## Actors that went through a door while the player was elsewhere: reference id -> {cell_form_id, reference} (the placed
