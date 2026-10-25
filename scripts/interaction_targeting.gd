@@ -7,9 +7,10 @@ extends RefCounted
 ## lock_level (-1 when unavailable), enemy_health_ratio (negative when unavailable), plus the source record
 ## (`reference`/`item`) for the executor.
 
-## Prototype ranges, not verified Oblivion measurements.
+## Items, containers and doors keep prototype ranges. An actor is activated (talked to) within the original pick length:
+## `iActivatePickLength` is 150 game units in Oblivion.exe (the default registered at 0x009EDFA0), 1.5 m.
 var item_range_m := 1.8
-var actor_range_m := 2.5
+var actor_range_m := 1.5
 var door_range_m := 2.5
 var container_range_m := 1.8
 var reach_origin_height_m := 0.9
