@@ -1,7 +1,8 @@
 extends RefCounted
 ## The first-person view model: the player's arms (with the readied weapon) as the original game shows them while the
-## weapon is drawn. It is a second copy of the 71-bone male rig, skinned with the arm and hand meshes only and posed by the
-## original `Characters/_1stperson` KF clips, parented to the camera so it stays where it is on screen while the view moves.
+## weapon is drawn. It is the original `Characters/_1stperson/skeleton.nif` rig, skinned with the arm and hand meshes only
+## and posed by the `Characters/_1stperson` KF clips, parented to the camera so it stays where it is on screen while the
+## view moves.
 
 const ActorFactory := preload("res://scripts/actor_factory.gd")
 const AnimationSampling := preload("res://scripts/animation_sampling.gd")
@@ -28,8 +29,9 @@ const STANCES := {
 }
 const UNARMED_STANCE := {"prefix": "handtohand", "hold_bone": "Weapon"}
 const CAMERA_BONE := "Camera01"
-## Camera01's own axes are not the camera's: the clips hold it a quarter turn about X from the body frame, which looks along -Z.
-const CAMERA_BONE_TO_CAMERA := Basis(Vector3.RIGHT, PI * 0.5)
+## The walk and run clips carry the distance travelled in this root bone's translation; the camera does not follow it, so it
+## would slide the arms ahead of the view and snap them back each cycle. The game moves the player, not the rig.
+const ROOT_MOTION_BONE := "Bip01"
 ## The view model is drawn at this fraction of its real size, moved toward the camera by the same fraction, so it looks the
 ## same and stays out of walls the camera is close to.
 const VIEW_MODEL_SCALE := 0.4
@@ -471,8 +473,8 @@ func _capture_pose() -> Array[Dictionary]:
 		}
 	return pose
 
-## Applies every track of the clip, the root's translation included: unlike the third-person clips these carry the whole
-## body's placement, and the camera bone is read back from the posed rig to place the view model.
+## Applies every track of the clip: unlike the third-person clips these carry the whole body's placement (the travelled
+## distance aside, see ROOT_MOTION_BONE), and the camera bone is read back from the posed rig to place the view model.
 func _pose(clip: Dictionary, sample_time: float, blend_weight: float) -> void:
 	skeleton.reset_bone_poses()
 	for track_value: Variant in clip.tracks:
@@ -545,6 +547,8 @@ func _load_clip(clip_name: String) -> void:
 			continue
 		var track := source.duplicate()
 		track["bone_index"] = bone_index
+		if bone_name == ROOT_MOTION_BONE:
+			track.erase("translations")
 		tracks.push_back(track)
 	var start_time := float(sequence.get("start_time", 0.0))
 	var stop_time := float(sequence.get("stop_time", start_time))
