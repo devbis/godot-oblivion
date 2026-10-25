@@ -851,6 +851,7 @@ public:
             nodes.push_back(item);
         }
         result["nodes"] = nodes;
+        result["collision_enabled"] = asset_data.collision_enabled;
         Array physics_bodies;
         for (const auto& body : asset_data.physics_bodies) {
             Dictionary item;

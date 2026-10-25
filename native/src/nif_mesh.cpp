@@ -51,6 +51,14 @@ bool root_has_editor_marker_flag(nifly::NifFile& file, nifly::NiAVObject& root) 
     return false;
 }
 
+bool root_has_havok_flag(nifly::NifFile& file, nifly::NiAVObject& root) {
+    for (const auto& extra_data_ref : root.extraDataRefs) {
+        const auto* flags = file.GetHeader().GetBlock<nifly::BSXFlags>(extra_data_ref);
+        if (flags && (flags->integerData & nifly::BSX_HAVOK) != 0) return true;
+    }
+    return false;
+}
+
 std::array<float, 3> to_godot(const nifly::Vector3& value) {
     return {value.x, value.z, -value.y};
 }
@@ -661,6 +669,10 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
         if (result.animations.empty()) throw std::runtime_error("NIF has no NiNode root");
         return result;
     }
+    // Gamebryo NIFs (including Oblivion's) use BSXFlags bit 1 to mark render geometry as collidable.
+    // Older NIFs predate this flag; keep their previous generated-collision behavior.
+    result.collision_enabled = file.GetHeader().GetVersion().File() < nifly::NiFileVersion::V10_0_1_0
+        || root_has_havok_flag(file, *root);
     visit_scene(file, root, root_has_editor_marker_flag(file, *root), result.meshes);
     if (!geometry_only) append_physics(file, result, parents, global_transforms);
     return result;

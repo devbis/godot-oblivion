@@ -2013,6 +2013,18 @@ void test_nif_mesh_decoder() {
 
     const auto asset = oblivion::decode_nif_asset(bytes);
     CHECK(asset.nodes.size() >= 1);
+    CHECK(!asset.collision_enabled);
+
+    auto collision_flags = std::make_unique<nifly::BSXFlags>();
+    collision_flags->name.get() = "BSX";
+    collision_flags->integerData = nifly::BSX_HAVOK;
+    const auto collision_flags_id = file.GetHeader().AddBlock(std::move(collision_flags));
+    file.GetRootNode()->extraDataRefs.AddBlockRef(collision_flags_id);
+    std::stringstream encoded_with_collision_flags(std::ios::in | std::ios::out | std::ios::binary);
+    CHECK(file.Save(encoded_with_collision_flags) == 0);
+    const auto collision_payload = encoded_with_collision_flags.str();
+    const Bytes collision_bytes(collision_payload.begin(), collision_payload.end());
+    CHECK(oblivion::decode_nif_asset(collision_bytes).collision_enabled);
 }
 
 } // namespace

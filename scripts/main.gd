@@ -1899,7 +1899,8 @@ func _load_cell_geometry(
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
 		var animate_reference := is_door or has_nif_animations
-		if _supports_imported_nif_physics(physics_metadata, meshes):
+		var collision_enabled := bool(physics_metadata.get("collision_enabled", false))
+		if collision_enabled and _supports_imported_nif_physics(physics_metadata, meshes):
 			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
 				int(reference.get("form_id", 0)), reference_transform, model_path, meshes, physics_metadata
 			)
@@ -1920,6 +1921,7 @@ func _load_cell_geometry(
 				continue
 		var should_collide := (
 			not is_pickup_item
+			and collision_enabled
 			and _should_collide_model(model_path)
 			and (not is_exterior or reference_transform.origin.distance_to(player.global_position) <= EXTERIOR_COLLISION_DISTANCE)
 		)

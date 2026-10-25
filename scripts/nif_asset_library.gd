@@ -83,6 +83,7 @@ func meshes_for_model(model_path: String) -> Array:
 	var metadata := {
 		"nodes": result.get("nodes", []),
 		"animations": result.get("animations", []),
+		"collision_enabled": bool(result.get("collision_enabled", false)),
 		"physics_bodies": physics_bodies,
 		"physics_constraints": result.get("physics_constraints", []),
 	}
@@ -151,6 +152,8 @@ func ensure_collision_shape(model_path: String) -> void:
 	var key := model_path.to_lower().replace("\\", "/")
 	var collision_key := key
 	if collision_cache.has(collision_key):
+		return
+	if not bool(nif_metadata_cache.get(key, {}).get("collision_enabled", false)):
 		return
 	var collision_faces := PackedVector3Array()
 	for mesh_entry: Dictionary in model_cache.get(key, []):

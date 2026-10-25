@@ -109,6 +109,7 @@ struct NifAssetData {
     std::vector<NifAnimationData> animations;
     std::vector<NifPhysicsBodyData> physics_bodies;
     std::vector<NifPhysicsConstraintData> physics_constraints;
+    bool collision_enabled = false;
 };
 
 // Parses NIF bytes with nifly without copying them. Throws if nifly rejects the data.
