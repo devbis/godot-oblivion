@@ -1909,6 +1909,24 @@ void test_set_stage_order_is_the_same_everywhere() {
     CHECK(action_commands(actor_world.tick(0.1)) == expected);
 }
 
+void test_lower_entered_stage_is_not_rerun() {
+    // OnHit sets stage 24, whose results set 23 again ("make sure"): after the first blow, later blows run nothing.
+    oblivion::QuestWorld world(review_commands());
+    const auto quest = review_quest(0xB10, "Ping", {{23, "Activate ranTwentyThree 1\n"}, {24, "setstage Ping 23\n"}});
+    const auto script = review_script("PingScript", "scn Ping\n");
+    world.add(quest, script);
+    world.start("Ping", 23);
+    oblivion::QuestTick first;
+    world.set_stage("Ping", 24, first, {}, 0);
+    CHECK(first.stage_changes.size() == 1);  // 24 entered; its request for the entered stage 23 below it did nothing
+    oblivion::QuestTick second;
+    world.set_stage("Ping", 24, second, {}, 0);
+    CHECK(second.stage_changes.empty() && second.actions.empty());
+    oblivion::QuestTick back;
+    world.set_stage("Ping", 23, back, {}, 0);
+    CHECK(back.stage_changes.empty() && back.actions.empty());
+}
+
 void test_stage_chain_work_budget() {
     // Every stage n sets stages 2n and 2n+1: eight levels of branching would enter 511 stages. One tick enters at
     // most kMaxStageEntriesPerTick of them, and says so.
@@ -1923,7 +1941,7 @@ void test_stage_chain_work_budget() {
     CHECK(run.stage_changes.size() == oblivion::kMaxStageEntriesPerTick);
     CHECK(has_error(run, "stages entered in one tick"));
     // The budget is per tick: the next one starts afresh.
-    CHECK(world.start("W", 300).stage_changes.size() == 1);
+    CHECK(world.start("W", 600).stage_changes.size() == 1);
 }
 
 void test_global_condition_in_world() {
@@ -2043,6 +2061,7 @@ int main() {
         test_global_comparison();
         test_set_stage_order_is_the_same_everywhere();
         test_stage_chain_work_budget();
+        test_lower_entered_stage_is_not_rerun();
         test_global_condition_in_world();
         test_modulo_of_the_smallest_integer();
         test_nif_mesh_decoder();

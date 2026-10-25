@@ -499,6 +499,9 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
         tick.parse_errors.push_back("stage " + std::to_string(stage) + " of " + quest_.editor_id + " sets itself again through its results");
         return;
     }
+    // Nor does going back to a stage that was entered and is below the current one: an OnHit that sets stage 24 whose
+    // results set 23 again ("make sure") would otherwise repeat both stages' results on every blow.
+    if (has_entered(stage) && stage < stage_) return;
     if (tick.stage_entries >= kMaxStageEntriesPerTick) {
         if (tick.stage_entries == kMaxStageEntriesPerTick) {
             ++tick.stage_entries;  // reported once; later entries are refused silently
