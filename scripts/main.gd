@@ -2124,7 +2124,9 @@ func _load_cell_geometry(
 		var has_nif_animations := not animation_sequences.is_empty()
 		var animate_reference := is_door or has_nif_animations
 		var collision_enabled := bool(physics_metadata.get("collision_enabled", false))
-		if collision_enabled and _supports_imported_nif_physics(physics_metadata, meshes):
+		# A door (a cell gate whose NIF carries Havok bodies) is not a loose physics object: it opens and closes by its
+		# animation when activated, and cannot be carried off, so it takes the animated-reference path below.
+		if collision_enabled and not is_door and _supports_imported_nif_physics(physics_metadata, meshes):
 			var physics_result: Dictionary = await _instantiate_imported_nif_physics(
 				int(reference.get("form_id", 0)), reference_transform, model_path, meshes, physics_metadata
 			)
