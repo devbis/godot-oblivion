@@ -457,7 +457,7 @@ func is_dialogue_playing(reference_id: int) -> bool:
 	var entry_value: Variant = _dialogue_players.get(reference_id)
 	if not entry_value is Dictionary:
 		return false
-	var player := (entry_value as Dictionary).get("player") as AudioStreamPlayer3D
+	var player := _entry_player(entry_value as Dictionary)
 	return is_instance_valid(player) and player.playing
 
 
@@ -471,7 +471,7 @@ func get_dialogue_talk_weight(reference_id: int) -> float:
 	if not entry_value is Dictionary:
 		return 0.0
 	var entry: Dictionary = entry_value
-	var player := entry.get("player") as AudioStreamPlayer3D
+	var player := _entry_player(entry)
 	if not is_instance_valid(player) or not player.playing:
 		return 0.0
 	var bus_index := AudioServer.get_bus_index(str(entry.get("bus_name", "")))
@@ -491,7 +491,7 @@ func get_dialogue_visemes(reference_id: int) -> PackedFloat32Array:
 		return PackedFloat32Array()
 	var entry: Dictionary = entry_value
 	var lip_value: Variant = entry.get("lip_animation", {})
-	var player := entry.get("player") as AudioStreamPlayer3D
+	var player := _entry_player(entry)
 	if not lip_value is Dictionary or lip_value.is_empty() or not is_instance_valid(player) or not player.playing:
 		return PackedFloat32Array()
 	var audio_time := maxf(
@@ -522,12 +522,12 @@ func _on_dialogue_finished(reference_id: int, player_instance_id: int) -> void:
 	if not entry_value is Dictionary:
 		return
 	var entry: Dictionary = entry_value
-	var player := entry.get("player") as AudioStreamPlayer3D
+	var player := _entry_player(entry)
 	if not is_instance_valid(player) or player.get_instance_id() != player_instance_id:
 		return
 	_dialogue_players.erase(reference_id)
 	_remove_dialogue_bus(str(entry.get("bus_name", "")))
-	_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+	_clear_dialogue_expression(_entry_scene_root(entry), reference_id)
 
 
 func _stop_dialogue(reference_id: int) -> void:
@@ -536,12 +536,12 @@ func _stop_dialogue(reference_id: int) -> void:
 		return
 	var entry: Dictionary = entry_value
 	_dialogue_players.erase(reference_id)
-	var player := entry.get("player") as AudioStreamPlayer3D
-	if is_instance_valid(player):
+	var player := _entry_player(entry)
+	if player != null:
 		player.stop()
 		player.queue_free()
 	_remove_dialogue_bus(str(entry.get("bus_name", "")))
-	_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+	_clear_dialogue_expression(_entry_scene_root(entry), reference_id)
 
 
 func _stop_all_dialogue() -> void:
@@ -549,15 +549,27 @@ func _stop_all_dialogue() -> void:
 		_stop_dialogue(int(reference_value))
 
 
+## The entry's player and scene root, or null once the node is freed: casting a freed object is an error, and an actor
+## that left through a door takes its voice player with it.
+func _entry_player(entry: Dictionary) -> AudioStreamPlayer3D:
+	var player: Variant = entry.get("player")
+	return player as AudioStreamPlayer3D if is_instance_valid(player) else null
+
+
+func _entry_scene_root(entry: Dictionary) -> Node:
+	var scene_root: Variant = entry.get("scene_root")
+	return scene_root as Node if is_instance_valid(scene_root) else null
+
+
 func _prune_dialogue_players() -> void:
 	for reference_value: Variant in _dialogue_players.keys():
 		var reference_id := int(reference_value)
 		var entry: Dictionary = _dialogue_players[reference_id]
-		if is_instance_valid(entry.get("player") as AudioStreamPlayer3D):
+		if _entry_player(entry) != null:
 			continue
 		_dialogue_players.erase(reference_id)
 		_remove_dialogue_bus(str(entry.get("bus_name", "")))
-		_clear_dialogue_expression(entry.get("scene_root") as Node, reference_id)
+		_clear_dialogue_expression(_entry_scene_root(entry), reference_id)
 
 
 func _clear_dialogue_expression(scene_root: Node, reference_id: int) -> void:
