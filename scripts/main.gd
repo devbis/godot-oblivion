@@ -4438,7 +4438,6 @@ func _play_spell_cast(cast_range: int, effects: Array) -> void:
 		return
 	var effect_code := str((effects[0] as Dictionary).get("code", ""))
 	_pending_cast = {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code)}
-	_set_weapon_drawn(true)
 	_arms.cast(cast_range)
 
 func _release_pending_cast() -> void:

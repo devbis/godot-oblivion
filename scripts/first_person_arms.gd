@@ -90,6 +90,7 @@ var _one_shot_candidates: Array[String] = []
 var _one_shot_wait_s := 0.0
 var _queued: Dictionary = {}
 var _blocking := false
+var _hide_after_cast := false
 var _camera_rest := Vector3.ZERO
 var _bob_phase := 0.0
 var _bob_weight := 0.0
@@ -294,10 +295,11 @@ func _set_nocked_arrow_visible(arrow_visible: bool) -> void:
 ## Raises the weapon: the equip clip plays and the weapon appears at its "Attach" key. `force` raises it again
 ## when it is already up (a new weapon was taken).
 func draw(force := false) -> void:
-	if not built or (not force and (_mode == Mode.READY or _mode == Mode.EQUIPPING)):
+	if not built or (not force and not _hide_after_cast and (_mode == Mode.READY or _mode == Mode.EQUIPPING)):
 		return
 	_queued.clear()
 	_blocking = false
+	_hide_after_cast = false
 	_mode = Mode.EQUIPPING
 	_posed = false
 	_weapon_wanted = false
@@ -340,8 +342,17 @@ func cast(range_type: int) -> void:
 	var suffix: String = ["self", "touch", "target"][clampi(range_type, 0, 2)]
 	var prefix := str(_stance.prefix)
 	var candidates: Array[String] = ["cast" + suffix]
-	if prefix == "onehand":
+	if prefix == "onehand" and _weapon_wanted:
 		candidates.push_front("onehandcast" + suffix)
+	if _mode == Mode.HIDDEN:
+		# No weapon in hand: the bare arm casts and the arms go away again when the clip ends.
+		_mode = Mode.READY
+		_hide_after_cast = true
+		_posed = false
+		_weapon_wanted = false
+		_apply_weapon_visibility()
+		_begin_one_shot(candidates, "cast")
+		return
 	if _mode != Mode.READY or is_busy():
 		_queued = {"candidates": candidates, "kind": "cast"}
 		return
@@ -441,6 +452,12 @@ func _finish_one_shot() -> void:
 	_one_shot_kind = ""
 	_one_shot_candidates = []
 	_set_nocked_arrow_visible(false)
+	if _hide_after_cast and kind == "cast":
+		_hide_after_cast = false
+		_mode = Mode.HIDDEN
+		_queued = {}
+		_refresh_visibility()
+		return
 	match kind:
 		"equip":
 			_mode = Mode.READY
