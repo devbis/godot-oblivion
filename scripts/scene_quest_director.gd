@@ -60,6 +60,9 @@ const NAVIGATION_TILE_SIZE_M := 25.6
 const NAVIGATION_TILE_OVERLAP_M := 2.0
 const MAX_PATHGRID_ENDPOINT_SNAP_DISTANCE_M := 2.5
 const MAX_TELEPORT_EXIT_SNAP_DISTANCE_M := 2.5
+const LEDGE_DROP_MAX_HORIZONTAL_M := 6.0
+const LEDGE_DROP_MIN_HEIGHT_M := 0.8
+const LEDGE_DROP_MAX_HEIGHT_M := 4.0
 const PREFERRED_PATHGRID_ENDPOINT_SNAP_DISTANCE_M := 0.75
 const PATHGRID_NAVIGATION_LAYER := 2
 const NPC_NAVIGATION_LAYERS := 1 | PATHGRID_NAVIGATION_LAYER
@@ -303,8 +306,9 @@ func navigation_path(
 		var departure := NavigationServer3D.map_get_path(
 			navigation_map, far_point, to, true, NPC_NAVIGATION_LAYERS
 		)
-		if departure.is_empty() or not _path_reaches_target(
-			departure, to, goal_on_mesh, actor_radius, destination_arrival_distance
+		if departure.is_empty() or not (
+			_path_reaches_target(departure, to, goal_on_mesh, actor_radius, destination_arrival_distance)
+			or _path_ends_on_ledge_above(departure, to)
 		):
 			continue
 		var candidate := PackedVector3Array()
@@ -334,7 +338,36 @@ func navigation_path(
 	if not teleport_path.is_empty():
 		last_navigation_path_uses_pathgrid = _path_uses_pathgrid_link(teleport_path)
 		return teleport_path
+	var ledge_path := _route_to_ledge_above(from, to, actor_radius, destination_arrival_distance)
+	if not ledge_path.is_empty():
+		return ledge_path
 	return best_path if not best_path.is_empty() else path
+
+var _resolving_ledge := false
+
+## The destination cannot be reached: a marker in a hall below the ledge an actor's room opens onto. The route goes to the
+## pathgrid node nearest the destination that lies above it and can be walked to; the caller finishes with a drop.
+func _route_to_ledge_above(from: Vector3, to: Vector3, actor_radius: float, arrival: float) -> PackedVector3Array:
+	if _resolving_ledge:
+		return PackedVector3Array()
+	var candidates: Array[Dictionary] = []
+	for index in range(pathgrid_points.size()):
+		var node := pathgrid_points[index]
+		if _path_ends_on_ledge_above(PackedVector3Array([node]), to):
+			candidates.push_back({"position": node, "distance": node.distance_to(to)})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.distance) < float(b.distance))
+	_resolving_ledge = true
+	var result := PackedVector3Array()
+	for candidate: Dictionary in candidates:
+		var node_position: Vector3 = candidate.position
+		var route := navigation_path(from, node_position, actor_radius, true, arrival)
+		if not route.is_empty():
+			var end := route[route.size() - 1]
+			if Vector2(end.x - node_position.x, end.z - node_position.z).length() <= 0.5:
+				result = route
+				break
+	_resolving_ledge = false
+	return result
 
 ## Finds a navmesh route that crosses one or more linked doors in this cell. An XTEL
 ## link changes position discontinuously, so its entry and exit must not be joined
@@ -560,6 +593,15 @@ func _pathgrid_route(
 		pathgrid_cell_form_id, node_route.size(), start_snap_distance, goal_snap_distance
 	])
 	return result
+
+## The path ends on a ledge just above the target (a marker in a hall below the ledge a room opens onto): the caller
+## finishes the last stretch with a drop.
+func _path_ends_on_ledge_above(path: PackedVector3Array, target: Vector3) -> bool:
+	if path.is_empty():
+		return false
+	var end := path[path.size() - 1]
+	return Vector2(end.x - target.x, end.z - target.z).length() <= LEDGE_DROP_MAX_HORIZONTAL_M \
+		and end.y - target.y >= LEDGE_DROP_MIN_HEIGHT_M and end.y - target.y <= LEDGE_DROP_MAX_HEIGHT_M
 
 func _nearest_pathgrid_point(position: Vector3) -> int:
 	var nearest_index := -1

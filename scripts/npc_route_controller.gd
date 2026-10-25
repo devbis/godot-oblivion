@@ -4,6 +4,10 @@ extends CharacterBody3D
 ## route plane in cells where no walkable floor collider can be found.
 
 const HIT_IMPULSE_CAP_MPS := 0.4
+const HOP_RUN_SPEED_MPS := 3.4
+const HOP_ARRIVAL_M := 0.6
+const HOP_VOID_DEPTH_M := 3.0
+const HOP_TIMEOUT_S := 5.0
 
 @export var walk_speed_mps := 1.3
 @export var gravity_mps2 := 9.8
@@ -28,6 +32,8 @@ var waypoints: Array[Vector3] = []
 var waypoint_speeds: Array[float] = []
 var waypoint_is_teleport: Array[bool] = []
 var waypoint_teleport_destinations: Array[Vector3] = []
+## A hop waypoint jumps down from a ledge to its destination (kept in waypoint_teleport_destinations).
+var waypoint_is_hop: Array[bool] = []
 var waypoint_index := 0
 var final_arrival_distance := 0.08
 var loops_route := false
@@ -54,6 +60,10 @@ var _yield_request_cooldown_remaining := 0.0
 var _stepper := CharacterStepper.new()
 var _footstep_distance_m := 0.0
 var _hit_velocity := Vector3.ZERO
+var _hop_active := false
+var _hop_to := Vector3.ZERO
+var _hop_elapsed := 0.0
+var _pending_route: Array = []
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
@@ -62,6 +72,8 @@ func _ready() -> void:
 ## Moves the actor without walking: the route it was following and the remembered ground belong to the old place, so
 ## both go, and the package route is planned again from here.
 func teleport_to(destination: Vector3) -> void:
+	_hop_active = false
+	_pending_route.clear()
 	global_position = destination
 	velocity = Vector3.ZERO
 	is_walking = false
@@ -71,6 +83,7 @@ func teleport_to(destination: Vector3) -> void:
 	waypoint_speeds.clear()
 	waypoint_is_teleport.clear()
 	waypoint_teleport_destinations.clear()
+	waypoint_is_hop.clear()
 	waypoint_index = 0
 	_route_blocked_elapsed = 0.0
 	_route_blocked_reported = false
@@ -82,19 +95,27 @@ func configure_route(
 	route: Array[Dictionary], should_loop: bool, initial_pause: float,
 	final_arrival_distance_m: float = -1.0, use_authored_route_height: bool = false
 ) -> void:
+	# A hop in the air finishes first; the new route starts where it lands.
+	if _hop_active:
+		_pending_route = [route, should_loop, initial_pause, final_arrival_distance_m, use_authored_route_height]
+		return
 	_yield_path.clear()
 	_yield_waypoint_index = 0
 	waypoints.clear()
 	waypoint_speeds.clear()
 	waypoint_is_teleport.clear()
 	waypoint_teleport_destinations.clear()
+	waypoint_is_hop.clear()
 	for waypoint: Dictionary in route:
 		waypoints.push_back(waypoint.get("position", global_position))
 		waypoint_speeds.push_back(float(waypoint.get("speed_mps", walk_speed_mps)))
 		var teleport_destination: Variant = waypoint.get("teleport_to")
+		var hop_destination: Variant = waypoint.get("hop_to")
 		var is_teleport := teleport_destination is Vector3
+		var is_hop := hop_destination is Vector3
 		waypoint_is_teleport.push_back(is_teleport)
-		waypoint_teleport_destinations.push_back(teleport_destination if is_teleport else Vector3.ZERO)
+		waypoint_is_hop.push_back(is_hop)
+		waypoint_teleport_destinations.push_back(teleport_destination if is_teleport else (hop_destination if is_hop else Vector3.ZERO))
 	loops_route = should_loop
 	follow_authored_route_height = use_authored_route_height
 	final_arrival_distance = maxf(arrival_distance, final_arrival_distance_m) if final_arrival_distance_m >= 0.0 else arrival_distance
@@ -105,7 +126,8 @@ func configure_route(
 	is_walking = false
 	_route_blocked_elapsed = 0.0
 	_route_blocked_reported = false
-	if grounding_enabled:
+	# A repath in mid-air must not take the airborne spot as the place to fall back to.
+	if grounding_enabled and (is_on_floor() or not _has_last_grounded_position):
 		_last_grounded_position = global_position
 		_has_last_grounded_position = true
 	set_physics_process(not inactive and (grounding_enabled or not waypoints.is_empty()))
@@ -235,6 +257,49 @@ func get_collision_radius() -> float:
 func is_yielding() -> bool:
 	return not _yield_path.is_empty() or _yield_cooldown_remaining > 0.0
 
+func is_hop_waypoint(index: int) -> bool:
+	return index >= 0 and index < waypoint_is_hop.size() and waypoint_is_hop[index]
+
+func _begin_hop(destination: Vector3) -> void:
+	_hop_active = true
+	_hop_to = destination
+	_hop_elapsed = 0.0
+
+## The drop leg is walked with real physics (gravity, collision): the actor walks off the edge toward the landing and falls
+## onto whatever is below. The guards of a normal route (floor ahead, fall limit, authored height) are off during it. It
+## ends on the floor near the landing, or is put at the landing when the fall leaves the geometry or takes too long.
+func _update_hop(delta: float) -> void:
+	_hop_elapsed += delta
+	var to_landing := Vector3(_hop_to.x - global_position.x, 0.0, _hop_to.z - global_position.z)
+	var flat_distance := to_landing.length()
+	var below_landing := global_position.y < _hop_to.y - HOP_VOID_DEPTH_M
+	if (flat_distance <= HOP_ARRIVAL_M and is_on_floor()) or below_landing or _hop_elapsed > HOP_TIMEOUT_S:
+		if below_landing or _hop_elapsed > HOP_TIMEOUT_S:
+			global_position = _hop_to
+		_end_hop()
+		return
+	var direction := to_landing / flat_distance if flat_distance > 0.05 else Vector3.ZERO
+	if flat_distance > 0.05:
+		_face_route_direction(direction, delta)
+	velocity.x = direction.x * HOP_RUN_SPEED_MPS
+	velocity.z = direction.z * HOP_RUN_SPEED_MPS
+	velocity.y = 0.0 if is_on_floor() else velocity.y - gravity_mps2 * delta
+	is_walking = true
+	move_and_slide()
+
+func _end_hop() -> void:
+	_hop_active = false
+	velocity = Vector3.ZERO
+	if grounding_enabled:
+		_last_grounded_position = global_position
+		_has_last_grounded_position = true
+	if is_hop_waypoint(waypoint_index):
+		_advance_waypoint()
+	if not _pending_route.is_empty():
+		var pending := _pending_route.duplicate()
+		_pending_route.clear()
+		configure_route(pending[0], pending[1], pending[2], pending[3], pending[4])
+
 func is_teleport_waypoint(index: int) -> bool:
 	return index >= 0 and index < waypoint_is_teleport.size() and waypoint_is_teleport[index]
 
@@ -256,6 +321,9 @@ func set_knocked_down(value: bool) -> void:
 		waypoint_speeds.clear()
 		waypoint_is_teleport.clear()
 		waypoint_teleport_destinations.clear()
+		waypoint_is_hop.clear()
+		_hop_active = false
+		_pending_route.clear()
 		waypoint_index = 0
 		velocity.x = 0.0
 		velocity.z = 0.0
@@ -271,6 +339,9 @@ func _physics_process(delta: float) -> void:
 	if dialogue_paused:
 		velocity = Vector3.ZERO
 		is_walking = false
+		return
+	if _hop_active and not knocked_down:
+		_update_hop(delta)
 		return
 	if knocked_down:
 		velocity.x = move_toward(velocity.x + _hit_velocity.x, 0.0, 9.0 * delta)
@@ -309,6 +380,9 @@ func _physics_process(delta: float) -> void:
 		if not loops_route and waypoint_index == waypoints.size() - 1:
 			waypoint_arrival_distance = final_arrival_distance
 		if offset.length() <= waypoint_arrival_distance:
+			if is_hop_waypoint(waypoint_index):
+				_begin_hop(waypoint_teleport_destinations[waypoint_index])
+				return
 			if is_teleport_waypoint(waypoint_index):
 				global_position = waypoint_teleport_destinations[waypoint_index]
 				velocity = Vector3.ZERO

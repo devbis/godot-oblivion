@@ -45,6 +45,8 @@ const ATTRIBUTE_ENDURANCE := 5
 ## knockdown loop instead of a death.
 const ACTOR_HIT_FATIGUE_MULT := 1.0
 const ALLY_HELP_RADIUS_M := 25.0
+const CHASE_HOP_MAX_M := 8.0
+const CHASE_HOP_LANDING_OFFSET_M := 1.2
 const AGGRESSION_DEFENDS := 5
 const ARCHER_RANGE_M := 14.0
 const ARCHER_MIN_RANGE_M := 4.0
@@ -548,6 +550,13 @@ func _chase(actor: Dictionary, root: Node3D, player: Node3D, archer: bool) -> vo
 		waypoints.push_back({"position": player.global_position, "speed_mps": RUN_SPEED_MPS})
 	else:
 		waypoints = host.call("_navigation_waypoints", path, RUN_SPEED_MPS)
+		# The navigation ends at the edge of what it can reach (a ledge above the target): the actor hops down to the floor
+		# beside the target. A target that is far or not lower is waited for at the edge.
+		var end := path[path.size() - 1]
+		var gap := Vector2(end.x - player.global_position.x, end.z - player.global_position.z).length()
+		if gap > arrival + 0.5:
+			var away := Vector3(end.x - player.global_position.x, 0.0, end.z - player.global_position.z).normalized()
+			host.call("hop_down_waypoint", waypoints, player.global_position + away * CHASE_HOP_LANDING_OFFSET_M, CHASE_HOP_MAX_M)
 	root.call("configure_route", waypoints, false, 0.0, arrival, false)
 
 func _face(root: Node3D, flat: Vector2, delta: float) -> void:

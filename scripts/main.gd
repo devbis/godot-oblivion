@@ -1239,6 +1239,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 				final_arrival_distance += minf(navmesh_snap_distance, _actor_collision_radius(root as Node3D))
 			actor["package_arrival_distance"] = final_arrival_distance
 			waypoints = _navigation_waypoints(route_path, speed)
+			_append_ledge_drop(waypoints, destination)
 	# A route that starts ends a whole-body idle: the actor walks. An upper-body idle (pointing, arms crossed) plays on over the walk.
 	if not waypoints.is_empty() and bool(actor.get("idle_active", false)) and not bool(actor.get("idle_upper_body", false)):
 		_end_npc_idle(actor)
@@ -1255,6 +1256,33 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	if not root.has_meta("route_finished_connected"):
 		root.set_meta("route_finished_connected", true)
 		root.route_finished.connect(_on_actor_route_finished.bind(int(actor.get("reference_id", 0))))
+
+## The navigation ends on a ledge above a marker that lies below it (an ambush room opening onto a hall): the actor
+## drops down the last stretch to the marker instead of stopping at the edge.
+func _append_ledge_drop(waypoints: Array[Dictionary], destination: Vector3) -> void:
+	hop_down_waypoint(waypoints, destination, LEDGE_DROP_MAX_HORIZONTAL_M)
+
+## The route's last waypoint is the edge of a ledge above `landing`: the actor walks off it and falls to the floor there.
+## The leg is a hop waypoint so that the route controller lets it fall (a normal route stops at an edge and puts the
+## actor back after a drop of more than half a metre). False when the landing is not lower or is too far.
+func hop_down_waypoint(waypoints: Array[Dictionary], landing: Vector3, max_horizontal_m: float) -> bool:
+	if waypoints.is_empty():
+		return false
+	var edge: Vector3 = waypoints[waypoints.size() - 1].position
+	if Vector2(edge.x - landing.x, edge.z - landing.z).length() > max_horizontal_m:
+		return false
+	var query := PhysicsRayQueryParameters3D.create(landing + Vector3.UP * 1.5, landing + Vector3.DOWN * 4.0, 3)
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return false
+	var floor_position: Vector3 = hit.position
+	if edge.y - floor_position.y < HOP_MIN_DROP_M:
+		return false
+	waypoints[waypoints.size() - 1]["hop_to"] = floor_position + Vector3.UP * 0.05
+	return true
+
+const LEDGE_DROP_MAX_HORIZONTAL_M := 6.0
+const HOP_MIN_DROP_M := 0.5
 
 ## The NPC reached its package destination: perform any target activation, then run OnPackageDone.
 func _on_actor_route_finished(actor_reference_id: int) -> void:
@@ -1287,7 +1315,17 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 					root.global_position, destination, _actor_collision_radius(root), true, arrival_radius
 				)
 				var retry_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
+				# The route controller stops within the arrival radius of its last waypoint. When that waypoint (the closest
+				# the navigation reaches) is itself inside the radius around the marker, the actor has arrived, even where
+				# the marker is on a ledge below the walkable edge.
+				var reached_navigation_end := false
 				if not retry_path.is_empty():
+					var end_point: Vector3 = retry_path[retry_path.size() - 1]
+					reached_navigation_end = Vector2(end_point.x - destination.x, end_point.z - destination.z).length() <= arrival_radius \
+						and Vector2(root.global_position.x - end_point.x, root.global_position.z - end_point.z).length() <= arrival_radius
+				if reached_navigation_end:
+					pass
+				elif not retry_path.is_empty():
 					var retry_end: Vector3 = retry_path[retry_path.size() - 1]
 					var retry_distance := Vector2(root.global_position.x - retry_end.x, root.global_position.z - retry_end.z).length()
 					if retry_distance > actor_arrival_distance:
@@ -1306,7 +1344,8 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 						push_warning("OpenOB package %s for %s stopped %.2fm from its destination; no reachable route remains" % [
 							str(package.get("editor_id", "")), str(actor.get("name", "")), horizontal_distance
 						])
-				return
+				if not reached_navigation_end:
+					return
 		if _is_dynamic_follow_package(package):
 			_hold_dynamic_follow_route(
 				actor, root, destination_form_id, _package_destination_arrival_distance(package, root)
