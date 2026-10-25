@@ -35,6 +35,23 @@ const ROOT_MOTION_BONE := "Bip01"
 ## The view model is drawn at this fraction of its real size, moved toward the camera by the same fraction, so it looks the
 ## same and stays out of walls the camera is close to.
 const VIEW_MODEL_SCALE := 0.4
+## Oblivion.esm's fFirstPersonCameraMult: how much of the camera node's animation the view follows. The arms are not
+## compensated for the rest, so the camera's bob in the walk clips shows up as the arms moving against the view.
+const CAMERA_FOLLOW_MULT := 0.5
+## The view model is also moved this far (camera space, metres): toward the viewer, so the shoulders sit below the screen
+## edge and the arms do not look cut off from the body.
+const VIEW_MODEL_OFFSET := Vector3(0.0, 0.0, 0.02)
+## The clips hold the arms almost still while walking (the original adds the sway in code): a step bob, in metres at the
+## view model's scale, one side-to-side and one up-down swing per step. Running swings more, sneaking less.
+const BOB_SWAY_M := Vector2(0.006, 0.008)
+const BOB_RUN_MULT := 1.6
+const BOB_SNEAK_MULT := 0.5
+const BOB_BLEND_PER_S := 5.0
+## The arms trail the view when the mouse turns it and settle back (the original's fFirstPersonHandFollowMult): the share of
+## each turn they keep, how fast they settle, and the most they trail.
+const HAND_FOLLOW_MULT := 0.35
+const HAND_FOLLOW_SETTLE_PER_S := 7.0
+const HAND_FOLLOW_MAX_RAD := 0.14
 const BLEND_S := 0.15
 const WALK_SPEED_EPSILON := 0.08
 const ARM_BODY_SLOTS := 0x0004 | 0x0010
@@ -73,6 +90,12 @@ var _one_shot_candidates: Array[String] = []
 var _one_shot_wait_s := 0.0
 var _queued: Dictionary = {}
 var _blocking := false
+var _camera_rest := Vector3.ZERO
+var _bob_phase := 0.0
+var _bob_weight := 0.0
+var _bob_offset := Vector3.ZERO
+var _hand_lag := Quaternion.IDENTITY
+var _last_camera_basis := Basis.IDENTITY
 
 func _init(host_node: Node3D, view_camera: Camera3D, meters_per_unit: float) -> void:
 	host = host_node
@@ -350,6 +373,7 @@ func update(delta: float, motion: Dictionary) -> void:
 	var looping := _one_shot.is_empty() and bool(clip.loops)
 	var sample_time := start_time + fposmod(_time - start_time, stop_time - start_time) if looping else clampf(_time, start_time, stop_time)
 	_pose(clip, sample_time, _blend_elapsed / BLEND_S)
+	_update_sway(delta, motion, clip)
 	_place_under_camera()
 	_posed = true
 	_refresh_visibility()
@@ -498,23 +522,55 @@ func _pose(clip: Dictionary, sample_time: float, blend_weight: float) -> void:
 		skeleton.set_bone_pose_rotation(bone_index, Quaternion(source.rotation).slerp(skeleton.get_bone_pose_rotation(bone_index), weight))
 		skeleton.set_bone_pose_scale(bone_index, Vector3(source.scale).lerp(skeleton.get_bone_pose_scale(bone_index), weight))
 
-## The posed rig is rotated and moved so its camera bone sits on the camera, looking where the camera looks: the arms are
-## authored in that frame.
+## Walking sways the arms: a bob that follows the step cycle of the walk or run clip and fades in and out with movement,
+## and a trail behind the view's turns.
+func _update_sway(delta: float, motion: Dictionary, clip: Dictionary) -> void:
+	var local_velocity: Vector3 = motion.get("local_velocity", Vector3.ZERO)
+	var walking := (
+		_one_shot.is_empty()
+		and not _blocking
+		and not bool(motion.get("airborne", false))
+		and Vector2(local_velocity.x, local_velocity.z).length() > WALK_SPEED_EPSILON
+	)
+	_bob_weight = move_toward(_bob_weight, 1.0 if walking else 0.0, BOB_BLEND_PER_S * delta)
+	var cycle_s := maxf(float(clip.stop_time) - float(clip.start_time), 0.1) if walking else 1.0
+	_bob_phase = fposmod(_bob_phase + delta * TAU / cycle_s, TAU)
+	var strength := _bob_weight
+	if bool(motion.get("crouching", false)):
+		strength *= BOB_SNEAK_MULT
+	elif bool(motion.get("running", false)):
+		strength *= BOB_RUN_MULT
+	_bob_offset = Vector3(sin(_bob_phase) * BOB_SWAY_M.x, cos(_bob_phase * 2.0) * BOB_SWAY_M.y, 0.0) * strength
+	var camera_basis := camera.global_basis.orthonormalized()
+	var turn := Quaternion(_last_camera_basis.inverse() * camera_basis)
+	_last_camera_basis = camera_basis
+	var turn_angle := turn.get_angle()
+	if turn_angle > 0.0 and turn_angle < 1.0:
+		var followed := Quaternion(turn.get_axis(), -turn_angle * HAND_FOLLOW_MULT)
+		_hand_lag = (followed * _hand_lag).normalized()
+		if _hand_lag.get_angle() > HAND_FOLLOW_MAX_RAD:
+			_hand_lag = Quaternion.IDENTITY.slerp(_hand_lag, HAND_FOLLOW_MAX_RAD / _hand_lag.get_angle())
+	_hand_lag = _hand_lag.slerp(Quaternion.IDENTITY, 1.0 - exp(-HAND_FOLLOW_SETTLE_PER_S * delta))
+
+## The posed rig is moved so its camera bone sits on the camera, the view following the bone by CAMERA_FOLLOW_MULT; the
+## rig's own turn is ignored, as the view keeps looking where the mouse points.
 func _place_under_camera() -> void:
 	if _camera_bone < 0:
 		return
 	var camera_pose := skeleton.get_bone_global_pose(_camera_bone)
-	# Only the camera bone's position is used: casting and drawing a bow turn the body (and this bone with it) sideways in
-	# the clips, while the view keeps looking where the mouse points.
-	var to_camera := Basis.IDENTITY
+	# Casting and drawing a bow turn the body (and this bone with it) sideways in the clips, so only its position is used.
+	var eye := _camera_rest.lerp(camera_pose.origin, CAMERA_FOLLOW_MULT)
 	var scale_factor := _meters_per_unit * VIEW_MODEL_SCALE
-	root.transform = Transform3D(
-		to_camera * Basis.from_scale(Vector3.ONE * scale_factor),
-		-(to_camera * camera_pose.origin) * scale_factor
+	var placed := Transform3D(
+		Basis.from_scale(Vector3.ONE * scale_factor),
+		-eye * scale_factor + VIEW_MODEL_OFFSET + _bob_offset
 	)
+	root.transform = Transform3D(Basis(_hand_lag), Vector3.ZERO) * placed
 
 func _apply_rest_pose_placement() -> void:
 	skeleton.reset_bone_poses()
+	if _camera_bone >= 0:
+		_camera_rest = skeleton.get_bone_global_pose(_camera_bone).origin
 	_place_under_camera()
 
 func _request_clip(clip_name: String) -> void:
