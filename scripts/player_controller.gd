@@ -1,4 +1,6 @@
 extends CharacterBody3D
+
+const HIT_IMPULSE_CAP_MPS := 0.4
 ## Third-person blockout controller. Values stay configurable until the
 ## original executable analysis and in-game comparison establish them.
 
@@ -43,6 +45,7 @@ var _normal_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
 var _first_person_eye_anchor := Vector3(0.0, 1.5, 0.0)
 var face_preview_enabled := false
 var controls_suspended := false
+var knocked_down := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
 var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
@@ -56,6 +59,8 @@ var is_flying := false
 var _saved_collision_layer := 1
 var _saved_collision_mask := 23
 var _footstep_distance_m := 0.0
+var _knockdown_camera_drop := 0.0
+var _hit_velocity := Vector3.ZERO
 var is_crouching := false
 var _crouch_blend := 0.0
 var _standing_capsule_height := 1.6
@@ -94,7 +99,7 @@ func set_spawn_yaw(yaw: float) -> void:
 func set_first_person_eye_anchor(anchor: Vector3) -> void:
 	_first_person_eye_anchor = anchor
 	if is_first_person:
-		camera_pivot.position = _first_person_eye_anchor
+		camera_pivot.position = _first_person_eye_anchor - Vector3.UP * _knockdown_camera_drop
 		camera.position = Vector3.ZERO
 
 func capture_mouse() -> void:
@@ -109,6 +114,13 @@ func set_controls_suspended(suspended: bool) -> void:
 	controls_suspended = suspended
 	if suspended:
 		velocity = Vector3.ZERO
+
+func set_knocked_down(value: bool) -> void:
+	knocked_down = value
+
+func apply_hit_impulse(impulse: Vector3) -> void:
+	_hit_velocity = (_hit_velocity + Vector3(impulse.x, 0.0, impulse.z)).limit_length(HIT_IMPULSE_CAP_MPS)
+	velocity.y = maxf(velocity.y, impulse.y)
 
 func set_fly_mode(enabled: bool) -> void:
 	if is_flying == enabled:
@@ -214,7 +226,7 @@ func _notification(what: int) -> void:
 func _apply_camera_orbit() -> void:
 	if is_instance_valid(camera_pivot):
 		if not face_preview_enabled:
-			camera_pivot.position = _crouched_camera_pivot_position()
+			camera_pivot.position = _crouched_camera_pivot_position() - Vector3.UP * _knockdown_camera_drop
 		camera_pivot.rotation = Vector3(_camera_pitch, PI if face_preview_enabled else 0.0, 0.0)
 		if is_first_person:
 			camera.position = Vector3.ZERO
@@ -227,8 +239,24 @@ func _set_camera_distance(distance: float) -> void:
 		_update_camera_clearance(0.0)
 
 func _physics_process(delta: float) -> void:
+	_knockdown_camera_drop = move_toward(_knockdown_camera_drop, 0.9 if knocked_down else 0.0, 2.4 * delta)
 	if controls_suspended:
 		velocity = Vector3.ZERO
+		_hit_velocity = Vector3.ZERO
+		gameplay_frame.emit(delta, false, false)
+		return
+	if knocked_down:
+		_update_camera_clearance(delta)
+		_update_crouch(delta)
+		velocity.x = move_toward(velocity.x + _hit_velocity.x, 0.0, 9.0 * delta)
+		velocity.z = move_toward(velocity.z + _hit_velocity.z, 0.0, 9.0 * delta)
+		_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)
+		if not is_on_floor():
+			velocity.y -= gravity_mps2 * delta
+		else:
+			velocity.y = 0.0
+		_stepper.tick()
+		move_and_slide()
 		gameplay_frame.emit(delta, false, false)
 		return
 	if is_flying:
@@ -271,6 +299,9 @@ func _physics_process(delta: float) -> void:
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, speed * 8.0 * delta)
 		velocity.z = move_toward(velocity.z, 0.0, speed * 8.0 * delta)
+	velocity.x += _hit_velocity.x
+	velocity.z += _hit_velocity.z
+	_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)
 
 	var requested_velocity := velocity
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
@@ -306,7 +337,7 @@ func _update_crouch(delta: float) -> void:
 		_collision_shape.position.y = height * 0.5
 	_crouch_blend = move_toward(_crouch_blend, 1.0 if is_crouching else 0.0, crouch_blend_speed * delta)
 	if not face_preview_enabled:
-		camera_pivot.position = _crouched_camera_pivot_position()
+		camera_pivot.position = _crouched_camera_pivot_position() - Vector3.UP * _knockdown_camera_drop
 
 func _crouched_camera_pivot_position() -> Vector3:
 	var base := _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position

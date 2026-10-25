@@ -1,6 +1,6 @@
 extends Node3D
 ## A projectile in flight: an arrow loosed from a bow or a glowing spell bolt. It flies until its ray meets a body, then an
-## arrow sticks where it hit and a bolt bursts. There is no combat system yet, so a hit only pushes loose physics objects.
+## arrow sticks where it hit and a bolt bursts; the scene host handles actor reactions and fatigue on impact.
 
 signal impacted(hit_position: Vector3, collider: Object)
 

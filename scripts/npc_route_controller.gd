@@ -3,6 +3,8 @@ extends CharacterBody3D
 ## NPCs use generated floor geometry when it is available and retain the ESM
 ## route plane in cells where no walkable floor collider can be found.
 
+const HIT_IMPULSE_CAP_MPS := 0.4
+
 @export var walk_speed_mps := 1.3
 @export var gravity_mps2 := 9.8
 @export var arrival_distance := 0.08
@@ -39,6 +41,7 @@ var check_floor_ahead := true
 ## A killed or disabled actor: its route is never run again and physics stays off.
 var inactive := false
 var dialogue_paused := false
+var knocked_down := false
 var _pause_remaining := 0.0
 var _last_grounded_position := Vector3.ZERO
 var _has_last_grounded_position := false
@@ -50,6 +53,7 @@ var _route_blocked_reported := false
 var _yield_request_cooldown_remaining := 0.0
 var _stepper := CharacterStepper.new()
 var _footstep_distance_m := 0.0
+var _hit_velocity := Vector3.ZERO
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(max_walkable_slope_degrees)
@@ -240,6 +244,24 @@ func set_dialogue_paused(paused: bool) -> void:
 		velocity = Vector3.ZERO
 		is_walking = false
 
+func apply_hit_impulse(impulse: Vector3) -> void:
+	_hit_velocity = (_hit_velocity + Vector3(impulse.x, 0.0, impulse.z)).limit_length(HIT_IMPULSE_CAP_MPS)
+	_hit_velocity.y = 0.0
+
+func set_knocked_down(value: bool) -> void:
+	knocked_down = value
+	if value:
+		_yield_path.clear()
+		waypoints.clear()
+		waypoint_speeds.clear()
+		waypoint_is_teleport.clear()
+		waypoint_teleport_destinations.clear()
+		waypoint_index = 0
+		velocity.x = 0.0
+		velocity.z = 0.0
+		is_walking = false
+		set_physics_process(not inactive and grounding_enabled)
+
 func _physics_process(delta: float) -> void:
 	_yield_cooldown_remaining = maxf(0.0, _yield_cooldown_remaining - delta)
 	_yield_request_cooldown_remaining = maxf(0.0, _yield_request_cooldown_remaining - delta)
@@ -248,6 +270,18 @@ func _physics_process(delta: float) -> void:
 		return
 	if dialogue_paused:
 		velocity = Vector3.ZERO
+		is_walking = false
+		return
+	if knocked_down:
+		velocity.x = move_toward(velocity.x + _hit_velocity.x, 0.0, 9.0 * delta)
+		velocity.z = move_toward(velocity.z + _hit_velocity.z, 0.0, 9.0 * delta)
+		_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)
+		if grounding_enabled:
+			velocity.y = 0.0 if is_on_floor() or _stepper.is_stepping() else velocity.y - gravity_mps2 * delta
+		else:
+			velocity.y = 0.0
+		_stepper.tick()
+		move_and_slide()
 		is_walking = false
 		return
 	var desired_horizontal_velocity := Vector3.ZERO
@@ -307,8 +341,9 @@ func _physics_process(delta: float) -> void:
 			desired_horizontal_velocity = Vector3.ZERO
 	else:
 		velocity.y = 0.0
-	velocity.x = desired_horizontal_velocity.x
-	velocity.z = desired_horizontal_velocity.z
+	velocity.x = desired_horizontal_velocity.x + _hit_velocity.x
+	velocity.z = desired_horizontal_velocity.z + _hit_velocity.z
+	_hit_velocity = _hit_velocity.move_toward(Vector3.ZERO, 12.0 * delta)
 	var previous_position := global_position
 	var horizontal_motion := Vector3(velocity.x, 0.0, velocity.z) * delta
 	var stepped := (

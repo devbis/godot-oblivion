@@ -361,6 +361,25 @@ func cast(range_type: int) -> void:
 func set_blocking(blocking: bool) -> void:
 	_blocking = blocking and _mode == Mode.READY
 
+func react_to_hit(blocked := false) -> void:
+	if _mode != Mode.READY:
+		return
+	var prefix := str(_stance.prefix)
+	_queued.clear()
+	var candidates: Array[String] = [prefix + "stagger", prefix + "blockhit", "blockhit"]
+	if blocked:
+		candidates = [prefix + "blockhit", "blockhit", prefix + "stagger"]
+	_begin_one_shot(candidates, "hit")
+
+## An attack input can cut short the view-model flinch after the brief hit lockout.
+func interrupt_hit_reaction() -> void:
+	if _one_shot_kind != "hit":
+		return
+	_one_shot = ""
+	_one_shot_kind = ""
+	_one_shot_candidates.clear()
+	_one_shot_wait_s = 0.0
+
 func update(delta: float, motion: Dictionary) -> void:
 	if _mode == Mode.HIDDEN or skeleton == null or not built:
 		return

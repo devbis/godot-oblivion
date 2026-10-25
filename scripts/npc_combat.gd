@@ -4,7 +4,7 @@ extends RefCounted
 ## 5 (aggressive: only enemies) and 50 (very aggressive: anyone not a friend) to 100 (frenzied), and the player has no
 ## friends yet, so from 50 up an actor that sees the player attacks. It then draws its weapon, runs at the player along
 ## the navigation path and swings (or, with a bow, shoots from a distance) with the original combat clips; the hit lands
-## at the clip's "Hit" or "Release" key and costs the player health.
+## at the clip's "Hit" or "Release" key and costs the player health and fatigue.
 
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 
@@ -17,6 +17,8 @@ const START_CHECK_S := 0.3
 const REPATH_S := 0.5
 const RUN_SPEED_MPS := 3.4
 const RUNNING_ANIMATION_SPEED_MPS := 2.2
+const NPC_ATTACK_RECOVERY_MIN_S := 0.9
+const NPC_ATTACK_RECOVERY_MAX_S := 1.3
 const CLIP_FOLDER := "Characters/_male/"
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
@@ -25,6 +27,20 @@ const POWER_ATTACK_CHANCE := 0.2
 const POWER_ATTACK_DAMAGE_MULT := 1.5
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
+const HIT_ATTACK_LOCK_S := 0.45
+const FATIGUE_ATTACK_COST := 5.0
+const FATIGUE_HIT_COST_MULT := 1.5
+const NPC_HIT_KNOCKBACK_MPS := 0.3
+const PLAYER_HIT_KNOCKBACK_MPS := 0.4
+## Oblivion restores 10 fatigue/s; this exceeds what a ~2 s stagger clip restores between repeated hits.
+const FATIGUE_HIT_MIN := 25.0
+const FATIGUE_DOWN_RECOVERY_RATIO := 0.25
+const FATIGUE_ATTACK_WEAPON_BASE_SETTING := "fFatigueAttackWeaponBase"
+const FATIGUE_ATTACK_WEAPON_MULT_SETTING := "fFatigueAttackWeaponMult"
+const FATIGUE_RETURN_BASE_SETTING := "fFatigueReturnBase"
+const FATIGUE_RETURN_MULT_SETTING := "fFatigueReturnMult"
+const FATIGUE_RUN_BASE_SETTING := "fFatigueRunBase"
+const ATTRIBUTE_ENDURANCE := 5
 const ARCHER_RANGE_M := 14.0
 const ARCHER_MIN_RANGE_M := 4.0
 const ARROW_SPEED_MPS := 40.0
@@ -86,6 +102,16 @@ func update(delta: float) -> void:
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")) or not root.visible:
 			continue
+		_advance_actor_fatigue(actor, root, delta)
+		if str(actor.get("knockdown_state", "")) in ["falling", "downed", "getting_up"]:
+			continue
+		var hit_lock_remaining := maxf(0.0, float(actor.get("hit_attack_lock_remaining", 0.0)) - delta)
+		actor["hit_attack_lock_remaining"] = hit_lock_remaining
+		if hit_lock_remaining > 0.0:
+			continue
+		if str((actor.get("hit_reaction", {}) as Dictionary).get("kind", "")) == "stagger":
+			actor.erase("hit_reaction")
+			actor["active_animation"] = ""
 		if actor.has("combat"):
 			if _player_dead:
 				_end_combat(actor)
@@ -146,6 +172,155 @@ func _reach_m(actor: Dictionary) -> float:
 func _damage(actor: Dictionary) -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	return float(record.get("damage", UNARMED_DAMAGE)) if not record.is_empty() else UNARMED_DAMAGE
+
+func _attack_fatigue_cost(actor: Dictionary) -> float:
+	if _weapon_type(actor) < 0:
+		return FATIGUE_ATTACK_COST
+	var settings: Dictionary = host.get("_player_game_settings")
+	return float(settings.get(FATIGUE_ATTACK_WEAPON_BASE_SETTING, FATIGUE_ATTACK_COST)) \
+		+ _damage(actor) * float(settings.get(FATIGUE_ATTACK_WEAPON_MULT_SETTING, 0.0))
+
+func receive_player_hit(reference_id: int, source_position: Vector3, fatigue_damage: float) -> void:
+	var actor: Dictionary = {}
+	for candidate: Dictionary in host.get("_npc_actors"):
+		if int(candidate.get("reference_id", 0)) == reference_id:
+			actor = candidate
+			break
+	if actor.is_empty():
+		return
+	provoke(reference_id)
+	var root := actor.get("root") as Node3D
+	if is_instance_valid(root):
+		var away := root.global_position - source_position
+		away.y = 0.0
+		if away.length_squared() > 0.0001:
+			root.call("apply_hit_impulse", away.normalized() * NPC_HIT_KNOCKBACK_MPS)
+	var knockdown_state := str(actor.get("knockdown_state", ""))
+	if knockdown_state in ["falling", "downed"]:
+		return
+	if knockdown_state == "getting_up":
+		_begin_knockdown(actor)
+		return
+	_apply_actor_fatigue(actor, maxf(0.0, fatigue_damage))
+	if _actor_fatigue_current(actor) <= 0.0:
+		_begin_knockdown(actor)
+	else:
+		if is_instance_valid(root) and not actor.has("combat"):
+			_begin_combat(actor, root)
+		_begin_stagger(actor)
+
+func _advance_actor_fatigue(actor: Dictionary, root: Node3D, delta: float) -> void:
+	var fatigue: Dictionary = actor.get("fatigue", {})
+	if fatigue.is_empty():
+		return
+	var maximum := float(fatigue.get("max", 0.0))
+	if maximum <= 0.0:
+		return
+	var current := float(fatigue.get("current", maximum))
+	var attributes: PackedInt64Array = actor.get("attributes", PackedInt64Array())
+	var endurance := float(attributes[ATTRIBUTE_ENDURANCE]) if attributes.size() > ATTRIBUTE_ENDURANCE else 0.0
+	var settings: Dictionary = host.get("_player_game_settings")
+	var recovery := float(settings.get(FATIGUE_RETURN_BASE_SETTING, 1.0)) \
+		+ endurance * float(settings.get(FATIGUE_RETURN_MULT_SETTING, 0.0))
+	if bool(root.get("is_walking")) and Vector2(root.velocity.x, root.velocity.z).length() > RUNNING_ANIMATION_SPEED_MPS:
+		recovery -= float(settings.get(FATIGUE_RUN_BASE_SETTING, 0.0))
+	fatigue["current"] = clampf(current + recovery * delta, 0.0, maximum)
+	actor["fatigue"] = fatigue
+	var knockdown_state := str(actor.get("knockdown_state", ""))
+	if knockdown_state.is_empty() and float(fatigue["current"]) <= 0.0:
+		_begin_knockdown(actor)
+	elif knockdown_state == "downed" and float(fatigue["current"]) >= maximum * FATIGUE_DOWN_RECOVERY_RATIO:
+		_begin_get_up(actor)
+
+func _actor_fatigue_current(actor: Dictionary) -> float:
+	return float((actor.get("fatigue", {}) as Dictionary).get("current", 0.0))
+
+func _apply_actor_fatigue(actor: Dictionary, amount: float) -> void:
+	var fatigue: Dictionary = actor.get("fatigue", {})
+	if fatigue.is_empty():
+		return
+	fatigue["current"] = maxf(0.0, float(fatigue.get("current", 0.0)) - maxf(amount, 0.0))
+	actor["fatigue"] = fatigue
+
+func _stagger_animation(actor: Dictionary) -> String:
+	var prefix := _prefix(actor)
+	return "bowblockhit" if prefix == "bow" else prefix + "stagger"
+
+func _begin_stagger(actor: Dictionary) -> void:
+	var clip := _stagger_animation(actor)
+	actor["hit_reaction"] = {"kind": "stagger", "animation": clip}
+	actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
+	actor["active_animation"] = ""
+	_request_clip(actor, clip)
+	_interrupt_actor_attack(actor)
+	var root := actor.get("root") as Node3D
+	if is_instance_valid(root):
+		_stop_route(root)
+
+func _begin_knockdown(actor: Dictionary) -> void:
+	if str(actor.get("knockdown_state", "")) in ["falling", "downed"]:
+		return
+	var root := actor.get("root") as Node3D
+	actor["knockdown_state"] = "falling"
+	actor["hit_attack_lock_remaining"] = 0.0
+	actor["hit_reaction"] = {"kind": "stagger", "animation": _stagger_animation(actor)}
+	actor["active_animation"] = ""
+	_interrupt_actor_attack(actor)
+	if is_instance_valid(root):
+		_stop_route(root)
+		root.call("set_knocked_down", true)
+	_request_clip(actor, _stagger_animation(actor))
+	_request_special_clip(
+		actor, "Downed", "Characters/_male/idleanims/deathidle.kf", "SpecialIdle_DeathIdle", true
+	)
+	print("OpenOB combat: %s falls at zero fatigue" % str(actor.get("reference_name", "NPC")))
+
+func _begin_get_up(actor: Dictionary) -> void:
+	var prefix := _prefix(actor)
+	if prefix not in ["handtohand", "bow"]:
+		prefix = "onehand"
+	var asset_path := "Characters/_male/idleanims/%sgetupfacedown.kf" % prefix
+	actor["knockdown_state"] = "getting_up"
+	actor["hit_reaction"] = {"kind": "getup", "animation": "GetUp"}
+	actor["active_animation"] = ""
+	_request_special_clip(actor, "GetUp", asset_path, "SpecialIdle_GetUpFaceDown", false)
+
+func _interrupt_actor_attack(actor: Dictionary) -> void:
+	if actor.has("combat"):
+		var combat: Dictionary = actor.combat
+		combat["state"] = "chase"
+		combat["hit_done"] = true
+		combat["cooldown"] = 0.0
+		combat["clip"] = ""
+		actor["combat"] = combat
+		# The stagger clip overrides this animation temporarily. Keep the weapon-ready
+		# idle underneath so the NPC returns to its combat stance after the flinch.
+		actor["combat_anim"] = _prefix(actor) + "idle"
+	else:
+		actor["combat_anim"] = ""
+
+func _request_special_clip(actor: Dictionary, clip_name: String, asset_path: String, sequence_name: String, loops: bool) -> void:
+	var animations: Dictionary = actor.animations
+	var requested: Dictionary = actor.get("combat_clips_requested", {})
+	if animations.has(clip_name) or requested.has(clip_name):
+		return
+	requested[clip_name] = true
+	actor["combat_clips_requested"] = requested
+	var assets = host.get("assets")
+	await assets.meshes_for_model(asset_path)
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	if not is_instance_valid(skeleton):
+		return
+	var metadata: Dictionary = assets.nif_metadata_cache.get(asset_path.to_lower(), {})
+	for sequence_value: Variant in metadata.get("animations", []):
+		var sequence: Dictionary = sequence_value
+		if str(sequence.get("name", "")) != sequence_name:
+			continue
+		var animation := (host.call("_animation_sequence", asset_path, sequence_name, skeleton) as Dictionary).duplicate()
+		if not animation.is_empty():
+			animation["loops"] = loops
+			animations[clip_name] = animation
+		return
 
 func _begin_combat(actor: Dictionary, root: Node3D) -> void:
 	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true}
@@ -277,6 +452,10 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 	combat.time = float(animation.get("start_time", 0.0))
 	combat.hit_done = false
 	combat.power = clip_key.ends_with("power")
+	_apply_actor_fatigue(actor, _attack_fatigue_cost(actor))
+	if _actor_fatigue_current(actor) <= 0.0:
+		_begin_knockdown(actor)
+		return
 	actor["combat_anim"] = clip_key
 	actor["animation_time"] = combat.time
 	actor["active_animation"] = ""
@@ -297,7 +476,7 @@ func _update_swing(actor: Dictionary, root: Node3D, player: CharacterBody3D, com
 	if float(combat.time) >= float(animation.get("stop_time", 0.0)):
 		combat.state = "chase"
 		combat.repath = 0.0
-		combat.cooldown = randf_range(0.3, 0.9)
+		combat.cooldown = randf_range(NPC_ATTACK_RECOVERY_MIN_S, NPC_ATTACK_RECOVERY_MAX_S)
 		actor["combat_anim"] = _prefix(actor) + "idle"
 
 ## The time of the clip's "Hit" key (a bow's "Release"), or just past half the clip when it has none.
@@ -340,7 +519,8 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 			audio_manager.call(
 				"play_weapon_impact", player.global_position + Vector3.UP, _weapon_type(actor), true, player
 			)
-	(host.get("_player_actor_values") as RefCounted).call("apply_damage", damage)
+	var fatigue_damage := maxf(8.0 if blocked else FATIGUE_HIT_MIN, damage * FATIGUE_HIT_COST_MULT)
+	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked)
 	player_hit.emit(str(actor.get("reference_name", "NPC")), damage)
 
 func _loose_arrow(actor: Dictionary, root: Node3D, player: CharacterBody3D) -> void:

@@ -25,6 +25,7 @@ const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
 	"fFatigueJumpBase", "fFatigueJumpMult", "fMagickaReturnBase", "fMagickaReturnMult",
+	"fFatigueAttackWeaponBase", "fFatigueAttackWeaponMult", "fFatigueBase", "fFatigueMult",
 	"fMagicCostScale", "fMagicDurMagBaseCostMult", "fMagicAreaBaseCostMult",
 	"fMagicRangeTargetCostMult", "fMagicCasterSkillCostBase", "fMagicCasterSkillCostMult",
 ]
@@ -207,6 +208,10 @@ var _player_blocking := false
 var _player_combat_action := ""
 var _player_combat_action_kind := ""
 var _player_combat_action_sound_pending := false
+var _player_hit_reaction: Dictionary = {}
+var _player_hit_attack_lock_remaining := 0.0
+var _player_knockdown_state := ""
+var _player_reaction_clips_loading: Dictionary = {}
 var _player_combat_stances_loading: Dictionary = {}
 var _player_combat_stances_loaded: Dictionary = {}
 var _player_combat_available_clips: Dictionary = {}
@@ -4491,6 +4496,18 @@ func _handle_combat_input(event: InputEvent) -> bool:
 	return false
 
 func _player_attack() -> void:
+	if not _player_knockdown_state.is_empty():
+		return
+	if _player_hit_attack_lock_remaining > 0.0:
+		return
+	if not _player_hit_reaction.is_empty():
+		if str(_player_hit_reaction.get("kind", "")) != "stagger":
+			return
+		_player_hit_reaction.clear()
+		_player_hit_attack_lock_remaining = 0.0
+		_player_active_animation_reset()
+		if player.is_first_person and _arms != null:
+			_arms.interrupt_hit_reaction()
 	var side := "right"
 	if _player_weapon_type() != WEAPON_TYPE_BOW:
 		if _player_weapon_form_id <= 0:
@@ -4501,6 +4518,7 @@ func _player_attack() -> void:
 	if player.is_first_person:
 		if _arms.attack(side):
 			AudioManager.play_weapon_swing(player, _player_weapon_type())
+			_spend_player_attack_fatigue()
 		return
 	if not _player_combat_action.is_empty():
 		return
@@ -4512,6 +4530,18 @@ func _player_attack() -> void:
 	_player_combat_action_sound_pending = true
 	_player_blocking = false
 	_preload_player_combat_stance(_player_weapon_type())
+	_spend_player_attack_fatigue()
+
+func _spend_player_attack_fatigue() -> void:
+	if not _player_actor_values_ready:
+		return
+	var fatigue_cost := NpcCombat.FATIGUE_ATTACK_COST
+	if _player_weapon_type() >= 0:
+		fatigue_cost = float(_player_game_settings.get("fFatigueAttackWeaponBase", fatigue_cost)) \
+			+ float(_player_weapon_record.get("damage", 0.0)) \
+			* float(_player_game_settings.get("fFatigueAttackWeaponMult", 0.0))
+	_player_actor_values.modify_fatigue(-fatigue_cost)
+	_update_player_knockdown_state()
 
 func _player_attack_animation(side: String) -> String:
 	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
@@ -4526,7 +4556,8 @@ func _player_attack_animation(side: String) -> String:
 func _update_first_person_arms(delta: float) -> void:
 	if _arms == null or not _arms.built:
 		return
-	var hidden: bool = not player.is_first_person or not _combat_menus_closed()
+	var hidden: bool = not player.is_first_person or not _combat_menus_closed() \
+		or _player_knockdown_state in ["downed", "getting_up"]
 	_arms.set_suppressed(hidden)
 	if hidden or not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_arms.set_blocking(false)
@@ -4568,7 +4599,11 @@ func _player_aim(muzzle_offset: Vector3) -> Dictionary:
 func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	var excluded: Array[RID] = [player.get_rid()]
 	projectile.excluded_bodies = excluded
-	projectile.connect(&"impacted", func(_hit_position: Vector3, collider: Object) -> void: _provoke_actor(collider))
+	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN \
+		if int(projectile.get("kind")) == CombatProjectile.Kind.SPELL else _player_hit_fatigue_damage()
+	projectile.connect(&"impacted", func(_hit_position: Vector3, collider: Object) -> void:
+		_provoke_actor(collider, hit_fatigue_damage)
+	)
 	add_child(projectile)
 	projectile.global_position = aim.origin
 	projectile.look_at(aim.origin + (aim.direction as Vector3))
@@ -4601,7 +4636,7 @@ func _melee_hit() -> void:
 		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	_provoke_actor(hit.get("collider"))
+	_provoke_actor(hit.get("collider"), _player_hit_fatigue_damage())
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
 		var flesh_hit := collider is CharacterBody3D and collider != player
@@ -4613,12 +4648,130 @@ func _melee_hit() -> void:
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
 
-## An actor the player's weapon or spell hits fights back.
-func _provoke_actor(collider: Object) -> void:
-	var node := collider as Node
-	if node == null or not node.has_meta("reference_id") or _npc_combat == null:
+func _player_take_combat_hit(source: Node3D, damage: float, fatigue_damage: float, blocked := false) -> void:
+	if _player_actor_values_ready:
+		_player_actor_values.apply_damage(damage)
+		_player_actor_values.modify_fatigue(-fatigue_damage)
+		_sync_player_actor_values_to_quest_world()
+	if is_instance_valid(source):
+		var away := player.global_position - source.global_position
+		away.y = 0.0
+		if away.length_squared() > 0.0001:
+			var knockback := NpcCombat.PLAYER_HIT_KNOCKBACK_MPS if fatigue_damage >= 20.0 \
+				else NpcCombat.NPC_HIT_KNOCKBACK_MPS
+			player.call("apply_hit_impulse", away.normalized() * knockback)
+	_update_player_knockdown_state()
+	if _player_knockdown_state.is_empty():
+		var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+		_preload_player_combat_stance(_player_weapon_type())
+		var reaction_animation := prefix + ("blockhit" if blocked else "stagger")
+		if not _player_combat_available_clips.is_empty() and not _player_combat_available_clips.has(reaction_animation):
+			reaction_animation = prefix + "blockhit" if _player_combat_available_clips.has(prefix + "blockhit") else "blockhit"
+		_player_hit_reaction = {"kind": "stagger", "animation": reaction_animation}
+		_player_hit_attack_lock_remaining = NpcCombat.HIT_ATTACK_LOCK_S
+		if _weapon_drawn and _player_combat_action_kind == "equip":
+			_player_weapon_is_held = true
+			_refresh_player_weapon_mount()
+		_player_combat_action = ""
+		_player_combat_action_kind = ""
+		_player_combat_action_sound_pending = false
+		_player_active_animation_reset()
+		if player.is_first_person and _arms != null:
+			_arms.react_to_hit(blocked)
+
+func _player_active_animation_reset() -> void:
+	if _player_skeleton != null:
+		_player_animation_from_pose = _capture_skeleton_pose(_player_skeleton)
+	_player_animation_blend_elapsed = 0.0
+	_active_animation = ""
+
+func _update_player_knockdown_state() -> void:
+	if not _player_actor_values_ready:
 		return
-	_npc_combat.provoke(int(node.get_meta("reference_id")))
+	var fatigue: Dictionary = _player_actor_values.snapshot().get("fatigue", {})
+	var current := float(fatigue.get("current", 0.0))
+	var maximum := float(fatigue.get("max", 0.0))
+	if _player_knockdown_state.is_empty() and maximum > 0.0 and current <= 0.0:
+		_start_player_knockdown()
+	elif _player_knockdown_state == "downed" and current >= maximum * NpcCombat.FATIGUE_DOWN_RECOVERY_RATIO:
+		_start_player_get_up()
+
+func _start_player_knockdown() -> void:
+	if not _player_knockdown_state.is_empty():
+		return
+	_player_knockdown_state = "falling"
+	_player_hit_attack_lock_remaining = 0.0
+	player.call("set_knocked_down", true)
+	_player_combat_action = ""
+	_player_combat_action_kind = ""
+	_player_combat_action_sound_pending = false
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	var stagger_animation := "bowblockhit" if prefix == "bow" else prefix + "stagger"
+	_player_hit_reaction = {"kind": "stagger", "animation": stagger_animation}
+	_player_active_animation_reset()
+	_preload_player_combat_stance(_player_weapon_type())
+	_request_player_reaction_clip("Downed", "Characters/_male/idleanims/deathidle.kf", "SpecialIdle_DeathIdle", true)
+	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceDown", false)
+	if player.is_first_person and _arms != null:
+		_arms.react_to_hit()
+	print("OpenOB combat: player falls at zero fatigue")
+
+func _player_getup_asset_path() -> String:
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	if prefix not in ["handtohand", "bow"]:
+		prefix = "onehand"
+	return "Characters/_male/idleanims/%sgetupfacedown.kf" % prefix
+
+func _start_player_get_up() -> void:
+	_player_knockdown_state = "getting_up"
+	_player_hit_reaction = {"kind": "getup", "animation": "GetUp"}
+	_player_active_animation_reset()
+	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceDown", false)
+
+func _request_player_reaction_clip(clip_name: String, asset_path: String, sequence_name: String, loops: bool) -> void:
+	if _player_animations.has(clip_name) or _player_reaction_clips_loading.has(clip_name) or assets == null:
+		return
+	_player_reaction_clips_loading[clip_name] = true
+	await assets.meshes_for_model(asset_path)
+	if _player_skeleton == null:
+		_player_reaction_clips_loading.erase(clip_name)
+		return
+	var animation := _animation_sequence(asset_path, sequence_name, _player_skeleton).duplicate()
+	_player_reaction_clips_loading.erase(clip_name)
+	if animation.is_empty():
+		return
+	animation["loops"] = loops
+	_player_animations[clip_name] = animation
+
+func _finish_player_hit_reaction() -> void:
+	var kind := str(_player_hit_reaction.get("kind", ""))
+	if kind == "stagger" and _player_knockdown_state == "falling":
+		_player_hit_attack_lock_remaining = 0.0
+		_player_knockdown_state = "downed"
+		_player_hit_reaction = {"kind": "downed", "animation": "Downed"}
+		_player_active_animation_reset()
+	elif kind == "getup":
+		_player_hit_attack_lock_remaining = 0.0
+		_player_knockdown_state = ""
+		_player_hit_reaction.clear()
+		player.call("set_knocked_down", false)
+	else:
+		_player_hit_reaction.clear()
+
+## An actor the player's weapon or spell hits fights back.
+func _player_hit_fatigue_damage() -> float:
+	return maxf(NpcCombat.FATIGUE_HIT_MIN, float(_player_weapon_record.get("damage", 4.0)) * NpcCombat.FATIGUE_HIT_COST_MULT)
+
+func _provoke_actor(collider: Object, fatigue_damage: float = -1.0) -> void:
+	var node := collider as Node
+	if node == null or not node.has_meta("reference_id"):
+		return
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	_npc_combat.receive_player_hit(
+		int(node.get_meta("reference_id")), player.global_position,
+		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage()
+	)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
 	if _arms == null or not _arms.built:
@@ -4784,6 +4937,14 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
+func _initial_actor_fatigue(npc: Dictionary) -> Dictionary:
+	var maximum := float(npc.get("base_fatigue", 0.0))
+	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
+	if maximum <= 0.0 and attributes.size() > 5:
+		maximum = float(attributes[0] + attributes[2] + attributes[3] + attributes[5])
+	maximum = maxf(maximum, 1.0)
+	return {"current": maximum, "max": maximum}
+
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
 	if clear_existing:
 		_clear_cell_actors()
@@ -4919,6 +5080,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"blink_cooldown": randf_range(2.5, 5.5),
 			"blink_remaining": 0.0,
 			"animations": animations,
+			"attributes": npc.get("attributes", PackedInt64Array()),
+			"fatigue": _initial_actor_fatigue(npc),
+			"knockdown_state": "",
+			"hit_reaction": {},
+			"hit_attack_lock_remaining": 0.0,
 			"aggression": int(npc.get("aggression", 0)),
 			"confidence": int(npc.get("confidence", 50)),
 			"weapon_form_id": int(assembled.get("weapon_form_id", 0)),
@@ -5397,9 +5563,21 @@ func _update_npc_actors(delta: float) -> void:
 			else:
 				requested_animation = NPC_IDLE_KEY
 		var combat_animation := str(actor.get("combat_anim", ""))
+		if actor.has("combat") and (combat_animation.is_empty() or animations.get(combat_animation, {}).is_empty()):
+			var weapon_record: Dictionary = actor.get("weapon_record", {})
+			var weapon_type := int(weapon_record.get("weapon_type", -1))
+			var stance_prefix := str(NpcCombat.STANCE_PREFIXES.get(weapon_type, "handtohand")) \
+				if weapon_type >= 0 else "handtohand"
+			combat_animation = stance_prefix + "idle"
 		if not combat_animation.is_empty() and not (animations.get(combat_animation, {}) as Dictionary).is_empty():
 			requested_animation = combat_animation
 			base_name = combat_animation
+			_end_npc_idle(actor)
+		var hit_reaction: Dictionary = actor.get("hit_reaction", {})
+		var hit_reaction_animation := str(hit_reaction.get("animation", ""))
+		if not hit_reaction_animation.is_empty():
+			requested_animation = hit_reaction_animation
+			base_name = hit_reaction_animation
 			_end_npc_idle(actor)
 		var animation: Dictionary = animations.get(requested_animation, {})
 		if animation.is_empty() and requested_animation == "FastForward":
@@ -5434,6 +5612,23 @@ func _update_npc_actors(delta: float) -> void:
 		)
 		if blend_weight >= 1.0:
 			actor["animation_from_pose"] = []
+		if not hit_reaction_animation.is_empty() and requested_animation == hit_reaction_animation \
+				and str(hit_reaction.get("kind", "")) != "downed" \
+				and float(actor["animation_time"]) >= float(animation.get("stop_time", 0.0)):
+			var reaction_kind := str(hit_reaction.get("kind", ""))
+			if reaction_kind == "stagger" and str(actor.get("knockdown_state", "")) == "falling":
+				actor["knockdown_state"] = "downed"
+				actor["hit_reaction"] = {"kind": "downed", "animation": "Downed"}
+				actor["active_animation"] = ""
+			elif reaction_kind == "getup":
+				actor.erase("hit_reaction")
+				actor["knockdown_state"] = ""
+				actor_root.call("set_knocked_down", false)
+				_refresh_actor_route(actor)
+			else:
+				actor.erase("hit_reaction")
+				if not actor.has("combat"):
+					_refresh_actor_route(actor)
 		_update_npc_head_look(actor, skeleton, delta, look_target_active)
 
 
@@ -5811,6 +6006,21 @@ func _animation_sequence(asset_path: String, sequence_name: String, target_skele
 func _update_player_animation(delta: float) -> void:
 	if _player_skeleton == null:
 		return
+	_player_hit_attack_lock_remaining = maxf(0.0, _player_hit_attack_lock_remaining - delta)
+	_update_player_knockdown_state()
+	if _player_hit_attack_lock_remaining <= 0.0 and _player_knockdown_state.is_empty() \
+			and str(_player_hit_reaction.get("kind", "")) == "stagger":
+		_player_hit_reaction.clear()
+		_player_active_animation_reset()
+		if player.is_first_person and _arms != null:
+			_arms.interrupt_hit_reaction()
+	var active_reaction: Dictionary = _player_hit_reaction
+	var active_reaction_name := str(active_reaction.get("animation", ""))
+	if not active_reaction_name.is_empty() and str(active_reaction.get("kind", "")) != "downed" \
+			and _active_animation == active_reaction_name:
+		var active_reaction_clip: Dictionary = _player_animations.get(active_reaction_name, {})
+		if not active_reaction_clip.is_empty() and _animation_time >= float(active_reaction_clip.get("stop_time", 0.0)):
+			_finish_player_hit_reaction()
 	var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
 	var is_on_floor_now: bool = player.is_on_floor() or player.is_stepping()
 	if not is_on_floor_now and player.velocity.y <= 0.1:
@@ -5818,7 +6028,18 @@ func _update_player_animation(delta: float) -> void:
 	if _gesture_active and _gesture_should_end(horizontal_speed, is_on_floor_now):
 		_end_gesture()
 	var wanted_animation := ""
-	if not _player_combat_action.is_empty():
+	var hit_reaction: Dictionary = _player_hit_reaction
+	var reaction_animation := str(hit_reaction.get("animation", ""))
+	if not reaction_animation.is_empty():
+		if _player_animations.has(reaction_animation):
+			wanted_animation = reaction_animation
+		elif reaction_animation in ["Downed", "GetUp"]:
+			var asset_path := "Characters/_male/idleanims/deathidle.kf" if reaction_animation == "Downed" else _player_getup_asset_path()
+			var sequence := "SpecialIdle_DeathIdle" if reaction_animation == "Downed" else "SpecialIdle_GetUpFaceDown"
+			_request_player_reaction_clip(reaction_animation, asset_path, sequence, reaction_animation == "Downed")
+		else:
+			_preload_player_combat_stance(_player_weapon_type())
+	if wanted_animation.is_empty() and not _player_combat_action.is_empty():
 		var action_clip: Dictionary = _player_animations.get(_player_combat_action, {})
 		if action_clip.is_empty():
 			_preload_player_combat_stance(_player_weapon_type())
@@ -5882,6 +6103,10 @@ func _update_player_animation(delta: float) -> void:
 	)
 	if _active_animation == _player_combat_action:
 		_fire_player_combat_events(animation, previous_time, _animation_time)
+	if not reaction_animation.is_empty() and _active_animation == reaction_animation \
+			and str(hit_reaction.get("kind", "")) != "downed" \
+			and _animation_time >= float(animation.get("stop_time", 0.0)):
+		_finish_player_hit_reaction()
 	if blend_weight >= 1.0:
 		_player_animation_from_pose.clear()
 
