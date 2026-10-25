@@ -54,6 +54,23 @@ const PLAYER_JUMP_KFS := {
 	"JumpLoop": ["Characters/_male/jumploop.kf", "JumpLoop"],
 	"JumpLand": ["Characters/_male/jumpland.kf", "JumpLand"],
 }
+## Original third-person combat clips are split by the weapon's grip class. These
+## are loaded lazily for the equipped stance; some stances do not ship every clip.
+const PLAYER_COMBAT_STANCE_PREFIXES := {
+	-1: "handtohand", 0: "onehand", 1: "twohand", 2: "onehand", 3: "twohand", 4: "staff", 5: "bow",
+}
+const PLAYER_COMBAT_CLIP_SUFFIXES := [
+	"idle", "equip", "unequip", "blockidle", "blockhit", "attack", "attackright", "attackleft",
+	"forward", "backward", "left", "right", "fastforward", "fastbackward", "fastleft", "fastright",
+	"sneakidle", "sneakforward", "sneakbackward", "sneakleft", "sneakright",
+	"sneakfastforward", "sneakfastbackward", "sneakfastleft", "sneakfastright",
+	"jumpstart", "jumploop", "jumpland", "turnleft", "turnright", "stagger",
+]
+const PLAYER_COMBAT_LOOPING_CLIPS := [
+	"idle", "blockidle", "forward", "backward", "left", "right", "fastforward", "fastbackward", "fastleft", "fastright",
+	"sneakidle", "sneakforward", "sneakbackward", "sneakleft", "sneakright",
+	"sneakfastforward", "sneakfastbackward", "sneakfastleft", "sneakfastright", "jumploop",
+]
 const PLAYER_FAST_FORWARD_KF := "Characters/_male/walkfastforward.kf"
 const ANIMATION_BLEND_DURATION := 0.18
 ## A gesture eases in over its first moments and eases back out into the stance, instead of snapping at the default blend.
@@ -185,6 +202,14 @@ var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
 var _player_weapon_record: Dictionary = {}
 var _weapon_drawn := false
+var _player_weapon_is_held := false
+var _player_blocking := false
+var _player_combat_action := ""
+var _player_combat_action_kind := ""
+var _player_combat_action_sound_pending := false
+var _player_combat_stances_loading: Dictionary = {}
+var _player_combat_stances_loaded: Dictionary = {}
+var _player_combat_available_clips: Dictionary = {}
 var _arms: FirstPersonArms
 var _npc_combat: NpcCombat
 var _next_attack_left := false
@@ -306,6 +331,10 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
+	if _player_blocking and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		_player_blocking = false
+		if _arms != null:
+			_arms.set_blocking(false)
 	if _dialogue_active:
 		_update_dialogue_camera(_delta)
 	elif _dialogue_exit_transition:
@@ -3159,7 +3188,37 @@ func _load_deferred_player_assets() -> void:
 		var asset_path := str(animation_info[0])
 		await assets.meshes_for_model(asset_path)
 		_player_animations[animation_name] = _animation_sequence(asset_path, str(animation_info[1]))
+	await _preload_player_combat_stance(_player_weapon_type())
 	print("OpenOB loaded deferred player face parts and %d original movement animations" % _player_animations.size())
+
+## Loads the original third-person idle, attack, block, draw, and movement clips
+## for one stance. Missing clips are normal (for example, staff has no left swing).
+func _preload_player_combat_stance(weapon_type: int) -> void:
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(weapon_type, "handtohand"))
+	if bool(_player_combat_stances_loaded.get(prefix, false)) or bool(_player_combat_stances_loading.get(prefix, false)):
+		return
+	if data_reader == null or _player_skeleton == null:
+		return
+	_player_combat_stances_loading[prefix] = true
+	if _player_combat_available_clips.is_empty():
+		for path_value: Variant in data_reader.list_assets("meshes/characters/_male/"):
+			var path := str(path_value).replace("\\", "/").to_lower()
+			if path.ends_with(".kf"):
+				_player_combat_available_clips[path.get_file().get_basename()] = true
+	for suffix: String in PLAYER_COMBAT_CLIP_SUFFIXES:
+		var clip_name := prefix + suffix
+		if not _player_combat_available_clips.has(clip_name):
+			continue
+		var animation := await _gesture_animation("Characters/_male/" + clip_name + ".kf")
+		if not animation.is_empty():
+			animation["loops"] = suffix in PLAYER_COMBAT_LOOPING_CLIPS
+			_player_animations[clip_name] = animation
+	_player_combat_stances_loading.erase(prefix)
+	_player_combat_stances_loaded[prefix] = true
+	if _player_combat_action.begins_with(prefix) and not _player_animations.has(_player_combat_action):
+		_player_combat_action = ""
+		_player_combat_action_kind = ""
+		_player_combat_action_sound_pending = false
 
 func _start_deferred_cell_loading() -> void:
 	_deferred_world_generation += 1
@@ -3353,6 +3412,7 @@ func _equip_player_item(form_id: int) -> bool:
 		_player_weapon_meshes = item_meshes
 		_player_weapon_form_id = form_id
 		_player_weapon_record = weapon_record
+		_preload_player_combat_stance(_player_weapon_type())
 		_sync_arms_weapon(true)
 		return true
 	var slots := int(data_reader.get_item_biped_slots(form_id))
@@ -3392,7 +3452,7 @@ func _player_weapon_type() -> int:
 	return int(_player_weapon_record.get("weapon_type", 0))
 
 func _weapon_mount_bone(weapon_type: int) -> String:
-	if _weapon_drawn:
+	if _player_weapon_is_held:
 		return str(WEAPON_HOLD_BONES.get(weapon_type, "Weapon"))
 	return str(WEAPON_STOW_BONES.get(weapon_type, "BackWeapon"))
 
@@ -4329,15 +4389,29 @@ func _set_weapon_drawn(drawn: bool) -> void:
 	if drawn == _weapon_drawn:
 		return
 	_weapon_drawn = drawn
+	_player_blocking = false
 	if physics_grabber.is_holding_object():
 		physics_grabber.release_without_throw()
-	_refresh_player_weapon_mount()
+	AudioManager.play_weapon_ready(player, _player_weapon_type(), drawn)
+	if player.is_first_person:
+		_player_combat_action = ""
+		_player_combat_action_kind = ""
+		_player_combat_action_sound_pending = false
+		_player_weapon_is_held = drawn
+		_refresh_player_weapon_mount()
+	else:
+		var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+		_player_combat_action = prefix + ("equip" if drawn else "unequip")
+		_player_combat_action_kind = "equip" if drawn else "unequip"
+		_player_combat_action_sound_pending = false
+		_preload_player_combat_stance(_player_weapon_type())
 	if _arms == null or not _arms.built:
 		return
 	if drawn:
 		_arms.draw()
 	else:
 		_pending_cast = {}
+		_arms.set_blocking(false)
 		_arms.holster()
 
 ## Hostile NPCs: the controller is made with the player's avatar and runs every frame.
@@ -4411,6 +4485,7 @@ func _handle_combat_input(event: InputEvent) -> bool:
 		return true
 	if mouse_button.button_index == MOUSE_BUTTON_RIGHT:
 		_arms.set_blocking(mouse_button.pressed)
+		_player_blocking = mouse_button.pressed
 		get_viewport().set_input_as_handled()
 		return true
 	return false
@@ -4423,7 +4498,30 @@ func _player_attack() -> void:
 			_next_attack_left = not _next_attack_left
 		elif Input.is_action_pressed("move_left") and not Input.is_action_pressed("move_right"):
 			side = "left"
-	_arms.attack(side)
+	if player.is_first_person:
+		if _arms.attack(side):
+			AudioManager.play_weapon_swing(player, _player_weapon_type())
+		return
+	if not _player_combat_action.is_empty():
+		return
+	var attack_animation := _player_attack_animation(side)
+	if attack_animation.is_empty():
+		return
+	_player_combat_action = attack_animation
+	_player_combat_action_kind = "attack"
+	_player_combat_action_sound_pending = true
+	_player_blocking = false
+	_preload_player_combat_stance(_player_weapon_type())
+
+func _player_attack_animation(side: String) -> String:
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	if _player_weapon_type() == WEAPON_TYPE_BOW:
+		return prefix + "attack" if _player_combat_available_clips.has(prefix + "attack") else ""
+	var requested := prefix + "attack" + side.to_lower()
+	if _player_combat_available_clips.has(requested):
+		return requested
+	var fallback := prefix + "attackright"
+	return fallback if _player_combat_available_clips.has(fallback) else ""
 
 func _update_first_person_arms(delta: float) -> void:
 	if _arms == null or not _arms.built:
@@ -4442,6 +4540,7 @@ func _update_first_person_arms(delta: float) -> void:
 
 func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
 	if clip_kind == "attack" and event_name == "release":
+		AudioManager.play_bow_shot(player)
 		_loose_arrow()
 	elif clip_kind == "attack" and event_name == "hit":
 		_melee_hit()
@@ -4469,7 +4568,7 @@ func _player_aim(muzzle_offset: Vector3) -> Dictionary:
 func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	var excluded: Array[RID] = [player.get_rid()]
 	projectile.excluded_bodies = excluded
-	projectile.impacted.connect(func(_hit_position: Vector3, collider: Object) -> void: _provoke_actor(collider))
+	projectile.connect(&"impacted", func(_hit_position: Vector3, collider: Object) -> void: _provoke_actor(collider))
 	add_child(projectile)
 	projectile.global_position = aim.origin
 	projectile.look_at(aim.origin + (aim.direction as Vector3))
@@ -4479,18 +4578,37 @@ func _loose_arrow() -> void:
 	var meshes := await CombatProjectile.build_arrow_meshes(assets, game_units_to_meters)
 	if meshes.is_empty():
 		return
-	_launch_projectile(CombatProjectile.new_arrow(meshes, (aim.direction as Vector3) * ARROW_SPEED_MPS), aim)
+	var arrow := CombatProjectile.new_arrow(meshes, (aim.direction as Vector3) * ARROW_SPEED_MPS)
+	arrow.connect(&"impacted", _on_arrow_impact)
+	_launch_projectile(arrow, aim)
+
+func _on_arrow_impact(hit_position: Vector3, _collider: Object) -> void:
+	AudioManager.play_arrow_impact(hit_position)
 
 ## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
 func _melee_hit() -> void:
 	var reach := MELEE_BASE_REACH_M * float(_player_weapon_record.get("reach", 1.0))
-	var view: Camera3D = player.camera
-	var forward := -view.global_basis.z
+	var origin: Vector3
+	var forward: Vector3
+	if player.is_first_person:
+		var view: Camera3D = player.camera
+		forward = -view.global_basis.z
+		origin = view.global_position
+	else:
+		forward = -player.global_basis.z
+		origin = player.global_position + Vector3.UP * 1.0 + forward * 0.3
 	var query := PhysicsRayQueryParameters3D.create(
-		view.global_position, view.global_position + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
+		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
 	_provoke_actor(hit.get("collider"))
+	if not hit.is_empty():
+		var collider: Object = hit.get("collider")
+		var flesh_hit := collider is CharacterBody3D and collider != player
+		var impact_host := collider as Node3D if collider is Node3D else null
+		AudioManager.play_weapon_impact(
+			Vector3(hit.position), _player_weapon_type(), flesh_hit, impact_host
+		)
 	var body := hit.get("collider") as RigidBody3D
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
@@ -5699,29 +5817,49 @@ func _update_player_animation(delta: float) -> void:
 		is_on_floor_now = _has_nearby_walkable_support()
 	if _gesture_active and _gesture_should_end(horizontal_speed, is_on_floor_now):
 		_end_gesture()
-	if _gesture_active:
-		_set_player_animation(GESTURE_KEY)
-	elif _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
-		_set_player_animation("JumpStart" if not _player_animations.get("JumpStart", {}).is_empty() else "JumpLoop")
-	elif not _player_was_on_floor and is_on_floor_now:
-		_set_player_animation("JumpLand" if not _player_animations.get("JumpLand", {}).is_empty() else _player_locomotion_animation(horizontal_speed))
-	elif not is_on_floor_now:
-		if _active_animation == "JumpStart":
-			var jump_start: Dictionary = _player_animations.get("JumpStart", {})
-			if _animation_time >= float(jump_start.get("stop_time", 0.0)):
-				_set_player_animation("JumpLoop")
-		elif _active_animation != "JumpLoop":
-			_set_player_animation("JumpLoop")
-	elif _active_animation == "JumpLand":
-		var jump_land: Dictionary = _player_animations.get("JumpLand", {})
-		if _animation_time >= float(jump_land.get("stop_time", 0.0)):
-			_set_player_animation(_player_locomotion_animation(horizontal_speed))
-	else:
-		_set_player_animation(_player_locomotion_animation(horizontal_speed))
+	var wanted_animation := ""
+	if not _player_combat_action.is_empty():
+		var action_clip: Dictionary = _player_animations.get(_player_combat_action, {})
+		if action_clip.is_empty():
+			_preload_player_combat_stance(_player_weapon_type())
+		elif _active_animation == _player_combat_action \
+				and _animation_time >= float(action_clip.get("stop_time", 0.0)):
+			_finish_player_combat_action()
+		else:
+			wanted_animation = _player_combat_action
+	if wanted_animation.is_empty() and _weapon_drawn and _player_blocking:
+		wanted_animation = _player_combat_clip("blockidle")
+	if wanted_animation.is_empty():
+		if _gesture_active:
+			wanted_animation = GESTURE_KEY
+		elif _player_was_on_floor and not is_on_floor_now and player.velocity.y > 0.1:
+			wanted_animation = _player_jump_clip("jumpstart", "JumpStart", "jumploop", "JumpLoop")
+		elif not _player_was_on_floor and is_on_floor_now:
+			wanted_animation = _player_jump_clip("jumpland", "JumpLand", "", _player_locomotion_animation(horizontal_speed))
+		elif not is_on_floor_now:
+			var jump_start := _player_jump_clip("jumpstart", "JumpStart", "jumploop", "JumpLoop")
+			if _active_animation == jump_start:
+				var jump_start_clip: Dictionary = _player_animations.get(jump_start, {})
+				wanted_animation = "JumpLoop" if _animation_time >= float(jump_start_clip.get("stop_time", 0.0)) \
+					else jump_start
+			else:
+				wanted_animation = _player_jump_clip("jumploop", "JumpLoop", "", "JumpLoop")
+		elif _active_animation == _player_jump_clip("jumpland", "JumpLand", "", ""):
+			var jump_land_clip: Dictionary = _player_animations.get(_active_animation, {})
+			wanted_animation = _player_locomotion_animation(horizontal_speed) \
+				if _animation_time >= float(jump_land_clip.get("stop_time", 0.0)) else _active_animation
+		else:
+			wanted_animation = _player_locomotion_animation(horizontal_speed)
+	if not wanted_animation.is_empty():
+		_set_player_animation(wanted_animation)
+	if _player_combat_action_sound_pending and _active_animation == _player_combat_action:
+		AudioManager.play_weapon_swing(player, _player_weapon_type())
+		_player_combat_action_sound_pending = false
 	_player_was_on_floor = is_on_floor_now
 	var animation: Dictionary = _player_animations.get(_active_animation, {})
 	if animation.is_empty():
 		return
+	var previous_time := _animation_time
 	_animation_time += delta
 	_player_animation_blend_elapsed = minf(
 		_player_animation_blend_elapsed + delta,
@@ -5742,6 +5880,8 @@ func _update_player_animation(delta: float) -> void:
 		blend_weight,
 		_player_animations.get("Idle", {}) if _active_animation == GESTURE_KEY else {}
 	)
+	if _active_animation == _player_combat_action:
+		_fire_player_combat_events(animation, previous_time, _animation_time)
 	if blend_weight >= 1.0:
 		_player_animation_from_pose.clear()
 
@@ -5762,7 +5902,9 @@ func _has_nearby_walkable_support() -> bool:
 func _player_locomotion_animation(horizontal_speed: float) -> String:
 	var sneaking: bool = player.is_crouching
 	if horizontal_speed <= 0.08:
-		return "SneakIdle" if sneaking and _player_animations.has("SneakIdle") else "Idle"
+		var idle_animation := "SneakIdle" if sneaking and _player_animations.has("SneakIdle") else "Idle"
+		var combat_idle := _player_combat_clip("sneakidle" if sneaking else "idle") if _weapon_drawn else ""
+		return combat_idle if not combat_idle.is_empty() else idle_animation
 	var local_velocity := Basis(Vector3.UP, player.rotation.y).inverse() * Vector3(player.velocity.x, 0.0, player.velocity.z)
 	var is_fast := Input.is_action_pressed("run") and not sneaking
 	var direction_name := "Forward"
@@ -5770,9 +5912,66 @@ func _player_locomotion_animation(horizontal_speed: float) -> String:
 		direction_name = "Left" if local_velocity.x < 0.0 else "Right"
 	else:
 		direction_name = "Backward" if local_velocity.z > 0.0 else "Forward"
+	var movement_suffix := ("sneak" if sneaking else "") + ("fast" if is_fast else "") + direction_name.to_lower()
+	var combat_movement := _player_combat_clip(movement_suffix) if _weapon_drawn else ""
+	if not combat_movement.is_empty():
+		return combat_movement
 	if sneaking and _player_animations.has("Sneak" + direction_name):
 		return "Sneak" + direction_name
 	return ("Fast" + direction_name) if is_fast else direction_name
+
+func _player_combat_clip(suffix: String) -> String:
+	if not _weapon_drawn or suffix.is_empty():
+		return ""
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	var clip_name := prefix + suffix.to_lower()
+	if not _player_animations.has(clip_name):
+		_preload_player_combat_stance(_player_weapon_type())
+		return ""
+	return clip_name
+
+func _player_jump_clip(combat_suffix: String, ordinary_clip: String, fallback_suffix: String, ordinary_fallback: String) -> String:
+	var combat_clip := _player_combat_clip(combat_suffix) if not combat_suffix.is_empty() else ""
+	if not combat_clip.is_empty():
+		return combat_clip
+	if not ordinary_clip.is_empty() and not _player_animations.get(ordinary_clip, {}).is_empty():
+		return ordinary_clip
+	if not fallback_suffix.is_empty():
+		var fallback_clip := _player_combat_clip(fallback_suffix)
+		if not fallback_clip.is_empty():
+			return fallback_clip
+	return ordinary_fallback
+
+func _finish_player_combat_action() -> void:
+	if _player_combat_action_kind == "equip":
+		_player_weapon_is_held = true
+		_refresh_player_weapon_mount()
+	elif _player_combat_action_kind == "unequip":
+		_player_weapon_is_held = false
+		_refresh_player_weapon_mount()
+	_player_combat_action = ""
+	_player_combat_action_kind = ""
+	_player_combat_action_sound_pending = false
+
+func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time: float) -> void:
+	for key_value: Variant in animation.get("text_keys", []):
+		var key: Dictionary = key_value
+		var key_time := float(key.get("time", 0.0))
+		if key_time <= from_time or key_time > to_time:
+			continue
+		var key_name := str(key.get("name", "")).strip_edges().to_lower()
+		if key_name == "attach":
+			if _player_combat_action_kind == "equip":
+				_player_weapon_is_held = true
+				_refresh_player_weapon_mount()
+			elif _player_combat_action_kind == "unequip":
+				_player_weapon_is_held = false
+				_refresh_player_weapon_mount()
+		elif key_name == "hit" and _player_combat_action_kind == "attack" and _player_weapon_type() != WEAPON_TYPE_BOW:
+			_melee_hit()
+		elif key_name == "release" and _player_combat_action_kind == "attack" and _player_weapon_type() == WEAPON_TYPE_BOW:
+			AudioManager.play_bow_shot(player)
+			_loose_arrow()
 
 func _blend_duration_between(from_animation: String, to_animation: String) -> float:
 	if from_animation == GESTURE_KEY or from_animation == NPC_IDLE_KEY:

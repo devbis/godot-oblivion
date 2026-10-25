@@ -151,6 +151,9 @@ func _begin_combat(actor: Dictionary, root: Node3D) -> void:
 	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true}
 	actor["combat_anim"] = ""
 	_set_weapon_drawn(actor, true)
+	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
+	if audio_manager != null:
+		audio_manager.call("play_weapon_ready", root, _weapon_type(actor), true)
 	var prefix := _prefix(actor)
 	var suffixes: Array[String] = ["idle", "fastforward", "forward"]
 	suffixes.append_array(_attack_suffixes(prefix))
@@ -168,6 +171,9 @@ func _end_combat(actor: Dictionary) -> void:
 	actor.erase("combat_anim")
 	_set_weapon_drawn(actor, false)
 	if is_instance_valid(root):
+		var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
+		if audio_manager != null:
+			audio_manager.call("play_weapon_ready", root, _weapon_type(actor), false)
 		_stop_route(root)
 	host.call("_refresh_actor_route", actor)
 
@@ -314,8 +320,9 @@ func _land_hit(actor: Dictionary, root: Node3D, player: CharacterBody3D, combat:
 	var damage := _damage(actor) * (POWER_ATTACK_DAMAGE_MULT if bool(combat.get("power", false)) else 1.0)
 	_hurt_player(actor, root, player, damage)
 
-func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, damage: float) -> void:
+func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, damage: float, projectile_hit := false) -> void:
 	var blocking: bool = host.call("is_player_blocking")
+	var blocked := false
 	if blocking:
 		var from_actor := (root.global_position - player.global_position)
 		from_actor.y = 0.0
@@ -323,11 +330,23 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 		var view_forward := -camera.global_basis.z if camera != null else -player.global_basis.z
 		view_forward.y = 0.0
 		if from_actor.length() > 0.01 and view_forward.length() > 0.01 and from_actor.normalized().dot(view_forward.normalized()) > 0.3:
+			blocked = true
 			damage *= BLOCKED_DAMAGE_SHARE
+	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
+	if audio_manager != null:
+		if blocked:
+			audio_manager.call("play_weapon_block", player, int(host.call("_player_weapon_type")))
+		elif not projectile_hit:
+			audio_manager.call(
+				"play_weapon_impact", player.global_position + Vector3.UP, _weapon_type(actor), true, player
+			)
 	(host.get("_player_actor_values") as RefCounted).call("apply_damage", damage)
 	player_hit.emit(str(actor.get("reference_name", "NPC")), damage)
 
 func _loose_arrow(actor: Dictionary, root: Node3D, player: CharacterBody3D) -> void:
+	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
+	if audio_manager != null:
+		audio_manager.call("play_bow_shot", root)
 	var meshes := await CombatProjectile.build_arrow_meshes(host.get("assets"), float(host.get("game_units_to_meters")))
 	if meshes.is_empty() or not is_instance_valid(root) or not is_instance_valid(player):
 		return
@@ -343,9 +362,12 @@ func _loose_arrow(actor: Dictionary, root: Node3D, player: CharacterBody3D) -> v
 	var excluded: Array[RID] = [(root as CollisionObject3D).get_rid()]
 	arrow.excluded_bodies = excluded
 	var damage := _damage(actor)
-	arrow.impacted.connect(func(_hit_position: Vector3, collider: Object) -> void:
+	arrow.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
+		var impact_audio := host.get_node_or_null("/root/AudioManager") as Node
+		if impact_audio != null:
+			impact_audio.call("play_arrow_impact", hit_position)
 		if collider == player and is_instance_valid(root):
-			_hurt_player(actor, root, player, damage)
+			_hurt_player(actor, root, player, damage, true)
 	)
 	host.add_child(arrow)
 	arrow.global_position = origin

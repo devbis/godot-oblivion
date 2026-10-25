@@ -85,6 +85,90 @@ func play_combat_effort(actor: Node3D, female := false) -> void:
 	var asset_path := "sound\\fx\\npc\\human\\gasp\\%s\\voc_gasp_%s_%02d.wav" % [sex, sex, variant]
 	_play_asset_at(asset_path, actor.global_position + Vector3.UP * 1.1, actor, -2.0, 32.0, 2.0)
 
+## Original Oblivion weapon foley. WEAP types 0/2 are one-handed, 1/3 two-handed,
+## 4 staff, 5 bow, and -1 bare hands.
+func play_weapon_ready(actor: Node3D, weapon_type: int, drawn: bool) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready() or weapon_type < 0:
+		return
+	var kind := "blade"
+	if weapon_type in [2, 3]:
+		kind = "blunt"
+	elif weapon_type == 4:
+		kind = "staff"
+	elif weapon_type == 5:
+		kind = "bow"
+	var direction := "up" if drawn else "down"
+	var asset_path := "sound\\fx\\itm\\itm_weapon%s_%s.wav" % [kind, direction]
+	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 28.0, 2.0)
+
+## Plays the game's hand or weapon swish at the attack's start. Bow draw and
+## release are separate sounds, as in the original.
+func play_weapon_swing(actor: Node3D, weapon_type: int) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready():
+		return
+	if weapon_type == 5:
+		_play_asset_at("sound\\fx\\wpn\\wpn_bowdraw.wav", actor.global_position + Vector3.UP, actor, effect_volume_db, 28.0, 2.0)
+		return
+	var group := "hand"
+	var variant_count := 3
+	if weapon_type in [0, 2]:
+		group = "medium"
+	elif weapon_type in [1, 3, 4]:
+		group = "large"
+		variant_count = 1
+	var variant := randi_range(1, variant_count)
+	var asset_path := "sound\\fx\\wpn\\swish\\%s\\wpn_swish_%s_%02d.wav" % [group, group, variant]
+	if group == "hand":
+		asset_path = "sound\\fx\\wpn\\swish\\hand\\wpn_swishhand_%02d.wav" % variant
+	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 30.0, 2.0)
+
+func play_bow_shot(actor: Node3D) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready():
+		return
+	_play_asset_at("sound\\fx\\wpn\\wpn_bowshoot.wav", actor.global_position + Vector3.UP, actor, effect_volume_db, 32.0, 2.0)
+
+func play_weapon_block(actor: Node3D, weapon_type: int) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready():
+		return
+	var group := "hand"
+	if weapon_type in [0, 1]:
+		group = "blade"
+	elif weapon_type in [2, 3]:
+		group = "blunt"
+	elif weapon_type == 4:
+		group = "staff"
+	var variant := randi_range(1, 3)
+	var asset_path := "sound\\fx\\wpn\\weaponblock\\%s\\wpn_block_%s_%02d.wav" % [group, group, variant]
+	_play_asset_at(asset_path, actor.global_position + Vector3.UP, actor, effect_volume_db, 30.0, 2.0)
+
+## Impact variants distinguish flesh from a world/object hit and follow the
+## weapon family used by Oblivion's original weapon hit sound descriptors.
+func play_weapon_impact(position: Vector3, weapon_type: int, flesh: bool, host: Node3D = null) -> void:
+	if not _reader_is_ready():
+		return
+	var group := "hand"
+	var variant_count := 4
+	if weapon_type in [0, 1]:
+		group = "bladeflesh" if flesh else "blade"
+		variant_count = 3 if flesh else 4
+	elif weapon_type in [2, 3, 4]:
+		group = "bluntflesh" if flesh else "blunt"
+	var variant := randi_range(1, variant_count)
+	var file_name := "wpn_hit_%s_%02d.wav" % [group, variant]
+	if group == "bladeflesh":
+		file_name = "wpn_hit_bladeflesh_%02d.wav" % variant
+	elif group == "bluntflesh":
+		file_name = "wpn_hit_bluntflesh_%02d.wav" % variant
+	var asset_path := "sound\\fx\\wpn\\weaponhit\\%s\\%s" % [group, file_name]
+	_play_asset_at(asset_path, position, host, effect_volume_db, 34.0, 2.0)
+
+func play_arrow_impact(position: Vector3) -> void:
+	if not _reader_is_ready():
+		return
+	var variant := randi_range(1, 3)
+	var asset_path := "sound\\fx\\wpn\\weaponhit\\arrow\\wpn_hit_arrow_%02d.wav" % variant
+	_play_asset_at(asset_path, position, null, effect_volume_db, 34.0, 2.0)
+
 
 ## Plays a quest reply using the speaker's race and sex voice folder.
 func play_dialogue(
@@ -552,7 +636,7 @@ func _watch_combat_animations() -> void:
 	var player_node := _scene_root.get_node_or_null("Player") as Node3D
 	var player_animation := str(_scene_root.get("_active_animation"))
 	var player_time := float(_scene_root.get("_animation_time"))
-	_watch_animation("player", player_animation, player_time, player_node, false)
+	_watch_animation("player", player_animation, player_time, player_node, false, -1, false)
 	var actor_states: Variant = _scene_root.get("_npc_actors")
 	if not actor_states is Array:
 		return
@@ -565,7 +649,11 @@ func _watch_combat_animations() -> void:
 		var animation := str(actor_state.get("active_animation", ""))
 		var animation_time := float(actor_state.get("animation_time", 0.0))
 		var base_form_id := int(actor_state.get("base_form_id", 0))
-		_watch_animation("npc_" + actor_id, animation, animation_time, actor, _npc_is_female(base_form_id))
+		var weapon_record: Dictionary = actor_state.get("weapon_record", {})
+		_watch_animation(
+			"npc_" + actor_id, animation, animation_time, actor, _npc_is_female(base_form_id),
+			int(weapon_record.get("weapon_type", -1)), true
+		)
 
 
 func _watch_world_feedback() -> void:
@@ -603,13 +691,23 @@ func _npc_is_female(base_form_id: int) -> bool:
 	return female
 
 
-func _watch_animation(key: String, animation: String, animation_time: float, actor: Node3D, female: bool) -> void:
+func _watch_animation(
+	key: String, animation: String, animation_time: float, actor: Node3D, female: bool,
+	weapon_type := -1, swing_sound := false
+) -> void:
 	var previous: Dictionary = _observed_animations.get(key, {})
 	var started := animation != str(previous.get("name", "")) or animation_time + 0.02 < float(previous.get("time", 0.0))
 	_observed_animations[key] = {"name": animation, "time": animation_time}
-	if not started or not _is_combat_effort_animation(animation):
+	if not started:
 		return
-	play_combat_effort(actor, female)
+	if swing_sound and _is_attack_animation(animation):
+		play_weapon_swing(actor, weapon_type)
+	if _is_combat_effort_animation(animation):
+		play_combat_effort(actor, female)
+
+
+func _is_attack_animation(animation: String) -> bool:
+	return animation.to_lower().contains("attack")
 
 
 func _is_combat_effort_animation(animation: String) -> bool:
