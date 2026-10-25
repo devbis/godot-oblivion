@@ -11,7 +11,7 @@ const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 ## ("attack" or "cast").
 signal clip_event(event_name: String, clip_kind: String)
 
-const SKELETON_MODEL := "Characters/_male/skeleton.nif"
+const SKELETON_MODEL := "Characters/_1stperson/skeleton.nif"
 const CLIP_FOLDER := "Characters/_1stperson/"
 const BODY_PARTS := [
 	{"model": "Characters/_male/upperbody.nif", "mesh": "arms", "slot": 0x0004},
@@ -27,9 +27,6 @@ const STANCES := {
 	5: {"prefix": "bow", "hold_bone": "Torch"},
 }
 const UNARMED_STANCE := {"prefix": "handtohand", "hold_bone": "Weapon"}
-## The first-person rig has a "Bip" node between "Bip01 NonAccum" and the pelvis that the third-person rig lacks. The
-## clips lift the body to eye height through it, so it is added to the rig.
-const HIPS_BONE := "Bip"
 const CAMERA_BONE := "Camera01"
 ## Camera01's own axes are not the camera's: the clips hold it a quarter turn about X from the body frame, which looks along -Z.
 const CAMERA_BONE_TO_CAMERA := Basis(Vector3.RIGHT, PI * 0.5)
@@ -113,7 +110,6 @@ func build() -> void:
 	root.visible = false
 	camera.add_child(root)
 	root.add_child(skeleton)
-	_add_hips_bone()
 	_camera_bone = skeleton.find_bone(CAMERA_BONE)
 	# The first-person rig keeps its camera node at the root, not under the head as the third-person rig does: the clips
 	# give it an absolute eye position.
@@ -149,16 +145,6 @@ func build() -> void:
 	_building = false
 	_apply_rest_pose_placement()
 	_preload_stance()
-
-func _add_hips_bone() -> void:
-	var pelvis := skeleton.find_bone("Bip01 Pelvis")
-	var non_accum := skeleton.find_bone("Bip01 NonAccum")
-	if pelvis < 0 or non_accum < 0:
-		return
-	var hips := skeleton.add_bone(HIPS_BONE)
-	skeleton.set_bone_parent(hips, non_accum)
-	skeleton.set_bone_parent(pelvis, hips)
-	skeleton.set_bone_rest(hips, Transform3D.IDENTITY)
 
 ## Shows the items worn on the arms and hands (shirt sleeves, gauntlets) instead of the bare arms and hands they cover.
 func set_equipment(entries: Array) -> void:

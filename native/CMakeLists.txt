@@ -11,6 +11,43 @@ set(NIFLY_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../extern/nifly" CACHE PATH "Path to
 if(NOT EXISTS "${NIFLY_PATH}/CMakeLists.txt")
     message(FATAL_ERROR "nifly sources are required at ${NIFLY_PATH}")
 endif()
+get_filename_component(NIFLY_PATH "${NIFLY_PATH}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# nifly 1.0 omits the three legacy component-validity bytes from
+# NiTransformInterpolator. Oblivion 10.1.0.106 writes them before dataRef, so
+# nifly otherwise reads those bytes as the reference and rejects this skeleton.
+# Compile a patched copy in the build tree; keep the externally supplied nifly
+# checkout untouched.
+set(_nifly_animation_source "${NIFLY_PATH}/src/Animation.cpp")
+file(READ "${_nifly_animation_source}" _nifly_animation_contents)
+set(_nifly_transform_sync_before [=[void NiTransformInterpolator::Sync(NiStreamReversible& stream) {
+	stream.Sync(translation);
+	stream.Sync(rotation);
+	stream.Sync(scale);
+	dataRef.Sync(stream);
+}]=])
+set(_nifly_transform_sync_after [=[void NiTransformInterpolator::Sync(NiStreamReversible& stream) {
+	stream.Sync(translation);
+	stream.Sync(rotation);
+	stream.Sync(scale);
+	if (stream.GetVersion().File() < V10_1_0_110) {
+		bool trsValid[3]{};
+		stream.Sync(trsValid);
+	}
+	dataRef.Sync(stream);
+}]=])
+string(FIND "${_nifly_animation_contents}" "${_nifly_transform_sync_before}" _nifly_transform_sync_position)
+if(_nifly_transform_sync_position GREATER_EQUAL 0)
+    string(REPLACE "${_nifly_transform_sync_before}" "${_nifly_transform_sync_after}"
+        _nifly_animation_contents "${_nifly_animation_contents}")
+elseif(NOT _nifly_animation_contents MATCHES "NiTransformInterpolator::Sync[^{]*\\{[^}]*V10_1_0_110")
+    message(FATAL_ERROR "Unsupported nifly Animation.cpp: legacy NiTransformInterpolator fields are not handled")
+endif()
+set(_nifly_patched_source_dir "${CMAKE_CURRENT_BINARY_DIR}/nifly-patched")
+file(MAKE_DIRECTORY "${_nifly_patched_source_dir}")
+set(_nifly_patched_animation_source "${_nifly_patched_source_dir}/Animation.cpp")
+file(WRITE "${_nifly_patched_animation_source}" "${_nifly_animation_contents}")
+
 # nifly is built as a static library that ends up inside a shared module, so it needs PIC,
 # and an unconfigured CMAKE_BUILD_TYPE would build it (and NIF parsing) without optimization.
 # Both must be set before add_subdirectory so nifly picks them up.
@@ -23,6 +60,19 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     endif()
 endif()
 add_subdirectory("${NIFLY_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/nifly")
+
+# Replace only nifly's Animation.cpp with the build-tree compatibility copy.
+get_target_property(_nifly_source_files nifly SOURCES)
+set(_nifly_fixed_source_files)
+foreach(_nifly_source IN LISTS _nifly_source_files)
+    get_filename_component(_nifly_source_absolute "${_nifly_source}" ABSOLUTE BASE_DIR "${NIFLY_PATH}/src")
+    if(_nifly_source_absolute STREQUAL _nifly_animation_source)
+        list(APPEND _nifly_fixed_source_files "${_nifly_patched_animation_source}")
+    else()
+        list(APPEND _nifly_fixed_source_files "${_nifly_source_absolute}")
+    endif()
+endforeach()
+set_property(TARGET nifly PROPERTY SOURCES "${_nifly_fixed_source_files}")
 
 add_library(oblivion_data_core STATIC
     src/bsa_archive.cpp
