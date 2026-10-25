@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "oblivion/script_records.hpp"
@@ -35,6 +36,7 @@ struct PlacedReference {
     std::string base_editor_id;
     std::string editor_id;
     std::string model_path;
+    bool initially_disabled = false;  // record flag 0x0800: a script enables the reference later
     bool is_tree = false;
     float tree_billboard_width = 0.0f;
     float tree_billboard_height = 0.0f;
@@ -109,6 +111,11 @@ struct NpcBaseRecord {
     std::vector<NpcInventoryEntry> inventory;
     std::vector<std::uint32_t> spell_form_ids;
     std::vector<std::uint32_t> ai_package_form_ids;
+    // AIDT: how readily the actor starts a fight (0 never, 100 frenzied) and how long it stands its ground.
+    std::uint8_t aggression = 0;
+    std::uint8_t confidence = 50;
+    // SNAM: the factions the actor belongs to, with its rank in each.
+    std::vector<std::pair<std::uint32_t, std::int8_t>> factions;
 };
 
 struct RaceFaceGenRecord {

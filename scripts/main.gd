@@ -20,6 +20,7 @@ const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
 const AnimationSampling := preload("res://scripts/animation_sampling.gd")
 const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
+const NpcCombat := preload("res://scripts/npc_combat.gd")
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
@@ -185,6 +186,7 @@ var _player_weapon_form_id := 0
 var _player_weapon_record: Dictionary = {}
 var _weapon_drawn := false
 var _arms: FirstPersonArms
+var _npc_combat: NpcCombat
 var _next_attack_left := false
 var _arrow_source_meshes: Array = []
 var _pending_cast: Dictionary = {}
@@ -340,6 +342,7 @@ func _process(_delta: float) -> void:
 			_player_first_person_mode = player.is_first_person
 			_refresh_player_first_person_visibility()
 		_update_npc_actors(_delta)
+		_update_npc_combat(_delta)
 		_update_exterior_collision_streaming()
 		_update_exterior_terrain_collision_streaming()
 		_update_npc_streaming()
@@ -823,6 +826,8 @@ var _player_route_timer := 0.0
 ## Player-targeted packages and Follow packages track their live target as it moves.
 func _update_dynamic_target_routes() -> void:
 	for actor: Dictionary in _npc_actors:
+		if _npc_combat != null and _npc_combat.in_combat(actor):
+			continue
 		var package: Dictionary = actor.get("package", {})
 		var destination_form_id := _package_destination_form_id(package)
 		var follows_player := destination_form_id == PLAYER_REFERENCE_FORM_ID
@@ -1118,6 +1123,9 @@ func _navigation_waypoints(path: PackedVector3Array, speed_mps: float) -> Array[
 func _refresh_actor_route(actor: Dictionary) -> void:
 	var root: Node = actor.get("root")
 	if not is_instance_valid(root) or bool(root.get("inactive")):
+		return
+	# A fighting actor chases the player; its package resumes when the fight ends.
+	if _npc_combat != null and _npc_combat.in_combat(actor):
 		return
 	var package: Dictionary = {}
 	var npc_id := str(actor.get("npc_editor_id", ""))
@@ -4332,6 +4340,58 @@ func _set_weapon_drawn(drawn: bool) -> void:
 		_pending_cast = {}
 		_arms.holster()
 
+## Hostile NPCs: the controller is made with the player's avatar and runs every frame.
+func _update_npc_combat(delta: float) -> void:
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	_npc_combat.update(delta)
+
+func _actor_reference_disabled(reference: Dictionary) -> bool:
+	return bool(reference.get("initially_disabled", false)) and not _enabled_reference_ids.has(int(reference.get("form_id", 0)))
+
+var _enabled_reference_ids: Dictionary = {}
+
+## Enable: an actor the plan placed disabled appears (streamed in at once if the cell is loaded).
+func enable_npc_reference(reference_name: String) -> String:
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("reference_name", "")).strip_edges().to_lower() != reference_name.strip_edges().to_lower():
+			continue
+		var reference_id := int(reference.get("form_id", 0))
+		quest_bridge.removed_reference_ids.erase(reference_id)
+		_enabled_reference_ids[reference_id] = true
+		return "enabled %s" % reference_name
+	return "%s is not in this cell" % reference_name
+
+## StartCombat: the actor fights the player.
+func start_npc_combat(reference_name: String) -> String:
+	var actor := _npc_actor_by_reference(reference_name.strip_edges().to_lower())
+	var reference_id := int(actor.get("reference_id", 0)) if not actor.is_empty() else _reference_id_by_name(reference_name)
+	if reference_id == 0:
+		return "%s is not in this cell" % reference_name
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	_npc_combat.force_combat(reference_id)
+	return "%s attacks the player" % reference_name
+
+func stop_npc_combat(reference_name: String) -> String:
+	var reference_id := _reference_id_by_name(reference_name)
+	if reference_id == 0 or _npc_combat == null:
+		return "%s is not fighting" % reference_name
+	_npc_combat.stop_combat(reference_id)
+	return "%s stands down" % reference_name
+
+func _reference_id_by_name(reference_name: String) -> int:
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if str(reference.get("reference_name", "")).strip_edges().to_lower() == reference_name.strip_edges().to_lower():
+			return int(reference.get("form_id", 0))
+	return 0
+
+## True while the player holds the right mouse button with the weapon drawn.
+func is_player_blocking() -> bool:
+	return _weapon_drawn and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+
 func _combat_menus_closed() -> bool:
 	return not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition \
 		and not player.face_preview_enabled
@@ -4409,6 +4469,7 @@ func _player_aim(muzzle_offset: Vector3) -> Dictionary:
 func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	var excluded: Array[RID] = [player.get_rid()]
 	projectile.excluded_bodies = excluded
+	projectile.impacted.connect(func(_hit_position: Vector3, collider: Object) -> void: _provoke_actor(collider))
 	add_child(projectile)
 	projectile.global_position = aim.origin
 	projectile.look_at(aim.origin + (aim.direction as Vector3))
@@ -4429,9 +4490,17 @@ func _melee_hit() -> void:
 		view.global_position, view.global_position + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+	_provoke_actor(hit.get("collider"))
 	var body := hit.get("collider") as RigidBody3D
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
+
+## An actor the player's weapon or spell hits fights back.
+func _provoke_actor(collider: Object) -> void:
+	var node := collider as Node
+	if node == null or not node.has_meta("reference_id") or _npc_combat == null:
+		return
+	_npc_combat.provoke(int(node.get_meta("reference_id")))
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
 	if _arms == null or not _arms.built:
@@ -4611,7 +4680,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var reference_id := int(reference.get("form_id", 0))
 		if target_reference_id >= 0 and reference_id != target_reference_id:
 			continue
-		if _npc_loaded_reference_ids.has(reference_id):
+		if _npc_loaded_reference_ids.has(reference_id) or _actor_reference_disabled(reference):
 			continue
 		if target_reference_id >= 0:
 			_npc_loaded_reference_ids[reference_id] = true
@@ -4732,6 +4801,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"blink_cooldown": randf_range(2.5, 5.5),
 			"blink_remaining": 0.0,
 			"animations": animations,
+			"aggression": int(npc.get("aggression", 0)),
+			"confidence": int(npc.get("confidence", 50)),
+			"weapon_form_id": int(assembled.get("weapon_form_id", 0)),
+			"weapon_meshes": assembled.get("weapon_meshes", []),
+			"weapon_record": _find_weapon_record(int(assembled.get("weapon_form_id", 0))) if int(assembled.get("weapon_form_id", 0)) != 0 else {},
 			"active_animation": "",
 			"animation_time": 0.0,
 			"animation_from_pose": [],
@@ -4817,7 +4891,7 @@ func _update_npc_streaming() -> void:
 		if str(reference.get("record_type", "")) != "ACHR":
 			continue
 		var reference_id := int(reference.get("form_id", 0))
-		if _npc_loaded_reference_ids.has(reference_id):
+		if _npc_loaded_reference_ids.has(reference_id) or _actor_reference_disabled(reference):
 			continue
 		if is_exterior and _is_early_oblivion_gate(reference, str(reference.get("model_path", ""))):
 			continue
@@ -5204,6 +5278,11 @@ func _update_npc_actors(delta: float) -> void:
 				_end_npc_idle(actor)
 			else:
 				requested_animation = NPC_IDLE_KEY
+		var combat_animation := str(actor.get("combat_anim", ""))
+		if not combat_animation.is_empty() and not (animations.get(combat_animation, {}) as Dictionary).is_empty():
+			requested_animation = combat_animation
+			base_name = combat_animation
+			_end_npc_idle(actor)
 		var animation: Dictionary = animations.get(requested_animation, {})
 		if animation.is_empty() and requested_animation == "FastForward":
 			requested_animation = "Forward"

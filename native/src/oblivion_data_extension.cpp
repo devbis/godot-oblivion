@@ -459,6 +459,11 @@ public:
         result["level_or_offset"] = npc->level_or_offset;
         result["base_health"] = npc->base_health;
         result["has_actor_values"] = npc->has_actor_values;
+        result["aggression"] = npc->aggression;
+        result["confidence"] = npc->confidence;
+        PackedInt64Array faction_ids;
+        for (const auto& membership : npc->factions) faction_ids.push_back(static_cast<int64_t>(membership.first));
+        result["faction_form_ids"] = faction_ids;
         PackedInt64Array attributes;
         attributes.resize(static_cast<int64_t>(npc->attributes.size()));
         for (int64_t i = 0; i < static_cast<int64_t>(npc->attributes.size()); ++i)
@@ -1024,6 +1029,7 @@ private:
         entry["base_form_id"] = static_cast<int64_t>(reference.base_form_id);
         entry["script_form_id"] = static_cast<int64_t>(reference.script_form_id);
         entry["record_type"] = as_string(reference.record_type);
+        entry["initially_disabled"] = reference.initially_disabled;
         entry["reference_name"] = as_string(reference.reference_name);
         entry["base_editor_id"] = as_string(reference.base_editor_id);
         entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};

@@ -131,6 +131,8 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		if not is_current.call():
 			return {}
 	var weapon_attached := false
+	var weapon_form_id := 0
+	var weapon_meshes: Array[MeshInstance3D] = []
 	var attached_item_names: Array[String] = []
 	for item_form_id: int in equipment_ids:
 		var item_type := str(data_reader.find_record_type(item_form_id))
@@ -159,7 +161,7 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 			attach_bone = "Bip01 Head"
 			adjust_bone_orientation = true
 			model_space_bone_attachment = await _uses_model_space_head_attachment(item_path)
-		await add_actor_model(
+		var item_meshes := await add_actor_model(
 			avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, model_space_bone_attachment,
 			race_texture_key, "", "", adjust_bone_orientation
 		)
@@ -168,7 +170,12 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
 		if item_type == "WEAP":
 			weapon_attached = true
-	return {"face_meshes": face_meshes, "attached_item_names": attached_item_names}
+			weapon_form_id = item_form_id
+			weapon_meshes = item_meshes
+	return {
+		"face_meshes": face_meshes, "attached_item_names": attached_item_names,
+		"weapon_form_id": weapon_form_id, "weapon_meshes": weapon_meshes,
+	}
 
 func npc_head_model_path(npc: Dictionary) -> String:
 	var race_head_parts: Array = npc.get("race_head_parts", [])

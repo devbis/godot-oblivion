@@ -25,6 +25,23 @@ func take_pending_move(reference_id: int) -> Variant:
 	return destination
 
 
+## Actor values the scripts set (SetAV Aggression 0) over the base record's: lower-case actor name -> {value name: value}.
+var av_overrides: Dictionary = {}
+
+## The value a script set for an actor, or null while it keeps the base record's.
+func actor_value_override(actor_name: String, value_name: String) -> Variant:
+	return (av_overrides.get(actor_name.to_lower(), {}) as Dictionary).get(value_name.to_lower())
+
+
+func _combat_or_enable(command: String, target: String, world: Node3D, label: String) -> String:
+	if target.is_empty():
+		return "not applied: %s needs an actor" % label
+	var method := {"startcombat": "start_npc_combat", "stopcombat": "stop_npc_combat", "enable": "enable_npc_reference"}[command] as String
+	if not world.has_method(method):
+		return "not applied: %s, the scene has no %s" % [label, method]
+	return "%s: %s" % [label, str(world.call(method, target))]
+
+
 func is_actor_removed(reference_id: int) -> bool:
 	return removed_reference_ids.has(reference_id)
 
@@ -76,7 +93,13 @@ func _apply_action(action: Dictionary, references: Dictionary, world: Node3D, tr
 	match command:
 		"setav", "setfactionreaction", "setessential":
 			_store(target, command, arguments)
+			if command == "setav" and arguments.size() >= 2:
+				var overrides: Dictionary = av_overrides.get(target.to_lower(), {})
+				overrides[str(arguments[0]).to_lower()] = arguments[1]
+				av_overrides[target.to_lower()] = overrides
 			return "applied state: %s" % label
+		"startcombat", "stopcombat", "enable":
+			return _combat_or_enable(command, target, world, label)
 		"moveto":
 			return _move_to(target, arguments, references, world, transform_of, label)
 		"kill", "disable":

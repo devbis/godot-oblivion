@@ -590,7 +590,7 @@ void Esm4Database::build_idle_tree() {
     }
 }
 
-void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t,
+void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, std::uint32_t record_flags,
                                 std::uint32_t active_cell_id, std::uint32_t worldspace_form_id,
                                 bool exterior_grid_context, const std::uint8_t* data, std::size_t data_size) {
     bool is_cell = type == "CELL";
@@ -655,8 +655,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     int race_part_section = -1;
     int race_part_index = -1;
     bool race_part_female = false;
-    if (is_reference)
+    if (is_reference) {
         reference.record_type.assign(type);
+        reference.initially_disabled = (record_flags & 0x0800) != 0;
+    }
     std::string base_editor_id;
     // GMST DATA can precede EDID, so the value is held until the name is known.
     std::optional<float> game_setting_value;
@@ -899,6 +901,11 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             npc.inventory.push_back({u32(value), static_cast<std::int32_t>(u32(value + 4))});
         } else if (tag == "SPLO" && is_npc_base && subrecord_size >= 4) {
             npc.spell_form_ids.push_back(u32(value));
+        } else if (tag == "AIDT" && is_npc_base && subrecord_size >= 2) {
+            npc.aggression = value[0];
+            npc.confidence = value[1];
+        } else if (tag == "SNAM" && is_npc_base && subrecord_size >= 5) {
+            npc.factions.emplace_back(u32(value), static_cast<std::int8_t>(value[4]));
         } else if (tag == "PKID" && is_npc_base && subrecord_size >= 4) {
             npc.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "CTDA" && is_ai_package && subrecord_size >= 24) {
