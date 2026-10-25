@@ -1612,6 +1612,9 @@ func _remove_relocated_actor(reference_id: int) -> void:
 			continue
 		var root := _npc_actors[index].get("root") as Node
 		_npc_actors.remove_at(index)
+		for other: Dictionary in _npc_actors:
+			if other.get("look_target") == root:
+				other["look_target"] = null
 		if is_instance_valid(root):
 			root.queue_free()
 
@@ -4459,7 +4462,7 @@ func _dialogue_face_forward(actor: Dictionary, actor_root: Node3D) -> Vector3:
 	var head_forward := head_forward_vector(skeleton, body_forward, base_rotation)
 	if head_forward.length_squared() < 0.001:
 		return body_forward
-	var gaze_target := actor.get("look_target") as Node3D
+	var gaze_target := _actor_look_target(actor)
 	if not is_instance_valid(gaze_target):
 		gaze_target = player
 	var to_target := _look_target_world_position(gaze_target) - _dialogue_head_position(actor)
@@ -6532,8 +6535,20 @@ func _player_gaze_target_world_position() -> Vector3:
 	return player.global_position + Vector3.UP * 1.45
 
 
+## The node the actor looks at, or null once that node is freed (an actor that left through a door): casting a freed
+## object is an error, so the stale target is dropped here.
+func _actor_look_target(actor: Dictionary) -> Node3D:
+	var target: Variant = actor.get("look_target")
+	if target == null:
+		return null
+	if not is_instance_valid(target):
+		actor["look_target"] = null
+		return null
+	return target as Node3D
+
+
 func _npc_look_target_is_active(actor: Dictionary) -> bool:
-	var target := actor.get("look_target") as Node3D
+	var target := _actor_look_target(actor)
 	var actor_root := actor.get("root") as Node3D
 	if not is_instance_valid(target) or not is_instance_valid(actor_root):
 		return false
@@ -6552,7 +6567,7 @@ func _npc_look_target_is_active(actor: Dictionary) -> bool:
 
 
 func _update_npc_head_look(actor: Dictionary, skeleton: Skeleton3D, delta: float, look_target_active: bool) -> void:
-	var target := actor.get("look_target") as Node3D
+	var target := _actor_look_target(actor)
 	if not look_target_active or not is_instance_valid(target):
 		# The head shows the animation's pose again, so a later look starts from there.
 		actor["look_offset"] = Quaternion.IDENTITY
