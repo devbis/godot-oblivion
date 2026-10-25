@@ -636,7 +636,7 @@ func _watch_combat_animations() -> void:
 	var player_node := _scene_root.get_node_or_null("Player") as Node3D
 	var player_animation := str(_scene_root.get("_active_animation"))
 	var player_time := float(_scene_root.get("_animation_time"))
-	_watch_animation("player", player_animation, player_time, player_node, false, -1, false)
+	_watch_animation("player", player_animation, player_time, player_node, false, -1, false, false)
 	var actor_states: Variant = _scene_root.get("_npc_actors")
 	if not actor_states is Array:
 		return
@@ -693,7 +693,7 @@ func _npc_is_female(base_form_id: int) -> bool:
 
 func _watch_animation(
 	key: String, animation: String, animation_time: float, actor: Node3D, female: bool,
-	weapon_type := -1, swing_sound := false
+	weapon_type := -1, swing_sound := false, effort_sound := true
 ) -> void:
 	var previous: Dictionary = _observed_animations.get(key, {})
 	var started := animation != str(previous.get("name", "")) or animation_time + 0.02 < float(previous.get("time", 0.0))
@@ -702,7 +702,7 @@ func _watch_animation(
 		return
 	if swing_sound and _is_attack_animation(animation):
 		play_weapon_swing(actor, weapon_type)
-	if _is_combat_effort_animation(animation):
+	if effort_sound and _is_combat_effort_animation(animation):
 		play_combat_effort(actor, female)
 
 
