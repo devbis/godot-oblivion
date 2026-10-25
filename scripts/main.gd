@@ -1406,7 +1406,115 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			print("OpenOB quest: " + line)
 		if _needs_route_refresh(result):
 			_refresh_npc_routes()
+		_greet_package_target_actor(actor, package)
 		return
+
+
+## A Find package that reached an actor (Baurus finding the Emperor) ends with the finder's HELLO to that actor.
+func _greet_package_target_actor(actor: Dictionary, package: Dictionary) -> void:
+	if not _package_seeks_actor(package):
+		return
+	var package_id := int(package.get("form_id", 0))
+	if int(actor.get("npc_greeted_package_id", 0)) == package_id:
+		return
+	actor["npc_greeted_package_id"] = package_id
+	var target_id := int(package.get("target_form_id", 0))
+	for candidate: Dictionary in _npc_actors:
+		if int(candidate.get("reference_id", 0)) == target_id:
+			_begin_npc_greeting(actor, candidate)
+			return
+	print("OpenOB npc conversation: %s found %s, which is not loaded, so there is no greeting" % [
+		str(actor.get("reference_name", "NPC")), _package_location_label(target_id)
+	])
+
+const NPC_CONVERSATION_MAX_STEPS := 6
+var _npc_conversation_active := false
+
+## The conversation of two actors, run from their data: the speaker's HELLO line to the listener, then the topics that line
+## links to, each answered by the other actor in turn (the conditions name who speaks to whom), until a goodbye or until
+## no line is eligible. Results (a stage set by a line) apply as lines are spoken.
+func _begin_npc_greeting(speaker: Dictionary, listener: Dictionary) -> void:
+	var speaker_name := str(speaker.get("reference_name", "NPC"))
+	var listener_name := str(listener.get("reference_name", "NPC"))
+	if quest_world == null or _npc_conversation_active or _dialogue_active:
+		print("OpenOB npc conversation: %s to %s skipped (%s)" % [
+			speaker_name, listener_name, "a conversation is running" if _npc_conversation_active or _dialogue_active else "no quest world"
+		])
+		return
+	var hello_id := int(quest_world.find_topic_form_id("HELLO"))
+	if hello_id <= 0:
+		print("OpenOB npc conversation: the data has no HELLO topic")
+		return
+	_npc_conversation_active = true
+	set_npc_look_target(speaker_name, listener_name)
+	set_npc_look_target(listener_name, speaker_name)
+	var topic_ids: Array = [hello_id]
+	var first := speaker
+	var second := listener
+	var spoke := false
+	for _step in range(NPC_CONVERSATION_MAX_STEPS):
+		var line := _select_npc_conversation_line(topic_ids, first, second)
+		if line.is_empty():
+			if not spoke:
+				print("OpenOB npc conversation: %s has no HELLO line for %s (no response is eligible)" % [speaker_name, listener_name])
+			else:
+				print("OpenOB npc conversation: %s has no answer for %s among topics %s; the conversation ends" % [
+					str(first.get("reference_name", "NPC")), str(second.get("reference_name", "NPC")), str(topic_ids)
+				])
+			break
+		spoke = true
+		await _speak_npc_conversation_line(first, line)
+		var ends := (int(line.get("reply_flags", 0)) & DIALOGUE_REPLY_FLAG_GOODBYE) != 0
+		topic_ids = line.get("topic_links", [])
+		var other := first
+		first = second
+		second = other
+		if ends or topic_ids.is_empty() or not is_instance_valid(first.get("root")) or not is_instance_valid(second.get("root")):
+			break
+	_npc_conversation_active = false
+
+## The first of the topics that has an eligible response for this speaker and listener, with its result applied; {} if none.
+func _select_npc_conversation_line(topic_ids: Array, speaker: Dictionary, listener: Dictionary) -> Dictionary:
+	var listener_base := int(listener.get("base_form_id", 0))
+	var listener_npc: Dictionary = data_reader.find_npc_base(listener_base)
+	var race_id := int(listener_npc.get("race_form_id", 0))
+	var race := str(data_reader.find_editor_id(race_id)) if race_id > 0 else ""
+	_sync_player_actor_values_to_quest_world()
+	for topic_value: Variant in topic_ids:
+		var result: Dictionary = quest_world.select_dialog_topic(
+			int(topic_value), int(speaker.get("base_form_id", 0)), listener_base, race,
+			bool(listener_npc.get("female", false)), Callable(self, "_quest_distance")
+		)
+		if not bool(result.get("success", false)):
+			continue
+		_suppress_scripted_dialogue_presentation = true
+		var report := _apply_driver_result(result)
+		_suppress_scripted_dialogue_presentation = false
+		for report_line: String in report:
+			print("OpenOB npc conversation: " + report_line)
+		if _needs_route_refresh(result):
+			_refresh_npc_routes()
+		return result
+	return {}
+
+func _speak_npc_conversation_line(speaker: Dictionary, line: Dictionary) -> void:
+	var speaker_base := int(speaker.get("base_form_id", 0))
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	var lines: Array = line.get("response_lines", [])
+	for response_value: Variant in lines:
+		var response: Dictionary = response_value
+		var text := str(response.get("text", "")).strip_edges()
+		print("OpenOB npc conversation: %s says: %s" % [str(speaker.get("reference_name", "NPC")), text])
+		var duration := 0.0
+		if audio_manager != null and audio_manager.has_method("play_dialogue"):
+			duration = float(audio_manager.call(
+				"play_dialogue", data_reader, self, speaker_base, str(line.get("quest_editor_id", "")),
+				str(line.get("topic_editor_id", "")), int(line.get("reply_form_id", 0)),
+				quest_bridge._dialogue_face_expression(int(response.get("emotion_type", 0))),
+				clampf(float(response.get("emotion_value", 0)) / 100.0, 0.0, 1.0), int(response.get("line_number", 1))
+			))
+		present_scripted_speech_line(speaker_base, str(speaker.get("npc_editor_id", "")), text, duration)
+		await get_tree().create_timer(maxf(duration, maxf(1.2, float(text.length()) / 14.0)) + 0.15).timeout
 
 
 ## Use Item At packages first route the actor to their authored location, then activate their target reference.

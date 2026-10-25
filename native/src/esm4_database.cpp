@@ -129,6 +129,8 @@ QuestCondition parse_condition(const std::uint8_t* value, std::size_t size) {
     condition.parameter1 = u32(value + 12);
     condition.parameter2 = u32(value + 16);
     if (size >= 24) condition.run_on = u32(value + 20);
+    // TES4 marks "run on target" in the type byte (bit 0x02): the condition is about the listener, not the speaker.
+    if ((condition.operator_code & 0x02) != 0) condition.run_on = 1;
     if ((condition.operator_code & 0x04) != 0) {
         condition.comparison_is_global = true;
         condition.comparison_global_form_id = u32(value + 4);

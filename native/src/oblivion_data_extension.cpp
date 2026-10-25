@@ -1274,6 +1274,12 @@ public:
         return result;
     }
 
+    // The form ID of a dialogue topic by its editor ID (HELLO, GOODBYE, ...), 0 when the data has none.
+    int64_t find_topic_form_id(const String& editor_id) const {
+        const auto* topic = game_ ? game_->find_topic_by_editor_id(utf8_value(editor_id)) : nullptr;
+        return topic ? static_cast<int64_t>(topic->form_id) : 0;
+    }
+
     Dictionary select_dialog_topic(int64_t topic_form_id, int64_t speaker_base, int64_t listener_base,
                                    const String& listener_race, bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
@@ -1395,6 +1401,7 @@ public:
                              &OblivionQuestWorld::begin_dialogue);
         ClassDB::bind_method(D_METHOD("available_dialog_topics", "speaker_base", "listener_base", "listener_race", "listener_female"),
                              &OblivionQuestWorld::available_dialog_topics);
+        ClassDB::bind_method(D_METHOD("find_topic_form_id", "editor_id"), &OblivionQuestWorld::find_topic_form_id);
         ClassDB::bind_method(D_METHOD("select_dialog_topic", "topic_form_id", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),
                              &OblivionQuestWorld::select_dialog_topic);
         ClassDB::bind_method(D_METHOD("set_player_actor_values", "values"), &OblivionQuestWorld::set_player_actor_values);
