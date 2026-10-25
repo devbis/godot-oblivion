@@ -5,6 +5,7 @@ const START_MARKER_EDITOR_ID := "CGPlayerStartMarker"
 const START_MARKER_FORM_ID := 0x00032AB5
 const PLAYER_REFERENCE_FORM_ID := 0x00000014
 const AI_PACKAGE_TYPE_AMBUSH := 9
+const AI_PACKAGE_TYPE_FIND := 0
 const AI_PACKAGE_TYPE_FOLLOW := 1
 const AI_PACKAGE_TYPE_USE_ITEM_AT := 8
 const AI_PACKAGE_TARGET_REFERENCE := 0
@@ -867,7 +868,8 @@ func _update_dynamic_target_routes() -> void:
 		var follows_player := destination_form_id == PLAYER_REFERENCE_FORM_ID
 		var follows_actor := _is_dynamic_follow_package(package)
 		var uses_target := int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT
-		if (not follows_player and not follows_actor and not uses_target) or bool(actor.get("package_done", false)):
+		var seeks_actor := _package_seeks_actor(package)
+		if (not follows_player and not follows_actor and not uses_target and not seeks_actor) or bool(actor.get("package_done", false)):
 			continue
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")):
@@ -1526,6 +1528,15 @@ func _is_dynamic_follow_package(package: Dictionary) -> bool:
 		and int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE
 
 
+## A Find package whose target is an actor goes to wherever that actor is (CGBaurusToEmperor), not to the spot it was
+## placed at; it ends on arrival, unlike Follow.
+func _package_seeks_actor(package: Dictionary) -> bool:
+	if int(package.get("package_type", -1)) != AI_PACKAGE_TYPE_FIND or int(package.get("location_form_id", 0)) != 0 \
+			or int(package.get("target_type", -1)) != AI_PACKAGE_TARGET_REFERENCE:
+		return false
+	var target := _placed_reference_by_form_id(int(package.get("target_form_id", 0)))
+	return str(target.get("record_type", "")) == "ACHR"
+
 func _npc_reference_position(reference_form_id: int) -> Variant:
 	for actor: Dictionary in _npc_actors:
 		if int(actor.get("reference_id", 0)) != reference_form_id:
@@ -1540,8 +1551,10 @@ func _package_destination_position(package: Dictionary) -> Variant:
 	var destination_form_id := _package_destination_form_id(package)
 	if destination_form_id == PLAYER_REFERENCE_FORM_ID:
 		return player.global_position
-	if _is_dynamic_follow_package(package):
-		return _npc_reference_position(destination_form_id)
+	if _is_dynamic_follow_package(package) or _package_seeks_actor(package):
+		var actor_position: Variant = _npc_reference_position(destination_form_id)
+		if actor_position != null or _is_dynamic_follow_package(package):
+			return actor_position
 	return _location_position(destination_form_id)
 
 
