@@ -9,29 +9,34 @@ const ROOT_NAME := "ActorRagdoll"
 const BODY_LAYER := 16
 const BODY_MASK := 3
 const LIMB_FRICTION := 0.8
-const LINEAR_DAMP := 0.15
-const ANGULAR_DAMP := 2.5
+const LINEAR_DAMP := 0.3
+const ANGULAR_DAMP := 6.0
 ## The skinned meshes stretch far from the actor's origin: their culling bounds grow by this much (game units).
 const CULL_MARGIN := 400.0
 const HEAD_LENGTH_M := 0.2
 const MIN_CAPSULE_EXTRA_M := 0.02
-const MAX_FLEX := 2.4
+const MAX_FLEX := 1.5
 const MAX_LAUNCH_SPEED_MPS := 6.0
+## A walker that passes through a limb moves it along: an acceleration (m/s^2) per m/s of walking speed.
+const NUDGE_ACCELERATION_PER_MPS := 3.0
+const NUDGE_MIN_SPEED_MPS := 0.3
+const NUDGE_REACH_M := 2.5
 
 ## One rigid segment per entry: it runs from `bone` to `end` (empty: it carries on away from its parent), hangs on
 ## `parent` through a cone-twist joint at `bone`'s origin (or a hinge that bends towards `flex`: +1 the way the actor
-## faces, -1 the way it does not). Masses add up to about 70 kg.
+## faces, -1 the way it does not). Masses add up to about 70 kg. The limits are narrow and the damping high: a corpse
+## is stiff.
 const SEGMENTS: Array[Dictionary] = [
 	{"bone": "Bip01 Pelvis", "end": "Bip01 Spine1", "radius": 0.14, "mass": 14.0},
-	{"bone": "Bip01 Spine1", "end": "Bip01 Neck", "radius": 0.17, "mass": 16.0, "parent": "Bip01 Pelvis", "swing": 0.5, "twist": 0.35},
-	{"bone": "Bip01 Head", "end": "", "radius": 0.11, "mass": 5.0, "parent": "Bip01 Spine1", "swing": 0.8, "twist": 0.7},
-	{"bone": "Bip01 L UpperArm", "end": "Bip01 L Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
+	{"bone": "Bip01 Spine1", "end": "Bip01 Neck", "radius": 0.17, "mass": 16.0, "parent": "Bip01 Pelvis", "swing": 0.30, "twist": 0.21},
+	{"bone": "Bip01 Head", "end": "", "radius": 0.11, "mass": 5.0, "parent": "Bip01 Spine1", "swing": 0.48, "twist": 0.42},
+	{"bone": "Bip01 L UpperArm", "end": "Bip01 L Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 0.90, "twist": 0.54},
 	{"bone": "Bip01 L Forearm", "end": "Bip01 L Hand", "radius": 0.05, "mass": 1.5, "parent": "Bip01 L UpperArm", "flex": 1.0},
-	{"bone": "Bip01 R UpperArm", "end": "Bip01 R Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
+	{"bone": "Bip01 R UpperArm", "end": "Bip01 R Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 0.90, "twist": 0.54},
 	{"bone": "Bip01 R Forearm", "end": "Bip01 R Hand", "radius": 0.05, "mass": 1.5, "parent": "Bip01 R UpperArm", "flex": 1.0},
-	{"bone": "Bip01 L Thigh", "end": "Bip01 L Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
+	{"bone": "Bip01 L Thigh", "end": "Bip01 L Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 0.66, "twist": 0.21},
 	{"bone": "Bip01 L Calf", "end": "Bip01 L Foot", "radius": 0.07, "mass": 4.0, "parent": "Bip01 L Thigh", "flex": -1.0},
-	{"bone": "Bip01 R Thigh", "end": "Bip01 R Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
+	{"bone": "Bip01 R Thigh", "end": "Bip01 R Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 0.66, "twist": 0.21},
 	{"bone": "Bip01 R Calf", "end": "Bip01 R Foot", "radius": 0.07, "mass": 4.0, "parent": "Bip01 R Thigh", "flex": -1.0},
 ]
 
@@ -171,6 +176,45 @@ static func update(rig: Dictionary) -> void:
 		# The skeleton carries the game-unit scale; the pose must not.
 		pose.basis = pose.basis.orthonormalized()
 		skeleton.set_bone_global_pose(int(bone.index), pose)
+
+## The walker (the player) passes through the bodies, but pushes the ones it passes through: a gentle shove along its
+## walk, away from its axis, so a corpse stirs rather than blocks. Call it every physics frame.
+static func nudge(rig: Dictionary, walker: CharacterBody3D, walker_radius: float, walker_height: float) -> void:
+	var horizontal := Vector3(walker.velocity.x, 0.0, walker.velocity.z)
+	var speed := horizontal.length()
+	if speed < NUDGE_MIN_SPEED_MPS:
+		return
+	var bones: Array = rig.get("bones", [])
+	if bones.is_empty():
+		return
+	var first := (bones[0] as Dictionary).get("body") as RigidBody3D
+	if not is_instance_valid(first) or first.global_position.distance_to(walker.global_position) > NUDGE_REACH_M:
+		return
+	var feet := walker.global_position
+	var axis_from := feet + Vector3.UP * walker_radius
+	var axis_to := feet + Vector3.UP * maxf(walker_height - walker_radius, walker_radius)
+	var walk_direction := horizontal / speed
+	for bone_value: Variant in bones:
+		var body := (bone_value as Dictionary).get("body") as RigidBody3D
+		if not is_instance_valid(body) or body.get_child_count() == 0:
+			continue
+		var shape := body.get_child(0) as CollisionShape3D
+		var capsule := shape.shape as CapsuleShape3D
+		if capsule == null:
+			continue
+		var half := maxf(capsule.height * 0.5 - capsule.radius, 0.0)
+		var limb_axis := body.global_basis * shape.transform.basis * Vector3.UP
+		var limb_center := body.global_transform * shape.transform.origin
+		var closest := Geometry3D.get_closest_points_between_segments(
+			axis_from, axis_to, limb_center - limb_axis * half, limb_center + limb_axis * half
+		)
+		var offset: Vector3 = closest[1] - closest[0]
+		offset.y = 0.0
+		if offset.length() > walker_radius + capsule.radius:
+			continue
+		var away := offset.normalized() if offset.length() > 0.001 else walk_direction
+		var direction := (walk_direction + away * 0.5).normalized()
+		body.apply_force(direction * body.mass * NUDGE_ACCELERATION_PER_MPS * speed, closest[1] - body.global_position)
 
 static func _segment_end_world(skeleton: Skeleton3D, to_world: Transform3D, segment: Dictionary) -> Variant:
 	var end_index := skeleton.find_bone(str(segment.end)) if not str(segment.end).is_empty() else -1

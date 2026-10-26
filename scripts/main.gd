@@ -411,6 +411,16 @@ func _make_exterior_environment() -> Environment:
 	environment.ambient_light_energy = 0.4
 	return environment
 
+## The player walking through a corpse moves its limbs (see ActorRagdoll.nudge).
+func _nudge_corpses() -> void:
+	var collision := player.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	var capsule := collision.shape as CapsuleShape3D if collision != null else null
+	if capsule == null:
+		return
+	for actor: Dictionary in _npc_actors:
+		if actor.has("ragdoll"):
+			ActorRagdoll.nudge(actor.ragdoll, player, capsule.radius, capsule.height)
+
 func _set_cell_environment(cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
@@ -760,6 +770,7 @@ func _log_runtime_spawn_positions() -> void:
 
 func _physics_process(delta: float) -> void:
 	physics_grabber.physics_update(delta)
+	_nudge_corpses()
 	if not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition and not player.face_preview_enabled:
 		_aimed_target = targeting.acquire()
 	else:
