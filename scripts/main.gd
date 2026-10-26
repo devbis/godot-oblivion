@@ -1109,7 +1109,7 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	var reference_name := str(actor.get("reference_name", ""))
 	var base_form_id := int(actor.get("base_form_id", 0))
 	quest_world.set_reference_base(reference_name, base_form_id)
-	if not quest_world.add_actor(base_form_id, reference_name):
+	if not quest_world.add_actor(base_form_id, reference_name) and not bool(actor.get("creature", false)):
 		push_warning("OpenOB quest: no GameMode script for actor %s" % reference_name)
 	# A MoveTo issued before this actor was streamed in applies now.
 	var pending_move: Variant = quest_bridge.take_pending_move(int(actor.get("reference_id", 0)))
@@ -1126,16 +1126,20 @@ func _register_quest_actor(actor: Dictionary) -> void:
 		_start_npc_idle(actor, str(pending.path), str(pending.idle_id))
 
 
+## Placed actors are ACHR (NPC_ bases) and ACRE (CREA bases, the creatures).
+func _is_actor_reference(reference: Dictionary) -> bool:
+	return str(reference.get("record_type", "")) in ["ACHR", "ACRE"]
+
 func _register_cell_npc_references(cell: Dictionary) -> void:
 	if quest_world == null or data_reader == null:
 		return
 	for reference_value: Variant in cell.get("references", []):
 		var reference: Dictionary = reference_value
-		if str(reference.get("record_type", "")) != "ACHR":
+		if not _is_actor_reference(reference):
 			continue
 		var reference_name := str(reference.get("reference_name", "")).strip_edges()
 		var base_form_id := int(reference.get("base_form_id", 0))
-		if reference_name.is_empty() or str(data_reader.find_record_type(base_form_id)) != "NPC_":
+		if reference_name.is_empty() or not str(data_reader.find_record_type(base_form_id)) in ["NPC_", "CREA"]:
 			continue
 		quest_world.set_reference_base(reference_name, base_form_id)
 
@@ -1535,8 +1539,11 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 			str(package.get("editor_id", "")),
 			_package_location_label(destination_form_id),
 		])
-		if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT \
-				and not bool(actor.get("package_target_activated", false)):
+		# A creature has no hands: its Find package for an object (the rats at the prison wall) activates it on arrival.
+		var activates_target := int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT \
+			or (bool(actor.get("creature", false)) and int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_FIND \
+				and int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE)
+		if activates_target and not bool(actor.get("package_target_activated", false)):
 			actor["package_target_activated"] = true
 			_activate_ai_package_target(actor, package)
 		_sync_player_actor_values_to_quest_world()
@@ -5684,6 +5691,18 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	var head_basis := _player_skeleton.get_bone_global_rest(head_bone_index).basis
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
+## Radius and height (metres) of the body of a creature, from the extent of its skeleton at rest.
+func _creature_capsule_size(skeleton: Skeleton3D, base_scale: float) -> Vector2:
+	var low := Vector3(INF, INF, INF)
+	var high := Vector3(-INF, -INF, -INF)
+	for bone_index in range(skeleton.get_bone_count()):
+		var origin := skeleton.get_bone_global_rest(bone_index).origin * game_units_to_meters * base_scale
+		low = low.min(origin)
+		high = high.max(origin)
+	var extent := high - low
+	var radius := clampf(minf(extent.x, extent.z) * 0.5, 0.1, 0.6)
+	return Vector2(radius, maxf(extent.y + 0.1, radius * 2.0 + 0.02))
+
 func _initial_actor_health(npc: Dictionary) -> Dictionary:
 	# The record's base health plus the endurance share (fNPCAttributeHealthMult; how the original combines them is not traced).
 	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
@@ -5709,7 +5728,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 	var grounded_actor_count := 0
 	for reference_value: Variant in cell.get("references", []):
 		var reference: Dictionary = reference_value
-		if str(reference.get("record_type", "")) != "ACHR":
+		if not _is_actor_reference(reference):
 			continue
 		var reference_id := int(reference.get("form_id", 0))
 		if target_reference_id >= 0 and reference_id != target_reference_id:
@@ -5723,13 +5742,27 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 				continue
 			if _actor_reference_transform(reference).origin.distance_to(player.global_position) > EXTERIOR_REFERENCE_RENDER_DISTANCE:
 				continue
-		var npc: Dictionary = data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
+		var is_creature := str(reference.get("record_type", "")) == "ACRE"
+		var npc: Dictionary = data_reader.find_creature_base(int(reference.get("base_form_id", 0))) if is_creature \
+			else data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
 		if npc.is_empty():
 			continue
 		# An actor a script killed or disabled stays that way when its cell is loaded again.
 		if quest_bridge.is_actor_removed(reference_id):
 			_npc_loaded_reference_ids[reference_id] = true
 			continue
+		# A creature's body is sized from its own skeleton, which is read before the actor is added.
+		var creature_skeleton: Skeleton3D = null
+		if is_creature:
+			var creature_model := str(npc.get("model_path", ""))
+			await assets.meshes_for_model(creature_model)
+			if stream_generation != _npc_stream_generation:
+				return
+			var creature_metadata: Dictionary = assets.nif_metadata_cache.get(creature_model.to_lower().replace("\\", "/"), {})
+			creature_skeleton = ActorFactory.build_skeleton(creature_metadata.get("nodes", []))
+			if creature_skeleton == null:
+				push_warning("OpenOB creature %s: no skeleton in %s" % [str(npc.get("editor_id", "")), creature_model])
+				continue
 		var actor_root := CharacterBody3D.new()
 		actor_root.set_script(NpcRouteController)
 		var actor_name := str(reference.get("reference_name", "")).strip_edges()
@@ -5760,7 +5793,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		actor_capsule.radius = 0.18
 		var player_collision := player.get_node_or_null("CollisionShape3D") as CollisionShape3D
 		var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
-		if player_capsule != null:
+		if creature_skeleton != null:
+			var creature_size := _creature_capsule_size(creature_skeleton, float(npc.get("base_scale", 1.0)))
+			actor_capsule.radius = creature_size.x
+			actor_capsule.height = creature_size.y
+		elif player_capsule != null:
 			actor_capsule.height = player_capsule.height
 		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
@@ -5775,35 +5812,49 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		avatar.name = "OriginalActor"
 		avatar.scale = Vector3.ONE * game_units_to_meters
 		actor_root.add_child(avatar)
-		var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
-		var skeleton := ActorFactory.build_skeleton(skeleton_metadata.get("nodes", []))
+		var skeleton := creature_skeleton
+		if not is_creature:
+			var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
+			skeleton = ActorFactory.build_skeleton(skeleton_metadata.get("nodes", []))
 		if skeleton == null:
 			_discard_pending_npc(actor_root)
 			continue
 		avatar.add_child(skeleton)
-		_align_avatar_to_floor_origin(avatar, skeleton)
-		var equipment_head_model_path := actors.npc_head_model_path(npc)
-		_register_player_face_profile(npc, equipment_head_model_path)
-		var assembled: Dictionary = await actors.assemble_npc_model(
-			avatar, skeleton, npc, func() -> bool: return stream_generation == _npc_stream_generation
-		)
-		if assembled.is_empty():
-			_discard_pending_npc(actor_root)
-			return
-		var face_meshes: Array[MeshInstance3D] = assembled["face_meshes"]
-		var attached_item_names: Array[String] = assembled["attached_item_names"]
-		print("OpenOB attached equipment to %s: %s" % [actor_name, str(attached_item_names)])
-		await assets.meshes_for_model(PLAYER_IDLE_KF)
-		await assets.meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
-		await assets.meshes_for_model(PLAYER_FAST_FORWARD_KF)
-		if stream_generation != _npc_stream_generation:
-			_discard_pending_npc(actor_root)
-			return
-		var animations := {
-			"Idle": _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE, skeleton),
-			"Forward": _animation_sequence(PLAYER_DIRECTIONAL_KFS["Forward"][0], "Forward", skeleton),
-			"FastForward": _animation_sequence(PLAYER_FAST_FORWARD_KF, "FastForward", skeleton),
-		}
+		var face_meshes: Array[MeshInstance3D] = []
+		var assembled: Dictionary = {}
+		var animations := {}
+		if is_creature:
+			var creature_ok: bool = await actors.assemble_creature_model(
+				avatar, skeleton, npc, func() -> bool: return stream_generation == _npc_stream_generation
+			)
+			if not creature_ok:
+				_discard_pending_npc(actor_root)
+				return
+			print("OpenOB assembled creature %s (%s) from %s" % [actor_name, str(npc.get("editor_id", "")), str(npc.get("model_path", ""))])
+		else:
+			_align_avatar_to_floor_origin(avatar, skeleton)
+			var equipment_head_model_path := actors.npc_head_model_path(npc)
+			_register_player_face_profile(npc, equipment_head_model_path)
+			assembled = await actors.assemble_npc_model(
+				avatar, skeleton, npc, func() -> bool: return stream_generation == _npc_stream_generation
+			)
+			if assembled.is_empty():
+				_discard_pending_npc(actor_root)
+				return
+			face_meshes = assembled["face_meshes"]
+			var attached_item_names: Array[String] = assembled["attached_item_names"]
+			print("OpenOB attached equipment to %s: %s" % [actor_name, str(attached_item_names)])
+			await assets.meshes_for_model(PLAYER_IDLE_KF)
+			await assets.meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
+			await assets.meshes_for_model(PLAYER_FAST_FORWARD_KF)
+			if stream_generation != _npc_stream_generation:
+				_discard_pending_npc(actor_root)
+				return
+			animations = {
+				"Idle": _animation_sequence(PLAYER_IDLE_KF, PLAYER_IDLE_SEQUENCE, skeleton),
+				"Forward": _animation_sequence(PLAYER_DIRECTIONAL_KFS["Forward"][0], "Forward", skeleton),
+				"FastForward": _animation_sequence(PLAYER_FAST_FORWARD_KF, "FastForward", skeleton),
+			}
 		var expression_cycle := _available_face_expression_cycle(face_meshes)
 		# The route comes from the NPC's package for the quest stage (see _refresh_npc_routes).
 		var no_route: Array[Dictionary] = []
@@ -5819,6 +5870,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"reference_name": actor_reference_name,
 			"base_form_id": int(reference.get("base_form_id", 0)),
 			"npc_editor_id": str(npc.get("editor_id", "")),
+			"creature": is_creature,
+			# The folder the actor's clips come from: a creature has its own next to its skeleton.
+			"animation_root": str(npc.get("model_path", "")).replace("\\", "/").get_base_dir() + "/" if is_creature else "",
 			"root": actor_root,
 			"skeleton": skeleton,
 			"face_meshes": face_meshes,
@@ -5863,6 +5917,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		}
 		_npc_actors.push_back(actor_state)
 		_register_quest_actor(actor_state)
+		if is_creature:
+			_request_npc_animation(actor_state, "Idle")
 		# NPCs stream in after the quest started, so they pick up their package route here.
 		_refresh_actor_route(actor_state)
 		_npc_pending_roots.erase(actor_root)
@@ -5938,7 +5994,7 @@ func _update_npc_streaming() -> void:
 	var selected_priority := INF
 	for reference_value: Variant in current_cell.get("references", []):
 		var reference: Dictionary = reference_value
-		if str(reference.get("record_type", "")) != "ACHR":
+		if not _is_actor_reference(reference):
 			continue
 		var reference_id := int(reference.get("form_id", 0))
 		if _npc_loaded_reference_ids.has(reference_id) or _actor_reference_disabled(reference):
@@ -5947,7 +6003,9 @@ func _update_npc_streaming() -> void:
 			continue
 		var position := _actor_reference_transform(reference).origin
 		var distance_to_player := position.distance_to(player.global_position)
-		var is_near := distance_to_player <= NPC_NEAR_LOAD_DISTANCE
+		# An actor a script enabled is part of a scene (the rats that push the prison wall): it appears at once.
+		var is_near := distance_to_player <= NPC_NEAR_LOAD_DISTANCE \
+			or (bool(reference.get("initially_disabled", false)) and _enabled_reference_ids.has(reference_id))
 		var is_visible := (
 			camera != null
 			and distance_to_player <= visible_distance
@@ -6290,7 +6348,10 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 		return
 	var asset_path := "Characters/_male/" + clip_name + ".kf"
 	var sequence_name := ""
-	if NPC_MOVEMENT_KFS.has(clip_name):
+	var animation_root := str(actor.get("animation_root", ""))
+	if not animation_root.is_empty():
+		asset_path = animation_root + clip_name.to_lower() + ".kf"
+	elif NPC_MOVEMENT_KFS.has(clip_name):
 		var info: Array = NPC_MOVEMENT_KFS[clip_name]
 		asset_path = str(info[0])
 		sequence_name = str(info[1])

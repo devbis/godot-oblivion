@@ -177,6 +177,45 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		"weapon_form_id": weapon_form_id, "weapon_meshes": weapon_meshes,
 	}
 
+## A creature is its skeleton with the skinned parts its record lists (NIFZ) attached; false when the cell was left.
+func assemble_creature_model(avatar: Node3D, skeleton: Skeleton3D, creature: Dictionary, is_current: Callable) -> bool:
+	# NIFZ names the parts by file name, next to the skeleton.
+	var model_folder := str(creature.get("model_path", "")).replace("\\", "/").get_base_dir()
+	for part_name: String in creature.get("body_part_paths", PackedStringArray()):
+		var part_path := part_name if part_name.contains("/") or part_name.contains("\\") else model_folder + "/" + part_name
+		var part_meshes: Array = await assets.meshes_for_model(part_path)
+		if not is_current.call() or not is_instance_valid(skeleton):
+			return false
+		# A part without skin weights (a skull, eyes, horns) is local to the bone it belongs to; its NIF node is named
+		# after the part, not the bone, so the bone is chosen by what the part is.
+		var attach_bone := ""
+		var model_space := false
+		for mesh_entry: Dictionary in part_meshes:
+			if not (mesh_entry.get("bone_names", []) as Array).is_empty():
+				continue
+			attach_bone = _creature_part_bone(skeleton, str(mesh_entry.get("parent_node_name", "")) + " " + part_path.get_file())
+			# Vertices at the bone's own height are in model space; those near the origin are local to the bone.
+			model_space = (mesh_entry.mesh as ArrayMesh).get_aabb().get_center().length() > 50.0
+			break
+		if not attach_bone.is_empty():
+			print("OpenOB creature part %s hangs on %s (%s)" % [part_path, attach_bone, "model space" if model_space else "bone space"])
+		await add_actor_model(avatar, skeleton, part_path, attach_bone, PackedByteArray(), {}, model_space, "", "", "", not model_space and not attach_bone.is_empty())
+	return true
+
+func _creature_part_bone(skeleton: Skeleton3D, part_name: String) -> String:
+	var lowered := part_name.to_lower()
+	var candidates: Array[String] = []
+	for head_word: String in ["head", "skull", "eye", "whisker", "horn", "cap", "helm", "hat", "jaw", "ear", "tongue"]:
+		if lowered.contains(head_word):
+			candidates = ["Bip01 Head", "Bip01 Skull"]
+			break
+	if candidates.is_empty() and (lowered.contains("bag") or lowered.contains("pack")):
+		candidates = ["Bip01 Spine1", "Bip01 Spine"]
+	for candidate: String in candidates:
+		if skeleton.find_bone(candidate) >= 0:
+			return candidate
+	return ""
+
 func npc_head_model_path(npc: Dictionary) -> String:
 	var race_head_parts: Array = npc.get("race_head_parts", [])
 	if not race_head_parts.is_empty():
