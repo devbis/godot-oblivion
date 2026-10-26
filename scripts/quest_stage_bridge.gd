@@ -346,6 +346,12 @@ func _play_group(target: String, arguments: Array, references: Dictionary, world
 	if reference.is_empty():
 		return "not applied: %s, %s is not in this cell" % [label, target]
 	var reference_id := int(reference.get("form_id", 0))
+	# A physics object with an animation of its own (the crumbling wall) collapses by it.
+	if world.has_method("has_physics_group") and bool(world.call("has_physics_group", reference_id)):
+		var collapse := str(world.call("play_physics_group", reference_id, str(arguments[0])))
+		if collapse.is_empty():
+			return "not applied: %s has no physics animation group '%s' to play" % [label, str(arguments[0])]
+		return "applied: %s (%s collapse)" % [label, collapse]
 	var animation_player := _reference_animation_player(reference_id, world)
 	var sequence_name := _reference_animation_name(animation_player, str(arguments[0]))
 	if animation_player == null or sequence_name.is_empty():
@@ -515,6 +521,9 @@ func _references_by_name(cell: Dictionary) -> Dictionary:
 	for reference_value: Variant in cell.get("references", []):
 		var reference: Dictionary = reference_value
 		var name := str(reference.get("reference_name", ""))
-		if not name.is_empty() and not result.has(name):
+		if name.is_empty():
+			# A reference without an editor id is called by its form id, as the scene does for the target of a script.
+			name = "0x%08X" % int(reference.get("form_id", 0))
+		if not result.has(name):
 			result[name] = reference
 	return result

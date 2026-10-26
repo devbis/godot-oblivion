@@ -23,6 +23,7 @@ const AnimationSampling := preload("res://scripts/animation_sampling.gd")
 const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
 const NpcCombat := preload("res://scripts/npc_combat.gd")
 const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
+const PhysicsCollapse := preload("res://scripts/physics_collapse.gd")
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
@@ -44,6 +45,8 @@ const COMBAT_DAMAGE_SETTINGS := {
 	"fHandFatigueDamageMult": 0.5, "fHandFatigueDamageBase": 1.0, "fNPCAttributeHealthMult": 0.5,
 	"fFatigueBase": 1.0, "fFatigueMult": 0.5,
 }
+## Executable defaults used by NPC combat when the installed ESM does not override them.
+const NPC_COMBAT_SETTINGS := {"iAIDefaultPowerAttackChance": 25.0}
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
@@ -300,6 +303,8 @@ var _player_combat_stances_loaded: Dictionary = {}
 var _player_combat_available_clips: Dictionary = {}
 var _arms: FirstPersonArms
 var _npc_combat: NpcCombat
+## Physics objects held in place until a script plays their NIF animation (the crumbling wall by the prison gate).
+var _physics_collapse := PhysicsCollapse.new()
 var _next_attack_left := false
 var _arrow_source_meshes: Array = []
 var _pending_cast: Dictionary = {}
@@ -420,6 +425,13 @@ func _nudge_corpses() -> void:
 	for actor: Dictionary in _npc_actors:
 		if actor.has("ragdoll"):
 			ActorRagdoll.nudge(actor.ragdoll, player, capsule.radius, capsule.height)
+
+## PlayGroup on a reference that is a physics object (see _physics_collapse): the animation group starts its collapse.
+func play_physics_group(reference_id: int, group_name: String) -> String:
+	return _physics_collapse.play(reference_id, group_name, self)
+
+func has_physics_group(reference_id: int) -> bool:
+	return _physics_collapse.has_reference(reference_id)
 
 func _set_cell_environment(cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
@@ -624,6 +636,8 @@ func _initialize_player_game_state() -> void:
 		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, 0.0)
 	for setting_name: String in COMBAT_DAMAGE_SETTINGS:
 		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, float(COMBAT_DAMAGE_SETTINGS[setting_name]))
+	for setting_name: String in NPC_COMBAT_SETTINGS:
+		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, float(NPC_COMBAT_SETTINGS[setting_name]))
 	_player_actor_values.configure_game_settings(_player_game_settings)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
@@ -770,6 +784,7 @@ func _log_runtime_spawn_positions() -> void:
 
 func _physics_process(delta: float) -> void:
 	physics_grabber.physics_update(delta)
+	_physics_collapse.physics_update(delta)
 	_nudge_corpses()
 	if not _world_loading and not _inventory_open and not _dialogue_active and not _dialogue_exit_transition and not player.face_preview_enabled:
 		_aimed_target = targeting.acquire()
@@ -2160,10 +2175,19 @@ func _load_cell_geometry(
 			if not physics_result.is_empty():
 				if is_pickup_item:
 					_register_imported_physics_pickup(reference, base_form_id, base_type, reference_transform, physics_result)
-			for body_value: Variant in physics_result.get("dynamic_bodies", []):
-				var dynamic_body := body_value as RigidBody3D
-				if is_instance_valid(dynamic_body):
-					pending_dynamic_bodies.push_back(dynamic_body)
+			# A model that carries an animation of its own (the bricks of a wall that slide apart) stays frozen until a
+			# script plays it on the reference.
+			var held_by_script := not physics_result.is_empty() and has_nif_animations and not is_pickup_item
+			if held_by_script:
+				_physics_collapse.register(
+					int(reference.get("form_id", 0)), physics_result.get("bodies_by_node", {}), animation_sequences,
+					reference_transform
+				)
+			else:
+				for body_value: Variant in physics_result.get("dynamic_bodies", []):
+					var dynamic_body := body_value as RigidBody3D
+					if is_instance_valid(dynamic_body):
+						pending_dynamic_bodies.push_back(dynamic_body)
 			if not physics_result.is_empty():
 				instance_count += int(physics_result.get("mesh_count", 0))
 				collision_count += int(physics_result.get("body_count", 0))
@@ -3052,12 +3076,18 @@ func _instantiate_imported_nif_physics(
 	print("OpenOB imported original Havok NIF physics: %s (%d bodies, %d dynamic, %d ragdoll joints; largest initial anchor mismatch %.4fm)" % [
 		model_path.get_file(), body_count, dynamic_count, constraints.size(), largest_initial_anchor_error
 	])
+	var bodies_by_node: Dictionary = {}
+	for body_name: Variant in body_nodes.keys():
+		var rigid := (body_nodes[body_name] as Dictionary).get("node") as RigidBody3D
+		if rigid != null:
+			bodies_by_node[body_name] = rigid
 	return {
 		"body_count": body_count,
 		"mesh_count": mesh_count,
 		"physics_root": physics_root,
 		"mesh_instances": visual_mesh_instances,
 		"dynamic_bodies": dynamic_bodies,
+		"bodies_by_node": bodies_by_node,
 	}
 
 ## A Havok limited hinge: the bodies turn about one axis between two angles measured from their starting pose.
