@@ -6460,6 +6460,10 @@ func _npc_locomotion_animation(actor: Dictionary, root: Node3D, horizontal_speed
 	return fallback if animations.has(fallback) else "Forward"
 
 func _npc_air_animation(actor: Dictionary, root: Node3D, grounded: bool) -> String:
+	# A creature with no jump clips keeps its walk or idle in the air, instead of standing in the Idle pose.
+	if bool(actor.get("creature", false)) and not creature_has_clip(actor, "jumpstart") \
+			and not creature_has_clip(actor, _npc_stance_prefix(actor) + "jumpstart"):
+		return ""
 	var animations: Dictionary = actor.get("animations", {})
 	var in_combat := actor.has("combat")
 	var stance_prefix := _npc_stance_prefix(actor) if in_combat else ""
