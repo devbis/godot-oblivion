@@ -890,6 +890,13 @@ int main(int argc, char** argv) {
                                   << (parent ? parent->name.get() : "(root)")
                                   << " local=" << translation.x << ',' << translation.y << ',' << translation.z << '\n';
                     }
+                    // The Havok rigid bodies in the order the file lists them: the original numbers the bones of a saved ragdoll (XRGD) this way.
+                    {
+                        const auto decoded = oblivion::decode_nif_asset(bytes);
+                        for (std::size_t body_index = 0; body_index < decoded.physics_bodies.size(); ++body_index)
+                            std::cout << "  body " << body_index << " block=" << decoded.physics_bodies[body_index].block_index
+                                      << " node=" << decoded.physics_bodies[body_index].node_name << '\n';
+                    }
                     for (auto* shape : file.GetShapes()) {
                         std::vector<std::string> bones;
                         file.GetShapeBoneList(shape, bones);

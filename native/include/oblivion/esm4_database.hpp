@@ -39,8 +39,11 @@ struct PlacedReference {
     bool initially_disabled = false;  // record flag 0x0800: a script enables the reference later
     std::uint32_t enable_parent_form_id = 0;  // XESP: the reference follows this one's enabled state (0 when none)
     bool enable_parent_inverted = false;      // XESP flag 1: it is enabled while the parent is disabled
-    // XRGD: the saved ragdoll pose of a body the editor placed dead; one entry of 28 bytes per bone.
+    // XRGD: the saved ragdoll pose of a body the editor placed dead. One entry of 28 bytes per Havok body of the skeleton
+    // NIF, in the order the NIF lists them: a byte of bone id, three of padding, then the position (game units) and the
+    // rotation (radians) of the body relative to its parent body (the first, to the reference itself).
     std::uint32_t ragdoll_bone_count = 0;
+    std::vector<float> ragdoll_data;  // position and rotation of each body, six floats each
     bool is_tree = false;
     float tree_billboard_width = 0.0f;
     float tree_billboard_height = 0.0f;

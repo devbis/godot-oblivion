@@ -5829,11 +5829,72 @@ func _player_head_model_to_head_transform() -> Transform3D:
 
 ## Radius and height (metres) of the body of a creature, from the extent of its skeleton at rest.
 ## An actor placed dead lies where it was placed: it dies at once, without the events of a death in a fight.
-func _spawn_actor_dead(actor: Dictionary, floor_found: bool) -> void:
-	# No floor under the body (the collision of that part of the cell has none): it lies on a slab at the height it was
-	# placed at, instead of falling out of the world.
+## Poses the skeleton as the editor saved the ragdoll of a body placed dead (XRGD): one entry per Havok body of the
+## skeleton NIF, in the order the NIF lists them, each the position and rotation of the body relative to its parent body
+## (the first, relative to the reference). False when the data does not fit the skeleton.
+func _pose_skeleton_from_ragdoll_data(actor: Dictionary, reference: Dictionary) -> bool:
+	var data: PackedFloat32Array = reference.get("ragdoll_data", PackedFloat32Array())
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	var model_path := str(actor.get("skeleton_model_path", ""))
+	var metadata: Dictionary = assets.nif_metadata_cache.get(model_path.to_lower().replace("\\", "/"), {})
+	var bodies: Array = metadata.get("physics_bodies", [])
+	if not is_instance_valid(skeleton) or bodies.is_empty() or data.size() != bodies.size() * 6:
+		push_warning("OpenOB ragdoll data of %s (%d values) does not fit the %d bodies of %s" % [
+			str(actor.get("name", "")), data.size(), bodies.size(), model_path
+		])
+		return false
+	var body_of_bone: Dictionary = {}
+	for index in range(bodies.size()):
+		body_of_bone[skeleton.find_bone(str((bodies[index] as Dictionary).get("node_name", "")))] = index
+	var reference_transform := _actor_reference_transform(reference)
+	var world: Array[Transform3D] = []
+	world.resize(bodies.size())
+	for index in range(bodies.size()):
+		var bone_index := skeleton.find_bone(str((bodies[index] as Dictionary).get("node_name", "")))
+		if bone_index < 0:
+			return false
+		var parent_world := reference_transform
+		var ancestor := skeleton.get_bone_parent(bone_index)
+		while ancestor >= 0 and not body_of_bone.has(ancestor):
+			ancestor = skeleton.get_bone_parent(ancestor)
+		if ancestor >= 0:
+			parent_world = world[int(body_of_bone[ancestor])]
+		var base := index * 6
+		var local := Transform3D(
+			_reference_rotation(PackedFloat32Array([data[base + 3], data[base + 4], data[base + 5]])),
+			Vector3(data[base], data[base + 2], -data[base + 1]) * game_units_to_meters
+		)
+		world[index] = parent_world * local
+	var to_skeleton := skeleton.global_transform.affine_inverse()
+	# Parents first: bones are numbered so, and a body's pose is set in the skeleton as a whole.
+	var order: Array = range(bodies.size())
+	order.sort_custom(func(a: int, b: int) -> bool:
+		return skeleton.find_bone(str((bodies[a] as Dictionary).get("node_name", ""))) \
+			< skeleton.find_bone(str((bodies[b] as Dictionary).get("node_name", "")))
+	)
+	for index: int in order:
+		var pose := to_skeleton * world[index]
+		pose.basis = pose.basis.orthonormalized()
+		skeleton.set_bone_global_pose(skeleton.find_bone(str((bodies[index] as Dictionary).get("node_name", ""))), pose)
+	return true
+
+func _spawn_actor_dead(actor: Dictionary, floor_found: bool, reference: Dictionary) -> void:
+	# It lies as the editor left it, at rest: no fall.
+	actor["ragdoll_settled"] = _pose_skeleton_from_ragdoll_data(actor, reference)
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	var health: Dictionary = actor.get("health", {})
+	health["current"] = 0.0
+	actor["health"] = health
+	_npc_combat.kill_actor(actor, false)
+	# No floor under the body (the collision of that part of the cell has none): it lies on a slab under its lowest
+	# body, instead of falling out of the world when it is disturbed.
 	var root := actor.get("root") as Node3D
-	if not floor_found and is_instance_valid(root):
+	var rig: Dictionary = actor.get("ragdoll", {})
+	if not floor_found and is_instance_valid(root) and not rig.is_empty():
+		var lowest := INF
+		for body_value: Variant in (rig.bodies as Dictionary).values():
+			lowest = minf(lowest, (body_value as Node3D).global_position.y)
 		var support := StaticBody3D.new()
 		support.name = "PlacedDeadSupport"
 		support.top_level = true
@@ -5841,18 +5902,12 @@ func _spawn_actor_dead(actor: Dictionary, floor_found: bool) -> void:
 		support.collision_mask = 0
 		var slab := CollisionShape3D.new()
 		var slab_shape := BoxShape3D.new()
-		slab_shape.size = Vector3(3.0, 1.0, 3.0)
+		slab_shape.size = Vector3(4.0, 1.0, 4.0)
 		slab.shape = slab_shape
 		support.add_child(slab)
 		root.add_child(support)
-		support.global_position = root.global_position - Vector3.UP * 0.5
-		print("OpenOB dead actor %s has no floor under it: lying on a slab at %s" % [str(actor.get("name", "")), str(root.global_position)])
-	if _npc_combat == null:
-		_npc_combat = NpcCombat.new(self)
-	var health: Dictionary = actor.get("health", {})
-	health["current"] = 0.0
-	actor["health"] = health
-	_npc_combat.kill_actor(actor, false)
+		support.global_position = Vector3(root.global_position.x, lowest - PLACED_DEAD_SLAB_CLEARANCE_M - 0.5, root.global_position.z)
+		print("OpenOB dead actor %s has no floor under it: lying on a slab at %.2f" % [str(actor.get("name", "")), lowest - PLACED_DEAD_SLAB_CLEARANCE_M])
 
 func _creature_capsule_size(skeleton: Skeleton3D, base_scale: float) -> Vector2:
 	var low := Vector3(INF, INF, INF)
@@ -6040,6 +6095,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"base_form_id": int(reference.get("base_form_id", 0)),
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"creature": is_creature,
+			"skeleton_model_path": str(npc.get("model_path", "")) if is_creature else PLAYER_SKELETON,
 			"creature_attack_damage": float(npc.get("attack_damage", 0)) if is_creature else 0.0,
 			"creature_attack_reach": float(npc.get("attack_reach", 0.0)) if is_creature else 0.0,
 			# The folder the actor's clips come from: a creature has its own next to its skeleton.
@@ -6096,7 +6152,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_npc_loaded_reference_ids[reference_id] = true
 		# The editor saved a ragdoll pose (XRGD) for a body it placed dead: it lies there to be looted, not to fight.
 		if placed_dead:
-			_spawn_actor_dead(actor_state, floor_found)
+			_spawn_actor_dead(actor_state, floor_found, reference)
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
@@ -6501,6 +6557,8 @@ const NPC_GESTURE_MIN_HOLD_S := 1.5
 const NPC_GESTURE_MAX_HOLD_S := 3.0
 ## How far above the placed position of a body placed dead the floor under it is looked for.
 const PLACED_DEAD_FLOOR_RISE_M := 0.4
+## The slab under a body placed dead with no floor lies this far under its lowest body.
+const PLACED_DEAD_SLAB_CLEARANCE_M := 0.12
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
 ## A momentary stair-edge floor miss should not start an NPC's jump cycle. Route hops are explicit; ordinary falls must

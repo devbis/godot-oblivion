@@ -81,6 +81,10 @@ static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 	# through the floor.
 	launch.y = 0.0
 	launch = launch.limit_length(MAX_LAUNCH_SPEED_MPS)
+	# A body posed from its saved ragdoll (a corpse placed dead) is already at rest: it does not move until disturbed.
+	var settled := bool(actor.get("ragdoll_settled", false))
+	if settled:
+		launch = Vector3.ZERO
 	# The root stays where the actor fell. Left to collide, it would be shoved aside by whoever walks into it and carry
 	# the avatar along rigidly, apart from the bodies.
 	var saved_layer := 0
@@ -143,6 +147,8 @@ static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 		if is_instance_valid(walker):
 			walker.add_collision_exception_with(body)
 		rag_root.add_child(body)
+		if settled:
+			body.sleeping = true
 		bodies[str(segment.bone)] = {"body": body, "direction": direction}
 		driven_bones.push_back({"index": bone_index, "body": body})
 	for segment: Dictionary in SEGMENTS:

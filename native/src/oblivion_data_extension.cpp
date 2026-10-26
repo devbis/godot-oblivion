@@ -1135,6 +1135,11 @@ private:
         entry["enable_parent_form_id"] = static_cast<int64_t>(reference.enable_parent_form_id);
         entry["enable_parent_inverted"] = reference.enable_parent_inverted;
         entry["has_ragdoll_data"] = reference.ragdoll_bone_count > 0;
+        if (reference.ragdoll_bone_count > 0) {
+            PackedFloat32Array ragdoll_data;
+            for (const auto value : reference.ragdoll_data) ragdoll_data.push_back(value);
+            entry["ragdoll_data"] = ragdoll_data;
+        }
         entry["reference_name"] = as_string(reference.reference_name);
         entry["base_editor_id"] = as_string(reference.base_editor_id);
         entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};
