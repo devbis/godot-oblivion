@@ -197,9 +197,10 @@ func assemble_creature_model(avatar: Node3D, skeleton: Skeleton3D, creature: Dic
 			# Vertices at the bone's own height are in model space; those near the origin are local to the bone.
 			model_space = (mesh_entry.mesh as ArrayMesh).get_aabb().get_center().length() > 50.0
 			break
+		# The vertices are in the bone's own axes (x along the bone), so the part follows the bone's full rotation.
 		if not attach_bone.is_empty():
 			print("OpenOB creature part %s hangs on %s (%s)" % [part_path, attach_bone, "model space" if model_space else "bone space"])
-		await add_actor_model(avatar, skeleton, part_path, attach_bone, PackedByteArray(), {}, model_space, "", "", "", not model_space and not attach_bone.is_empty())
+		await add_actor_model(avatar, skeleton, part_path, attach_bone, PackedByteArray(), {}, model_space)
 	return true
 
 func _creature_part_bone(skeleton: Skeleton3D, part_name: String) -> String:
