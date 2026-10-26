@@ -899,13 +899,24 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             if (subrecord_size >= 1) combat_style.dodge_chance = value[0];
             if (subrecord_size >= 2) combat_style.dodge_left_right_chance = value[1];
             if (subrecord_size >= 37) combat_style.block_chance = value[36];
+            if (subrecord_size >= 53) {
+                combat_style.power_attack_chance = value[52];
+                combat_style.has_power_attack_chance = true;
+            }
+            if (subrecord_size >= 69) {
+                std::copy_n(value + 64, combat_style.power_attack_chances.size(), combat_style.power_attack_chances.begin());
+                combat_style.has_power_attack_chances = true;
+            }
             if (subrecord_size >= 8) combat_style.dodge_left_right_min_time = f32(value + 4);
             if (subrecord_size >= 12) combat_style.dodge_left_right_max_time = f32(value + 8);
             if (subrecord_size >= 16) combat_style.dodge_forward_min_time = f32(value + 12);
             if (subrecord_size >= 20) combat_style.dodge_forward_max_time = f32(value + 16);
             if (subrecord_size >= 24) combat_style.dodge_backward_min_time = f32(value + 20);
             if (subrecord_size >= 28) combat_style.dodge_backward_max_time = f32(value + 24);
-            if (subrecord_size >= 81) combat_style.advanced_enabled = (value[80] & 0x01) != 0;
+            if (subrecord_size >= 81) {
+                combat_style.advanced_enabled = (value[80] & 0x01) != 0;
+                combat_style.choose_attack_using_chance = (value[80] & 0x02) != 0;
+            }
         } else if (tag == "CSAD" && is_combat_style) {
             combat_style.has_advanced_data = subrecord_size > 0;
             if (subrecord_size >= 4) combat_style.dodge_fatigue_mod_mult = f32(value);

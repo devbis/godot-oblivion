@@ -46,7 +46,14 @@ const COMBAT_DAMAGE_SETTINGS := {
 	"fFatigueBase": 1.0, "fFatigueMult": 0.5,
 }
 ## Executable defaults used by NPC combat when the installed ESM does not override them.
-const NPC_COMBAT_SETTINGS := {"iAIDefaultPowerAttackChance": 25.0}
+const NPC_COMBAT_SETTINGS := {
+	"iAIDefaultPowerAttackChance": 25.0,
+	"iAIDefaultPowerAttackNormalChance": 20.0,
+	"iAIDefaultPowerAttackForwardChance": 20.0,
+	"iAIDefaultPowerAttackBackwardChance": 20.0,
+	"iAIDefaultPowerAttackLeftChance": 20.0,
+	"iAIDefaultPowerAttackRightChance": 20.0,
+}
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"

@@ -39,6 +39,13 @@ const MELEE_VERTICAL_REACH_M := 1.8
 const BLOCKED_DAMAGE_SHARE := 0.3
 const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
+const POWER_ATTACK_DIRECTIONS := [
+	{"suffix": "attackpower", "style_key": "power_attack_normal_chance", "setting": "iAIDefaultPowerAttackNormalChance"},
+	{"suffix": "attackforwardpower", "style_key": "power_attack_forward_chance", "setting": "iAIDefaultPowerAttackForwardChance"},
+	{"suffix": "attackbackpower", "style_key": "power_attack_backward_chance", "setting": "iAIDefaultPowerAttackBackwardChance"},
+	{"suffix": "attackleftpower", "style_key": "power_attack_left_chance", "setting": "iAIDefaultPowerAttackLeftChance"},
+	{"suffix": "attackrightpower", "style_key": "power_attack_right_chance", "setting": "iAIDefaultPowerAttackRightChance"},
+]
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
 const CREATURE_MIN_REACH_M := 0.8
@@ -684,6 +691,10 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 	var prefix := _prefix(actor)
 	var suffixes: Array[String] = ["idle", "fastforward", "forward", "blockidle", "blockhit"]
 	suffixes.append_array(_attack_suffixes(prefix))
+	if prefix in ["onehand", "twohand"]:
+		suffixes.append_array([
+			"attackforwardpower", "attackbackpower", "attackleftpower", "attackrightpower",
+		])
 	if prefix == "handtohand":
 		suffixes.append_array(["attackright_jab", "attackleft_jab", "attackright_hook", "attackleft_hook"])
 	if _is_creature(actor):
@@ -1103,6 +1114,42 @@ func _attack_suffixes(prefix: String) -> Array[String]:
 			return ["attackright", "attackleft"]
 	return ["attackright", "attackleft", "attackpower"]
 
+func _power_attack_chance(actor: Dictionary) -> float:
+	var fallback := _setting_or(POWER_ATTACK_CHANCE_SETTING, POWER_ATTACK_DEFAULT_CHANCE)
+	var style: Dictionary = actor.get("combat_style", {})
+	if bool(style.get("has_power_attack_chance", false)):
+		return clampf(float(style.get("power_attack_chance", fallback)), 0.0, 100.0)
+	return clampf(fallback, 0.0, 100.0)
+
+## CombatStyle's percent-choice flag uses five independent chance values. Other selection paths depend on
+## distance and movement constraints that are not fully modeled here, so those keep the generic power clip.
+func _weighted_power_attack_suffix(actor: Dictionary, prefix: String) -> String:
+	var style: Dictionary = actor.get("combat_style", {})
+	if not bool(style.get("choose_attack_using_chance", false)):
+		return "attackpower"
+	var choices: Array[Dictionary] = []
+	for direction: Dictionary in POWER_ATTACK_DIRECTIONS:
+		var chance := _setting_or(str(direction.get("setting", "")), 20.0)
+		if bool(style.get("has_power_attack_chances", false)):
+			chance = float(style.get(str(direction.get("style_key", "")), chance))
+		chance = clampf(chance, 0.0, 100.0)
+		if chance <= 0.0:
+			continue
+		var clip_name := prefix + str(direction.get("suffix", ""))
+		var requests: Dictionary = actor.get("animation_clip_requests", {})
+		if str(requests.get(clip_name, "")) == "missing":
+			continue
+		choices.append({"suffix": str(direction.get("suffix", "")), "chance": chance})
+	if choices.is_empty():
+		return ""
+	var roll := float(randi() % 100)
+	var cumulative := 0.0
+	for choice: Dictionary in choices:
+		cumulative += float(choice.get("chance", 0.0))
+		if roll < cumulative:
+			return str(choice.get("suffix", ""))
+	return ""
+
 ## A creature swings with whichever attack clips its folder has: the plain ones, or the power ones when it has no others.
 func _creature_attack_clips(actor: Dictionary, prefix: String) -> Array[String]:
 	var plain: Array[String] = []
@@ -1141,8 +1188,12 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 	else:
 		var options := _attack_suffixes(prefix)
 		if prefix in ["onehand", "twohand"] \
-				and randf() * 100.0 < _setting_or(POWER_ATTACK_CHANCE_SETTING, POWER_ATTACK_DEFAULT_CHANCE):
-			options = ["attackpower"]
+				and randf() * 100.0 < _power_attack_chance(actor):
+			var power_suffix := _weighted_power_attack_suffix(actor, prefix)
+			if not power_suffix.is_empty():
+				options = [power_suffix]
+			else:
+				options.erase("attackpower")
 		else:
 			options.erase("attackpower")
 		clip_key = prefix + options[randi() % options.size()]

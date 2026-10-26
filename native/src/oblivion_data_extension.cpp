@@ -534,6 +534,14 @@ public:
             combat_style["dodge_chance"] = style->dodge_chance;
             combat_style["dodge_left_right_chance"] = style->dodge_left_right_chance;
             combat_style["block_chance"] = style->block_chance;
+            combat_style["power_attack_chance"] = style->power_attack_chance;
+            combat_style["has_power_attack_chance"] = style->has_power_attack_chance;
+            combat_style["power_attack_normal_chance"] = style->power_attack_chances[0];
+            combat_style["power_attack_forward_chance"] = style->power_attack_chances[1];
+            combat_style["power_attack_backward_chance"] = style->power_attack_chances[2];
+            combat_style["power_attack_left_chance"] = style->power_attack_chances[3];
+            combat_style["power_attack_right_chance"] = style->power_attack_chances[4];
+            combat_style["has_power_attack_chances"] = style->has_power_attack_chances;
             combat_style["dodge_left_right_min_time"] = style->dodge_left_right_min_time;
             combat_style["dodge_left_right_max_time"] = style->dodge_left_right_max_time;
             combat_style["dodge_forward_min_time"] = style->dodge_forward_min_time;
@@ -542,6 +550,7 @@ public:
             combat_style["dodge_backward_max_time"] = style->dodge_backward_max_time;
             combat_style["has_advanced_data"] = style->has_advanced_data;
             combat_style["advanced_enabled"] = style->advanced_enabled;
+            combat_style["choose_attack_using_chance"] = style->choose_attack_using_chance;
             combat_style["dodge_fatigue_mod_mult"] = style->dodge_fatigue_mod_mult;
             combat_style["dodge_fatigue_mod_base"] = style->dodge_fatigue_mod_base;
             combat_style["dodge_under_attack_mult"] = style->dodge_under_attack_mult;

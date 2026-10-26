@@ -61,6 +61,10 @@ struct CombatStyleRecord {
     std::uint8_t dodge_chance = 75;
     std::uint8_t dodge_left_right_chance = 50;
     std::uint8_t block_chance = 30;
+    std::uint8_t power_attack_chance = 25;
+    std::array<std::uint8_t, 5> power_attack_chances{20, 20, 20, 20, 20};
+    bool has_power_attack_chance = false;
+    bool has_power_attack_chances = false;
     float dodge_left_right_min_time = 0.5f;
     float dodge_left_right_max_time = 1.5f;
     float dodge_forward_min_time = 0.5f;
@@ -69,6 +73,7 @@ struct CombatStyleRecord {
     float dodge_backward_max_time = 0.75f;
     bool has_advanced_data = false;
     bool advanced_enabled = false;
+    bool choose_attack_using_chance = false;
     float dodge_fatigue_mod_mult = -20.0f;
     float dodge_fatigue_mod_base = 0.0f;
     float dodge_under_attack_mult = 1.0f;
