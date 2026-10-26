@@ -16,26 +16,29 @@ const CULL_MARGIN := 400.0
 const HEAD_LENGTH_M := 0.2
 const MIN_CAPSULE_EXTRA_M := 0.02
 const MAX_FLEX := 2.4
+const MAX_LAUNCH_SPEED_MPS := 6.0
 
 ## One rigid segment per entry: it runs from `bone` to `end` (empty: it carries on away from its parent), hangs on
 ## `parent` through a cone-twist joint at `bone`'s origin (or a hinge that bends towards `flex`: +1 the way the actor
 ## faces, -1 the way it does not). Masses add up to about 70 kg.
 const SEGMENTS: Array[Dictionary] = [
-	{"bone": "Bip01 Pelvis", "end": "Bip01 Spine1", "radius": 0.12, "mass": 14.0},
-	{"bone": "Bip01 Spine1", "end": "Bip01 Neck", "radius": 0.14, "mass": 16.0, "parent": "Bip01 Pelvis", "swing": 0.5, "twist": 0.35},
-	{"bone": "Bip01 Head", "end": "", "radius": 0.1, "mass": 5.0, "parent": "Bip01 Spine1", "swing": 0.8, "twist": 0.7},
-	{"bone": "Bip01 L UpperArm", "end": "Bip01 L Forearm", "radius": 0.05, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
-	{"bone": "Bip01 L Forearm", "end": "Bip01 L Hand", "radius": 0.045, "mass": 1.5, "parent": "Bip01 L UpperArm", "flex": 1.0},
-	{"bone": "Bip01 R UpperArm", "end": "Bip01 R Forearm", "radius": 0.05, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
-	{"bone": "Bip01 R Forearm", "end": "Bip01 R Hand", "radius": 0.045, "mass": 1.5, "parent": "Bip01 R UpperArm", "flex": 1.0},
-	{"bone": "Bip01 L Thigh", "end": "Bip01 L Calf", "radius": 0.075, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
-	{"bone": "Bip01 L Calf", "end": "Bip01 L Foot", "radius": 0.06, "mass": 4.0, "parent": "Bip01 L Thigh", "flex": -1.0},
-	{"bone": "Bip01 R Thigh", "end": "Bip01 R Calf", "radius": 0.075, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
-	{"bone": "Bip01 R Calf", "end": "Bip01 R Foot", "radius": 0.06, "mass": 4.0, "parent": "Bip01 R Thigh", "flex": -1.0},
+	{"bone": "Bip01 Pelvis", "end": "Bip01 Spine1", "radius": 0.14, "mass": 14.0},
+	{"bone": "Bip01 Spine1", "end": "Bip01 Neck", "radius": 0.17, "mass": 16.0, "parent": "Bip01 Pelvis", "swing": 0.5, "twist": 0.35},
+	{"bone": "Bip01 Head", "end": "", "radius": 0.11, "mass": 5.0, "parent": "Bip01 Spine1", "swing": 0.8, "twist": 0.7},
+	{"bone": "Bip01 L UpperArm", "end": "Bip01 L Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
+	{"bone": "Bip01 L Forearm", "end": "Bip01 L Hand", "radius": 0.05, "mass": 1.5, "parent": "Bip01 L UpperArm", "flex": 1.0},
+	{"bone": "Bip01 R UpperArm", "end": "Bip01 R Forearm", "radius": 0.055, "mass": 2.5, "parent": "Bip01 Spine1", "swing": 1.5, "twist": 0.9},
+	{"bone": "Bip01 R Forearm", "end": "Bip01 R Hand", "radius": 0.05, "mass": 1.5, "parent": "Bip01 R UpperArm", "flex": 1.0},
+	{"bone": "Bip01 L Thigh", "end": "Bip01 L Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
+	{"bone": "Bip01 L Calf", "end": "Bip01 L Foot", "radius": 0.07, "mass": 4.0, "parent": "Bip01 L Thigh", "flex": -1.0},
+	{"bone": "Bip01 R Thigh", "end": "Bip01 R Calf", "radius": 0.09, "mass": 8.0, "parent": "Bip01 Pelvis", "swing": 1.1, "twist": 0.35},
+	{"bone": "Bip01 R Calf", "end": "Bip01 R Foot", "radius": 0.07, "mass": 4.0, "parent": "Bip01 R Thigh", "flex": -1.0},
 ]
 
-## Turns the actor's body into a rag doll that keeps the actor's velocity. Returns false when the skeleton lacks the bones.
-static func start(actor: Dictionary) -> bool:
+## Turns the actor's body into a rag doll that keeps the actor's velocity. The walker (the player) passes through it: a
+## limb is no step to climb and a corpse is too light to shove aside, so it would only hold the player up. Returns false
+## when the skeleton lacks the bones.
+static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 	if actor.has("ragdoll"):
 		return true
 	var actor_root := actor.get("root") as Node3D
@@ -58,6 +61,17 @@ static func start(actor: Dictionary) -> bool:
 	var hit_velocity: Variant = actor_root.get("_hit_velocity")
 	if hit_velocity is Vector3:
 		launch += hit_velocity
+	# Only the shove carries over: the fall of a root that had no floor under it (a disabled actor) would shoot the body
+	# through the floor.
+	launch.y = 0.0
+	launch = launch.limit_length(MAX_LAUNCH_SPEED_MPS)
+	# The root stays where the actor fell. Left to collide, it would be shoved aside by whoever walks into it and carry
+	# the avatar along rigidly, apart from the bodies.
+	if actor_root is CollisionObject3D:
+		(actor_root as CollisionObject3D).collision_mask = 0
+	if actor_root is CharacterBody3D:
+		(actor_root as CharacterBody3D).velocity = Vector3.ZERO
+	actor_root.set_physics_process(false)
 	var reference_id := int(actor.get("reference_id", 0))
 	var to_world := skeleton.global_transform
 	var bodies: Dictionary = {}
@@ -102,6 +116,10 @@ static func start(actor: Dictionary) -> bool:
 		shape.shape = capsule
 		body.add_child(shape)
 		body.linear_velocity = launch
+		# Thin limbs would tunnel through a floor at speed.
+		body.continuous_cd = true
+		if is_instance_valid(walker):
+			walker.add_collision_exception_with(body)
 		rag_root.add_child(body)
 		bodies[str(segment.bone)] = {"body": body, "direction": direction}
 		driven_bones.push_back({"index": bone_index, "body": body})
@@ -129,7 +147,9 @@ static func update(rig: Dictionary) -> void:
 	var skeleton := rig.get("skeleton") as Skeleton3D
 	if not is_instance_valid(skeleton):
 		return
-	var moving := not bool(rig.get("applied", false))
+	# The skeleton rides on the actor, which a script may move: the pose is set again then, not only when a body moves.
+	var skeleton_transform := skeleton.global_transform
+	var moving: bool = not bool(rig.get("applied", false)) or skeleton_transform != rig.get("skeleton_transform")
 	var bones: Array = rig.get("bones", [])
 	if not moving:
 		for bone_value: Variant in bones:
@@ -140,6 +160,7 @@ static func update(rig: Dictionary) -> void:
 	if not moving:
 		return
 	rig["applied"] = true
+	rig["skeleton_transform"] = skeleton_transform
 	var to_skeleton := skeleton.global_transform.affine_inverse()
 	for bone_value: Variant in bones:
 		var bone: Dictionary = bone_value

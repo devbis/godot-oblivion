@@ -474,7 +474,7 @@ func kill_actor(actor: Dictionary) -> void:
 	_provoked.erase(reference_id)
 	_set_weapon_drawn(actor, false)
 	_begin_knockdown(actor)
-	ActorRagdoll.start(actor)
+	ActorRagdoll.start(actor, host.get("player") as PhysicsBody3D)
 	if is_instance_valid(root):
 		# The body lies where it fell but does not block the living (its layer is off; it still rests on the floor).
 		(root as CollisionObject3D).collision_layer = 0
