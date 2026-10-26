@@ -150,7 +150,7 @@ const PLAYER_COMBAT_STANCE_PREFIXES := {
 	-1: "handtohand", 0: "onehand", 1: "twohand", 2: "onehand", 3: "twohand", 4: "staff", 5: "bow",
 }
 const PLAYER_COMBAT_CLIP_SUFFIXES := [
-	"idle", "equip", "unequip", "blockidle", "blockhit", "attack", "attackright", "attackleft",
+	"idle", "equip", "unequip", "blockidle", "blockhit", "blockattack", "attack", "attackright", "attackleft",
 	"attackright_chop", "attackleft_chop", "attackright_hook", "attackleft_hook", "attackright_jab", "attackleft_jab",
 	"attackrightpower", "attackleftpower", "attackpower", "attackforwardpower", "attackbackpower",
 	"skill1attackpower", "skill2attackleftpower", "skill2attackrightpower", "skill3attackbackpower", "skill4attackforwardpower",
@@ -5301,7 +5301,8 @@ func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
 		AudioManager.play_bow_shot(player)
 		_loose_arrow()
 	elif clip_kind == "attack" and event_name == "hit":
-		_melee_hit()
+		if _melee_hit():
+			_player_block_attack()
 	elif clip_kind == "cast" and event_name == "hit":
 		_release_pending_cast()
 
@@ -5348,7 +5349,7 @@ func _loose_arrow() -> void:
 	_launch_projectile(arrow, aim)
 
 ## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
-func _melee_hit() -> void:
+func _melee_hit() -> bool:
 	var reach := MELEE_BASE_REACH_M * float(_player_weapon_record.get("reach", 1.0))
 	var origin: Vector3
 	var forward: Vector3
@@ -5377,6 +5378,30 @@ func _melee_hit() -> void:
 	var body := hit.get("collider") as RigidBody3D
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
+	return blocked
+
+## Oblivion plays BlockAttack on the attacker when a defender blocks its melee blow.
+func _player_block_attack() -> void:
+	if not _player_knockdown_state.is_empty():
+		return
+	if player.is_first_person:
+		if _arms != null:
+			_arms.react_to_blocked_attack()
+		return
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	var clip_name := "handtohandblockattack" if prefix == "handtohand" \
+		and _player_combat_available_clips.has("handtohandblockattack") else "blockattack"
+	if not _player_combat_available_clips.has(clip_name):
+		return
+	_player_combat_action = ""
+	_player_combat_action_kind = ""
+	_player_combat_action_sound_pending = false
+	_player_hit_reaction = {"kind": "stagger", "animation": clip_name}
+	_player_hit_attack_lock_remaining = NpcCombat.HIT_ATTACK_LOCK_S
+	_player_active_animation_reset()
+	_request_player_reaction_clip(
+		clip_name, "Characters/_male/%s.kf" % clip_name, "BlockAttack", false
+	)
 
 func _player_take_combat_hit(
 	source: Node3D, damage: float, fatigue_damage: float, blocked := false, source_base_form_id := 0
@@ -7428,7 +7453,8 @@ func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time
 				_player_weapon_is_held = false
 				_refresh_player_weapon_mount()
 		elif key_name == "hit" and _player_combat_action_kind == "attack" and _player_weapon_type() != WEAPON_TYPE_BOW:
-			_melee_hit()
+			if _melee_hit():
+				_player_block_attack()
 		elif key_name == "release" and _player_combat_action_kind == "attack" and _player_weapon_type() == WEAPON_TYPE_BOW:
 			AudioManager.play_bow_shot(player)
 			_loose_arrow()

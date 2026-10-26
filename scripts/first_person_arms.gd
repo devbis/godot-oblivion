@@ -386,6 +386,17 @@ func react_to_hit(blocked := false) -> void:
 		candidates = [prefix + "blockhit", "blockhit", prefix + "stagger"]
 	_begin_one_shot(candidates, "hit")
 
+## The active attack was stopped by a defender's block; use the authored BlockAttack arm clip.
+func react_to_blocked_attack() -> void:
+	if _mode != Mode.READY:
+		return
+	var prefix := str(_stance.prefix)
+	var candidates: Array[String] = ["blockattack"]
+	if prefix == UNARMED_STANCE.prefix:
+		candidates.push_front(prefix + "blockattack")
+	_queued.clear()
+	_begin_one_shot(candidates, "hit")
+
 ## An attack input can cut short the view-model flinch after the brief hit lockout.
 func interrupt_hit_reaction() -> void:
 	if _one_shot_kind != "hit":
@@ -753,7 +764,7 @@ func _load_clip(clip_name: String) -> void:
 func _preload_stance() -> void:
 	var prefix := str(_stance.prefix)
 	for suffix: String in [
-		"idle", "equip", "unequip", "forward", "backward", "left", "right",
+		"idle", "equip", "unequip", "forward", "backward", "left", "right", "blockattack",
 		"fastforward", "fastbackward", "fastleft", "fastright", "blockidle",
 		"attackright", "attackleft", "attack", "attackright_chop", "attackleft_chop",
 		"attackright_hook", "attackleft_hook", "attackright_jab", "attackleft_jab",

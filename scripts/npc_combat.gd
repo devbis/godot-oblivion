@@ -418,6 +418,8 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 		victim, source, _hit_fatigue_damage(attacker, damage), attacker_id if fight_back else -1,
 		int(attacker.get("base_form_id", 0)), blocked
 	)
+	if blocked:
+		_begin_block_attack(attacker)
 	_call_allies(victim, attacker)
 
 func _react_to_hit(
@@ -590,6 +592,24 @@ func _begin_stagger(actor: Dictionary, blocked := false) -> void:
 		# A creature with no flinch clip only loses its swing.
 		actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
 		_interrupt_actor_attack(actor)
+		return
+	actor["hit_reaction"] = {"kind": "stagger", "animation": clip}
+	actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
+	actor["active_animation"] = ""
+	_request_clip(actor, clip)
+	_interrupt_actor_attack(actor)
+	var root := actor.get("root") as Node3D
+	if is_instance_valid(root):
+		_stop_route(root)
+
+## The struck actor plays BlockHit; the attacker plays BlockAttack when a defender blocks the blow.
+func _begin_block_attack(actor: Dictionary) -> void:
+	if _is_creature(actor):
+		return
+	var clip := "handtohandblockattack" if _prefix(actor) == "handtohand" else "blockattack"
+	if not _has_clip(actor, clip):
+		clip = "blockattack"
+	if not _has_clip(actor, clip):
 		return
 	actor["hit_reaction"] = {"kind": "stagger", "animation": clip}
 	actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
@@ -1339,6 +1359,8 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 			)
 	var fatigue_damage := maxf(8.0 if blocked else FATIGUE_HIT_MIN, damage * FATIGUE_HIT_COST_MULT)
 	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked, int(actor.get("base_form_id", 0)))
+	if blocked and not projectile_hit:
+		_begin_block_attack(actor)
 	player_hit.emit(str(actor.get("reference_name", "NPC")), damage)
 
 func _player_base_form_id() -> int:
