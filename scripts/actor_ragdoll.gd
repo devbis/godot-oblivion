@@ -21,6 +21,11 @@ const MAX_LAUNCH_SPEED_MPS := 6.0
 const NUDGE_ACCELERATION_PER_MPS := 3.0
 const NUDGE_MIN_SPEED_MPS := 0.3
 const NUDGE_REACH_M := 2.5
+## A rag doll is at rest below these speeds; the get-up clip then lines up with it.
+const SETTLED_LINEAR_MPS := 0.25
+const SETTLED_ANGULAR_RPS := 1.0
+const ALIGN_MIN_LENGTH := 0.05
+const FLOOR_MASK := 2
 
 ## One rigid segment per entry: it runs from `bone` to `end` (empty: it carries on away from its parent), hangs on
 ## `parent` through a cone-twist joint at `bone`'s origin (or a hinge that bends towards `flex`: +1 the way the actor
@@ -72,7 +77,12 @@ static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 	launch = launch.limit_length(MAX_LAUNCH_SPEED_MPS)
 	# The root stays where the actor fell. Left to collide, it would be shoved aside by whoever walks into it and carry
 	# the avatar along rigidly, apart from the bodies.
+	var saved_layer := 0
+	var saved_mask := 0
 	if actor_root is CollisionObject3D:
+		saved_layer = (actor_root as CollisionObject3D).collision_layer
+		saved_mask = (actor_root as CollisionObject3D).collision_mask
+		(actor_root as CollisionObject3D).collision_layer = 0
 		(actor_root as CollisionObject3D).collision_mask = 0
 	if actor_root is CharacterBody3D:
 		(actor_root as CharacterBody3D).velocity = Vector3.ZERO
@@ -144,8 +154,84 @@ static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 	for node: Node in skeleton.get_parent().find_children("*", "MeshInstance3D", true, false):
 		(node as MeshInstance3D).extra_cull_margin = CULL_MARGIN
 	print("OpenOB ragdoll: %s goes limp (%d bodies)" % [str(actor.get("reference_name", "NPC")), driven_bones.size()])
-	actor["ragdoll"] = {"skeleton": skeleton, "bones": driven_bones, "root": rag_root, "applied": false}
+	var bodies_by_bone: Dictionary = {}
+	for bone_name: Variant in bodies.keys():
+		bodies_by_bone[bone_name] = (bodies[bone_name] as Dictionary).body
+	actor["ragdoll"] = {
+		"skeleton": skeleton, "bones": driven_bones, "root": rag_root, "applied": false, "bodies": bodies_by_bone,
+		"root_layer": saved_layer, "root_mask": saved_mask,
+	}
 	return true
+
+## True when every body has come to rest (or sleeps).
+static func is_settled(rig: Dictionary) -> bool:
+	for bone_value: Variant in rig.get("bones", []):
+		var body := (bone_value as Dictionary).get("body") as RigidBody3D
+		if is_instance_valid(body) and not body.sleeping \
+				and (body.linear_velocity.length() > SETTLED_LINEAR_MPS or body.angular_velocity.length() > SETTLED_ANGULAR_RPS):
+			return false
+	return true
+
+## True when the chest of the body faces up (it lies on its back). The way the chest faces is the way the actor faces in
+## the rest pose, carried to the pose the chest has now.
+static func is_face_up(rig: Dictionary) -> bool:
+	var skeleton := rig.get("skeleton") as Skeleton3D
+	var bodies: Dictionary = rig.get("bodies", {})
+	var chest := bodies.get("Bip01 Spine1", bodies.get("Bip01 Pelvis")) as RigidBody3D
+	if not is_instance_valid(skeleton) or not is_instance_valid(chest):
+		return true
+	var bone_index := skeleton.find_bone("Bip01 Spine1" if bodies.has("Bip01 Spine1") else "Bip01 Pelvis")
+	var rest_basis := skeleton.get_bone_global_rest(bone_index).basis.orthonormalized()
+	var front := chest.global_basis.orthonormalized() * (rest_basis.inverse() * _rest_forward(skeleton))
+	return front.y >= 0.0
+
+## Ends the rag doll of a knocked-down actor so that it can get up with `animation` (the first frame of the get-up clip):
+## the actor is turned and moved so that the clip's lying pose lies where the body lies, the skeleton keeps the pose of
+## the bodies (the clip blends from it), and the actor walks again.
+static func hand_back(actor: Dictionary, host: Object, animation: Dictionary) -> void:
+	var rig: Dictionary = actor.get("ragdoll", {})
+	var skeleton := rig.get("skeleton") as Skeleton3D
+	var actor_root := actor.get("root") as Node3D
+	var bodies: Dictionary = rig.get("bodies", {})
+	var pelvis := bodies.get("Bip01 Pelvis") as RigidBody3D
+	var head := bodies.get("Bip01 Head") as RigidBody3D
+	if is_instance_valid(skeleton) and is_instance_valid(actor_root) and is_instance_valid(pelvis) and not animation.is_empty():
+		host.call("_apply_animation_pose", skeleton, animation, float(animation.get("start_time", 0.0)), false)
+		var pelvis_index := skeleton.find_bone("Bip01 Pelvis")
+		var head_index := skeleton.find_bone("Bip01 Head")
+		var clip_pelvis := skeleton.get_bone_global_pose(pelvis_index).origin
+		var clip_head := skeleton.get_bone_global_pose(head_index).origin
+		var in_root := (actor_root.global_transform.affine_inverse() * skeleton.global_transform).basis
+		var clip_direction: Vector3 = in_root * (clip_head - clip_pelvis)
+		var body_direction := (head.global_position - pelvis.global_position) if is_instance_valid(head) else Vector3.ZERO
+		if Vector2(clip_direction.x, clip_direction.z).length() > ALIGN_MIN_LENGTH \
+				and Vector2(body_direction.x, body_direction.z).length() > ALIGN_MIN_LENGTH:
+			var yaw := atan2(clip_direction.z, clip_direction.x) - atan2(body_direction.z, body_direction.x)
+			actor_root.global_rotation = Vector3(0.0, yaw, 0.0)
+			actor["animation_heading"] = yaw
+		var clip_pelvis_world := skeleton.to_global(clip_pelvis)
+		var shift := pelvis.global_position - clip_pelvis_world
+		actor_root.global_position += Vector3(shift.x, 0.0, shift.z)
+		var query := PhysicsRayQueryParameters3D.create(
+			pelvis.global_position + Vector3.UP * 0.3, pelvis.global_position + Vector3.DOWN * 2.0, FLOOR_MASK
+		)
+		var hit := actor_root.get_world_3d().direct_space_state.intersect_ray(query)
+		if not hit.is_empty():
+			actor_root.global_position.y = (hit.position as Vector3).y
+	# The skeleton shows the bodies again, now from the turned and moved actor.
+	rig["applied"] = false
+	update(rig)
+	if is_instance_valid(actor_root):
+		if actor_root is CollisionObject3D:
+			(actor_root as CollisionObject3D).collision_layer = int(rig.get("root_layer", 0))
+			(actor_root as CollisionObject3D).collision_mask = int(rig.get("root_mask", 0))
+		if actor_root is CharacterBody3D:
+			(actor_root as CharacterBody3D).velocity = Vector3.ZERO
+		actor_root.set_physics_process(true)
+	var rag_root := rig.get("root") as Node
+	if is_instance_valid(rag_root):
+		rag_root.queue_free()
+	actor.erase("ragdoll")
 
 ## Puts each driven bone where its body is. A rag doll that lies still keeps the pose it has.
 static func update(rig: Dictionary) -> void:
@@ -270,14 +356,7 @@ static func _add_hinge(
 	var bone_index := skeleton.find_bone(str(segment.bone))
 	var rest := skeleton.get_bone_global_rest(bone_index)
 	var rest_basis := rest.basis.orthonormalized()
-	var foot_index := skeleton.find_bone("Bip01 L Foot")
-	var toe_index := skeleton.find_bone("Bip01 L Toe0")
-	var forward_rest := Vector3(0.0, 0.0, -1.0)
-	if foot_index >= 0 and toe_index >= 0:
-		var toe_offset := skeleton.get_bone_global_rest(toe_index).origin - skeleton.get_bone_global_rest(foot_index).origin
-		toe_offset.y = 0.0
-		if toe_offset.length() > 0.001:
-			forward_rest = toe_offset.normalized()
+	var forward_rest := _rest_forward(skeleton)
 	var end_index := skeleton.find_bone(str(segment.end))
 	var segment_rest := Vector3.DOWN
 	if end_index >= 0:
@@ -311,3 +390,14 @@ static func _add_hinge(
 static func _body_direction(body: RigidBody3D) -> Vector3:
 	var shape := body.get_child(0) as CollisionShape3D
 	return (body.global_basis * shape.transform.basis * Vector3.UP).normalized()
+
+## The way the actor faces in the rest pose, in skeleton space: from the foot to the toes.
+static func _rest_forward(skeleton: Skeleton3D) -> Vector3:
+	var foot_index := skeleton.find_bone("Bip01 L Foot")
+	var toe_index := skeleton.find_bone("Bip01 L Toe0")
+	if foot_index >= 0 and toe_index >= 0:
+		var toe_offset := skeleton.get_bone_global_rest(toe_index).origin - skeleton.get_bone_global_rest(foot_index).origin
+		toe_offset.y = 0.0
+		if toe_offset.length() > 0.001:
+			return toe_offset.normalized()
+	return Vector3(0.0, 0.0, -1.0)

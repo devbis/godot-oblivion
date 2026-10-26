@@ -501,7 +501,8 @@ func _advance_actor_fatigue(actor: Dictionary, root: Node3D, delta: float) -> vo
 	var knockdown_state := str(actor.get("knockdown_state", ""))
 	if knockdown_state.is_empty() and float(fatigue["current"]) <= 0.0:
 		_begin_knockdown(actor)
-	elif knockdown_state == "downed" and float(fatigue["current"]) >= maximum * FATIGUE_DOWN_RECOVERY_RATIO:
+	elif knockdown_state == "downed" and float(fatigue["current"]) >= maximum * FATIGUE_DOWN_RECOVERY_RATIO \
+			and (not actor.has("ragdoll") or ActorRagdoll.is_settled(actor.ragdoll)):
 		_begin_get_up(actor)
 
 func _actor_fatigue_current(actor: Dictionary) -> float:
@@ -546,27 +547,55 @@ func _begin_knockdown(actor: Dictionary) -> void:
 	var root := actor.get("root") as Node3D
 	actor["knockdown_state"] = "falling"
 	actor["hit_attack_lock_remaining"] = 0.0
-	actor["hit_reaction"] = {"kind": "stagger", "animation": _stagger_animation(actor)}
 	actor["active_animation"] = ""
 	_interrupt_actor_attack(actor)
 	if is_instance_valid(root):
 		_stop_route(root)
 		root.call("set_knocked_down", true)
-	_request_clip(actor, _stagger_animation(actor))
-	_request_special_clip(
-		actor, "Downed", "Characters/_male/idleanims/deathidle.kf", "SpecialIdle_DeathIdle", true
-	)
+	# The body goes limp and falls as it falls: on its back or on its face (see _begin_get_up).
+	if ActorRagdoll.start(actor, host.get("player") as PhysicsBody3D):
+		actor["knockdown_state"] = "downed"
+		actor["hit_reaction"] = {"kind": "downed", "animation": "Downed"}
+	else:
+		actor["hit_reaction"] = {"kind": "stagger", "animation": _stagger_animation(actor)}
+		_request_clip(actor, _stagger_animation(actor))
+		_request_special_clip(
+			actor, "Downed", "Characters/_male/idleanims/deathidle.kf", "SpecialIdle_DeathIdle", true
+		)
 	print("OpenOB combat: %s falls at zero fatigue" % str(actor.get("reference_name", "NPC")))
 
+## The actor gets up with the clip for the way it lies: face up or face down.
 func _begin_get_up(actor: Dictionary) -> void:
 	var prefix := _prefix(actor)
 	if prefix not in ["handtohand", "bow"]:
 		prefix = "onehand"
-	var asset_path := "Characters/_male/idleanims/%sgetupfaceup.kf" % prefix
+	var face_up := true
+	if actor.has("ragdoll"):
+		face_up = ActorRagdoll.is_face_up(actor.ragdoll)
+	var clip_name := "GetUpFaceUp" if face_up else "GetUpFaceDown"
+	var asset_path := "Characters/_male/idleanims/%sgetup%s.kf" % [prefix, "faceup" if face_up else "facedown"]
 	actor["knockdown_state"] = "getting_up"
-	actor["hit_reaction"] = {"kind": "getup", "animation": "GetUp"}
+	actor["hit_reaction"] = {"kind": "getup", "animation": clip_name}
 	actor["active_animation"] = ""
-	_request_special_clip(actor, "GetUp", asset_path, "SpecialIdle_GetUpFaceUp", false)
+	await _request_special_clip(
+		actor, clip_name, asset_path, "SpecialIdle_GetUpFaceUp" if face_up else "SpecialIdle_GetUpFaceDown", false
+	)
+	# Hit again or killed while the clip loaded: the actor is down again.
+	if bool(actor.get("dead", false)) or str(actor.get("knockdown_state", "")) != "getting_up":
+		return
+	var animation: Dictionary = (actor.get("animations", {}) as Dictionary).get(clip_name, {})
+	print("OpenOB combat: %s gets up %s" % [str(actor.get("reference_name", "NPC")), "face up" if face_up else "face down"])
+	if actor.has("ragdoll"):
+		ActorRagdoll.hand_back(actor, host, animation)
+	if animation.is_empty():
+		# No clip: stand up where the body lay.
+		actor.erase("hit_reaction")
+		actor["knockdown_state"] = ""
+		var root := actor.get("root") as Node3D
+		if is_instance_valid(root):
+			root.call("set_knocked_down", false)
+		host.call("_refresh_actor_route", actor)
+	actor["active_animation"] = ""
 
 func _interrupt_actor_attack(actor: Dictionary) -> void:
 	if actor.has("combat"):
