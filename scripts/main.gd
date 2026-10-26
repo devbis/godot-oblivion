@@ -5755,6 +5755,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var creature_skeleton: Skeleton3D = null
 		if is_creature:
 			var creature_model := str(npc.get("model_path", ""))
+			await _ensure_creature_clip_index(creature_model.replace("\\", "/").get_base_dir() + "/")
 			await assets.meshes_for_model(creature_model)
 			if stream_generation != _npc_stream_generation:
 				return
@@ -6360,7 +6361,8 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 			requests[clip_name] = "missing"
 			actor["animation_clip_requests"] = requests
 			return
-		asset_path = animation_root + source_clip + ".kf"
+		asset_path = str(source_clip.path)
+		sequence_name = str(source_clip.sequence)
 	elif NPC_MOVEMENT_KFS.has(clip_name):
 		var info: Array = NPC_MOVEMENT_KFS[clip_name]
 		asset_path = str(info[0])
@@ -6373,39 +6375,70 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 	actor["animation_clip_requests"] = requests
 	_load_npc_animation(actor, clip_name, asset_path, sequence_name)
 
-var _creature_clip_sets: Dictionary = {}
+## The stances a clip file name can start with ("handtohandidle.kf"); the rest of the name is free, as the original
+## reads the group a clip plays as from the sequence inside the file.
+const CREATURE_CLIP_STANCES := ["handtohand", "onehand", "twohand", "staff", "bow", "sneak"]
 
-## The clip names (lower case, without .kf) in a creature's animation folder.
+## Animation folder -> {clip key: {"path", "sequence"}}. The key is the stance of the file name with the group the
+## sequence is named after ("runforward.kf" holds FastForward, so it plays as "fastforward"; "block.kf" holds BlockIdle),
+## and the file name itself as well.
+var _creature_clip_indexes: Dictionary = {}
+var _creature_clip_indexes_ready: Dictionary = {}
+
+func _ensure_creature_clip_index(animation_root: String) -> void:
+	if _creature_clip_indexes.has(animation_root):
+		# Another creature of the folder is reading it: wait for the whole index.
+		while not _creature_clip_indexes_ready.has(animation_root):
+			await get_tree().process_frame
+		return
+	var index := {}
+	_creature_clip_indexes[animation_root] = index
+	var folder := "meshes/" + animation_root.to_lower()
+	for path_value: Variant in data_reader.list_assets(folder):
+		var path := str(path_value).replace("\\", "/")
+		if not path.ends_with(".kf") or path.get_base_dir() + "/" != folder:
+			continue
+		var asset_path := path.trim_prefix("meshes/")
+		await assets.meshes_for_model(asset_path)
+		var metadata: Dictionary = assets.nif_metadata_cache.get(asset_path.to_lower(), {})
+		var sequences: Array = metadata.get("animations", [])
+		if sequences.is_empty():
+			continue
+		var sequence_name := str((sequences[0] as Dictionary).get("name", ""))
+		var stem := path.get_file().get_basename()
+		var stance := ""
+		for candidate: String in CREATURE_CLIP_STANCES:
+			if stem.begins_with(candidate):
+				stance = candidate
+				break
+		var group := sequence_name.to_lower()
+		if not stance.is_empty() and group.ends_with("_" + stance):
+			group = group.trim_suffix("_" + stance)
+		var entry := {"path": asset_path, "sequence": sequence_name}
+		if not index.has(stance + group):
+			index[stance + group] = entry
+		index[stem] = entry
+	_creature_clip_indexes_ready[animation_root] = true
+
+## The clip keys of a creature's folder (see _ensure_creature_clip_index).
 func creature_clip_names(animation_root: String) -> Dictionary:
-	if not _creature_clip_sets.has(animation_root):
-		var names := {}
-		for path_value: Variant in data_reader.list_assets("meshes/" + animation_root.to_lower()):
-			var path := str(path_value).replace("\\", "/")
-			if path.ends_with(".kf") and path.get_base_dir().get_file() == animation_root.trim_suffix("/").get_file().to_lower():
-				names[path.get_file().get_basename()] = true
-		_creature_clip_sets[animation_root] = names
-	return _creature_clip_sets[animation_root]
+	return _creature_clip_indexes.get(animation_root, {})
 
-## The file (lower case, without .kf) that plays as `clip_name` for a creature: the clip itself, or the one its folder
-## has in its place (a goblin runs with "runforward", where a rat has "fastforward"). Empty when it has none.
-func _creature_clip_source(actor: Dictionary, clip_name: String) -> String:
-	var lowered := clip_name.to_lower()
-	var names := creature_clip_names(str(actor.get("animation_root", "")))
-	if names.has(lowered):
-		return lowered
-	var candidates: Array[String] = []
-	if lowered.ends_with("fastforward"):
-		var stance := lowered.trim_suffix("fastforward")
-		candidates = [stance + "runforward", "runforward", stance + "forward", "forward"]
-	for candidate: String in candidates:
-		if names.has(candidate):
-			return candidate
-	return ""
+## The file and sequence that play as `clip_name` for a creature: its own, or without the stance when the folder has no
+## clip for the stance (a goblin has "forward" for every stance). Empty when it has none.
+func _creature_clip_source(actor: Dictionary, clip_name: String) -> Dictionary:
+	var index := creature_clip_names(str(actor.get("animation_root", "")))
+	var key := clip_name.to_lower()
+	if index.has(key):
+		return index[key]
+	for stance: String in CREATURE_CLIP_STANCES:
+		if key.begins_with(stance) and index.has(key.trim_prefix(stance)):
+			return index[key.trim_prefix(stance)]
+	return {}
 
 ## True for any clip of a humanoid; for a creature, only when its folder has the clip.
 func creature_has_clip(actor: Dictionary, clip_name: String) -> bool:
-	var animation_root := str(actor.get("animation_root", ""))
-	return animation_root.is_empty() or not _creature_clip_source(actor, clip_name).is_empty()
+	return str(actor.get("animation_root", "")).is_empty() or not _creature_clip_source(actor, clip_name).is_empty()
 
 func _load_npc_animation(actor: Dictionary, clip_name: String, asset_path: String, sequence_name: String) -> void:
 	await assets.meshes_for_model(asset_path)
