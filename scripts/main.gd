@@ -5392,7 +5392,7 @@ func _start_player_knockdown() -> void:
 	_player_active_animation_reset()
 	_preload_player_combat_stance(_player_weapon_type())
 	_request_player_reaction_clip("Downed", "Characters/_male/idleanims/deathidle.kf", "SpecialIdle_DeathIdle", true)
-	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceDown", false)
+	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceUp", false)
 	if player.is_first_person and _arms != null:
 		_arms.react_to_hit()
 	print("OpenOB combat: player falls at zero fatigue")
@@ -5401,13 +5401,13 @@ func _player_getup_asset_path() -> String:
 	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
 	if prefix not in ["handtohand", "bow"]:
 		prefix = "onehand"
-	return "Characters/_male/idleanims/%sgetupfacedown.kf" % prefix
+	return "Characters/_male/idleanims/%sgetupfaceup.kf" % prefix
 
 func _start_player_get_up() -> void:
 	_player_knockdown_state = "getting_up"
 	_player_hit_reaction = {"kind": "getup", "animation": "GetUp"}
 	_player_active_animation_reset()
-	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceDown", false)
+	_request_player_reaction_clip("GetUp", _player_getup_asset_path(), "SpecialIdle_GetUpFaceUp", false)
 
 func _request_player_reaction_clip(clip_name: String, asset_path: String, sequence_name: String, loops: bool) -> void:
 	if _player_animations.has(clip_name) or _player_reaction_clips_loading.has(clip_name) or assets == null:
@@ -7015,7 +7015,7 @@ func _update_player_animation(delta: float) -> void:
 			wanted_animation = reaction_animation
 		elif reaction_animation in ["Downed", "GetUp"]:
 			var asset_path := "Characters/_male/idleanims/deathidle.kf" if reaction_animation == "Downed" else _player_getup_asset_path()
-			var sequence := "SpecialIdle_DeathIdle" if reaction_animation == "Downed" else "SpecialIdle_GetUpFaceDown"
+			var sequence := "SpecialIdle_DeathIdle" if reaction_animation == "Downed" else "SpecialIdle_GetUpFaceUp"
 			_request_player_reaction_clip(reaction_animation, asset_path, sequence, reaction_animation == "Downed")
 		else:
 			_preload_player_combat_stance(_player_weapon_type())

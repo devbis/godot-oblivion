@@ -562,11 +562,11 @@ func _begin_get_up(actor: Dictionary) -> void:
 	var prefix := _prefix(actor)
 	if prefix not in ["handtohand", "bow"]:
 		prefix = "onehand"
-	var asset_path := "Characters/_male/idleanims/%sgetupfacedown.kf" % prefix
+	var asset_path := "Characters/_male/idleanims/%sgetupfaceup.kf" % prefix
 	actor["knockdown_state"] = "getting_up"
 	actor["hit_reaction"] = {"kind": "getup", "animation": "GetUp"}
 	actor["active_animation"] = ""
-	_request_special_clip(actor, "GetUp", asset_path, "SpecialIdle_GetUpFaceDown", false)
+	_request_special_clip(actor, "GetUp", asset_path, "SpecialIdle_GetUpFaceUp", false)
 
 func _interrupt_actor_attack(actor: Dictionary) -> void:
 	if actor.has("combat"):
