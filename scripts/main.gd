@@ -27,6 +27,8 @@ const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
 	"fFatigueJumpBase", "fFatigueJumpMult", "fMagickaReturnBase", "fMagickaReturnMult",
 	"fFatigueAttackWeaponBase", "fFatigueAttackWeaponMult", "fFatigueBase", "fFatigueMult",
+	"fAIDefaultBlockSkillBase", "fAIDefaultBlockSkillMult",
+	"fAIDefaultBlockDuringAttackMult", "fAIDefaultBlockNoAttackMult",
 	"fMagicCostScale", "fMagicDurMagBaseCostMult", "fMagicAreaBaseCostMult",
 	"fMagicRangeTargetCostMult", "fMagicCasterSkillCostBase", "fMagicCasterSkillCostMult",
 ]
@@ -5253,10 +5255,13 @@ func _player_aim(muzzle_offset: Vector3) -> Dictionary:
 func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	var excluded: Array[RID] = [player.get_rid()]
 	projectile.excluded_bodies = excluded
-	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN \
-		if int(projectile.get("kind")) == CombatProjectile.Kind.SPELL else _player_hit_fatigue_damage()
-	projectile.connect(&"impacted", func(_hit_position: Vector3, collider: Object) -> void:
-		_provoke_actor(collider, hit_fatigue_damage)
+	var projectile_kind := int(projectile.get("kind"))
+	var is_spell := projectile_kind == CombatProjectile.Kind.SPELL
+	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN if is_spell else _player_hit_fatigue_damage()
+	projectile.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
+		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell)
+		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
+			AudioManager.play_arrow_impact(hit_position)
 	)
 	add_child(projectile)
 	projectile.global_position = aim.origin
@@ -5268,11 +5273,7 @@ func _loose_arrow() -> void:
 	if meshes.is_empty():
 		return
 	var arrow := CombatProjectile.new_arrow(meshes, (aim.direction as Vector3) * ARROW_SPEED_MPS)
-	arrow.connect(&"impacted", _on_arrow_impact)
 	_launch_projectile(arrow, aim)
-
-func _on_arrow_impact(hit_position: Vector3, _collider: Object) -> void:
-	AudioManager.play_arrow_impact(hit_position)
 
 ## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
 func _melee_hit() -> void:
@@ -5290,14 +5291,15 @@ func _melee_hit() -> void:
 		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	_provoke_actor(hit.get("collider"), _player_hit_fatigue_damage())
+	var blocked := _provoke_actor(hit.get("collider"), _player_hit_fatigue_damage(), true)
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
 		var flesh_hit := collider is CharacterBody3D and collider != player
 		var impact_host := collider as Node3D if collider is Node3D else null
-		AudioManager.play_weapon_impact(
-			Vector3(hit.position), _player_weapon_type(), flesh_hit, impact_host
-		)
+		if not blocked:
+			AudioManager.play_weapon_impact(
+				Vector3(hit.position), _player_weapon_type(), flesh_hit, impact_host
+			)
 	var body := hit.get("collider") as RigidBody3D
 	if body != null:
 		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
@@ -5423,15 +5425,15 @@ func _finish_player_hit_reaction() -> void:
 func _player_hit_fatigue_damage() -> float:
 	return maxf(NpcCombat.FATIGUE_HIT_MIN, float(_player_weapon_record.get("damage", 4.0)) * NpcCombat.FATIGUE_HIT_COST_MULT)
 
-func _provoke_actor(collider: Object, fatigue_damage: float = -1.0) -> void:
+func _provoke_actor(collider: Object, fatigue_damage: float = -1.0, allow_block := false) -> bool:
 	var node := collider as Node
 	if node == null or not node.has_meta("reference_id"):
-		return
+		return false
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
-	_npc_combat.receive_player_hit(
+	return _npc_combat.receive_player_hit(
 		int(node.get_meta("reference_id")), player.global_position,
-		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage()
+		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(), allow_block
 	)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
@@ -6496,7 +6498,7 @@ func _update_npc_actors(delta: float) -> void:
 			base_name = hit_reaction_animation
 			_end_npc_idle(actor)
 		var combat_state: Dictionary = actor.get("combat", {})
-		var attack_action_active := str(combat_state.get("state", "")) in ["swing", "dodge"]
+		var attack_action_active := str(combat_state.get("state", "")) in ["swing", "dodge", "block"]
 		if hit_reaction_animation.is_empty() and not attack_action_active and not swimming:
 			var air_animation := _npc_air_animation(actor, actor_root, grounded)
 			if not air_animation.is_empty():

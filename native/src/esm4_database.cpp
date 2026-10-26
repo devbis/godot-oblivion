@@ -840,6 +840,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "CSTD" && is_combat_style) {
             if (subrecord_size >= 1) combat_style.dodge_chance = value[0];
             if (subrecord_size >= 2) combat_style.dodge_left_right_chance = value[1];
+            if (subrecord_size >= 37) combat_style.block_chance = value[36];
             if (subrecord_size >= 8) combat_style.dodge_left_right_min_time = f32(value + 4);
             if (subrecord_size >= 12) combat_style.dodge_left_right_max_time = f32(value + 8);
             if (subrecord_size >= 16) combat_style.dodge_forward_min_time = f32(value + 12);
@@ -857,6 +858,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             if (subrecord_size >= 32) combat_style.dodge_back_not_under_attack_mult = f32(value + 28);
             if (subrecord_size >= 36) combat_style.dodge_forward_while_attacking_mult = f32(value + 32);
             if (subrecord_size >= 40) combat_style.dodge_forward_not_attacking_mult = f32(value + 36);
+            if (subrecord_size >= 44) combat_style.block_skill_modifier_mult = f32(value + 40);
+            if (subrecord_size >= 48) combat_style.block_skill_modifier_base = f32(value + 44);
+            if (subrecord_size >= 52) combat_style.block_under_attack_mult = f32(value + 48);
+            if (subrecord_size >= 56) combat_style.block_not_under_attack_mult = f32(value + 52);
         } else if (tag == "VNAM" && is_race && subrecord_size >= 8) {
             race_face_gen.voice_form_id_male = u32(value);
             race_face_gen.voice_form_id_female = u32(value + 4);

@@ -488,6 +488,7 @@ public:
             combat_style["form_id"] = static_cast<int64_t>(style->form_id);
             combat_style["dodge_chance"] = style->dodge_chance;
             combat_style["dodge_left_right_chance"] = style->dodge_left_right_chance;
+            combat_style["block_chance"] = style->block_chance;
             combat_style["dodge_left_right_min_time"] = style->dodge_left_right_min_time;
             combat_style["dodge_left_right_max_time"] = style->dodge_left_right_max_time;
             combat_style["dodge_forward_min_time"] = style->dodge_forward_min_time;
@@ -504,6 +505,10 @@ public:
             combat_style["dodge_back_not_under_attack_mult"] = style->dodge_back_not_under_attack_mult;
             combat_style["dodge_forward_while_attacking_mult"] = style->dodge_forward_while_attacking_mult;
             combat_style["dodge_forward_not_attacking_mult"] = style->dodge_forward_not_attacking_mult;
+            combat_style["block_skill_modifier_mult"] = style->block_skill_modifier_mult;
+            combat_style["block_skill_modifier_base"] = style->block_skill_modifier_base;
+            combat_style["block_under_attack_mult"] = style->block_under_attack_mult;
+            combat_style["block_not_under_attack_mult"] = style->block_not_under_attack_mult;
         }
         result["combat_style"] = combat_style;
         const auto* male_voice_folder = data_->find_race_voice_folder(npc->race_form_id, false);

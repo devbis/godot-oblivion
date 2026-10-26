@@ -60,6 +60,7 @@ struct CombatStyleRecord {
     std::uint32_t form_id = 0;
     std::uint8_t dodge_chance = 75;
     std::uint8_t dodge_left_right_chance = 50;
+    std::uint8_t block_chance = 30;
     float dodge_left_right_min_time = 0.5f;
     float dodge_left_right_max_time = 1.5f;
     float dodge_forward_min_time = 0.5f;
@@ -76,6 +77,10 @@ struct CombatStyleRecord {
     float dodge_back_not_under_attack_mult = 0.7f;
     float dodge_forward_while_attacking_mult = 1.0f;
     float dodge_forward_not_attacking_mult = 0.5f;
+    float block_skill_modifier_mult = 20.0f;
+    float block_skill_modifier_base = 0.0f;
+    float block_under_attack_mult = 2.0f;
+    float block_not_under_attack_mult = 1.0f;
 };
 
 struct SpellEffectRecord {

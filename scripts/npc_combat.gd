@@ -19,12 +19,14 @@ const RUN_SPEED_MPS := 3.4
 const RUNNING_ANIMATION_SPEED_MPS := 2.2
 const NPC_ATTACK_RECOVERY_MIN_S := 0.9
 const NPC_ATTACK_RECOVERY_MAX_S := 1.3
+const BLOCK_HOLD_DURATION_S := 0.45
 const CLIP_FOLDER := "Characters/_male/"
 const DODGE_CLIPS := ["dodgeback", "dodgeforward", "dodgeleft", "dodgeright"]
 const DODGE_BASE_CHANCE_SETTING := "iAIDefaultDodgeChance"
 const DODGE_LEFT_RIGHT_CHANCE_SETTING := "iAIDefaultDodgeLeftRightChance"
 const DODGE_DEFAULT_CHANCE := 75.0
 const DODGE_DEFAULT_LEFT_RIGHT_CHANCE := 50.0
+const BLOCK_DEFAULT_CHANCE := 30.0
 const DODGE_REACTION_WINDOW_S := 0.3
 const DODGE_DISTANCE_M := 0.45
 const DODGE_MOVEMENT_DURATION_S := 0.3
@@ -51,6 +53,7 @@ const FATIGUE_RUN_BASE_SETTING := "fFatigueRunBase"
 const ATTRIBUTE_STRENGTH := 0
 const ATTRIBUTE_ENDURANCE := 5
 const SKILL_BLADE := 2
+const SKILL_BLOCK := 3
 const SKILL_HAND_TO_HAND := 5
 ## WEAP type -> the skill a blow uses: blades, blunt weapons and staves, bows (Marksman, 16).
 const WEAPON_SKILLS := {0: 2, 1: 2, 2: 4, 3: 4, 4: 4, 5: 16}
@@ -283,16 +286,21 @@ func _attack_fatigue_cost(actor: Dictionary) -> float:
 	return float(settings.get(FATIGUE_ATTACK_WEAPON_BASE_SETTING, FATIGUE_ATTACK_COST)) \
 		+ _damage(actor) * float(settings.get(FATIGUE_ATTACK_WEAPON_MULT_SETTING, 0.0))
 
-func receive_player_hit(reference_id: int, source_position: Vector3, fatigue_damage: float) -> void:
+func receive_player_hit(
+	reference_id: int, source_position: Vector3, fatigue_damage: float, allow_block := false
+) -> bool:
 	var actor: Dictionary = {}
 	for candidate: Dictionary in host.get("_npc_actors"):
 		if int(candidate.get("reference_id", 0)) == reference_id:
 			actor = candidate
 			break
 	if actor.is_empty():
-		return
+		return false
 	provoke(reference_id)
-	_react_to_hit(actor, source_position, fatigue_damage, 0, _player_base_form_id())
+	var blocked := allow_block and _actor_blocks_hit(actor, source_position)
+	var received_fatigue := maxf(8.0, fatigue_damage * BLOCKED_DAMAGE_SHARE) if blocked else fatigue_damage
+	_react_to_hit(actor, source_position, received_fatigue, 0, _player_base_form_id(), blocked)
+	return blocked
 
 ## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
 func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) -> void:
@@ -300,6 +308,9 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 		return
 	var attacker_root := attacker.get("root") as Node3D
 	var attacker_id := int(attacker.get("reference_id", 0))
+	var blocked := is_instance_valid(attacker_root) and _actor_blocks_hit(victim, attacker_root.global_position)
+	if blocked:
+		damage *= BLOCKED_DAMAGE_SHARE
 	var health: Dictionary = victim.get("health", {})
 	if not health.is_empty():
 		var remaining := maxf(0.0, float(health.get("current", 0.0)) - damage)
@@ -319,25 +330,29 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
 	_react_to_hit(
 		victim, source, _hit_fatigue_damage(attacker, damage), attacker_id if fight_back else -1,
-		int(attacker.get("base_form_id", 0))
+		int(attacker.get("base_form_id", 0)), blocked
 	)
 	_call_allies(victim, attacker)
 
 func _react_to_hit(
 	actor: Dictionary, source_position: Vector3, fatigue_damage: float,
-	fight_target_id: int, listener_base_form_id: int
+	fight_target_id: int, listener_base_form_id: int, blocked := false
 ) -> void:
 	var root := actor.get("root") as Node3D
 	if is_instance_valid(root):
-		var away := root.global_position - source_position
-		away.y = 0.0
-		if away.length_squared() > 0.0001:
-			root.call("apply_hit_impulse", away.normalized() * NPC_HIT_KNOCKBACK_MPS)
+		if not blocked:
+			var away := root.global_position - source_position
+			away.y = 0.0
+			if away.length_squared() > 0.0001:
+				root.call("apply_hit_impulse", away.normalized() * NPC_HIT_KNOCKBACK_MPS)
 		var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
 		if audio_manager != null:
-			audio_manager.call(
-				"play_combat_voice", root, int(actor.get("base_form_id", 0)), listener_base_form_id, "Hit"
-			)
+			if blocked:
+				audio_manager.call("play_weapon_block", root, _weapon_type(actor))
+			else:
+				audio_manager.call(
+					"play_combat_voice", root, int(actor.get("base_form_id", 0)), listener_base_form_id, "Hit"
+				)
 	var knockdown_state := str(actor.get("knockdown_state", ""))
 	if knockdown_state in ["falling", "downed"]:
 		return
@@ -350,7 +365,21 @@ func _react_to_hit(
 	else:
 		if is_instance_valid(root) and not actor.has("combat") and fight_target_id >= 0:
 			_begin_combat(actor, root, fight_target_id, false)
-		_begin_stagger(actor)
+		_begin_stagger(actor, blocked)
+
+func _actor_blocks_hit(actor: Dictionary, source_position: Vector3) -> bool:
+	var combat: Dictionary = actor.get("combat", {})
+	if str(combat.get("state", "")) != "block":
+		return false
+	var root := actor.get("root") as Node3D
+	if not is_instance_valid(root):
+		return false
+	var toward_source := source_position - root.global_position
+	var forward := -root.global_basis.z
+	toward_source.y = 0.0
+	forward.y = 0.0
+	return toward_source.length_squared() > 0.0001 and forward.length_squared() > 0.0001 \
+		and forward.normalized().dot(toward_source.normalized()) > 0.3
 
 ## Actors that share a faction with the victim come to its help against the attacker.
 func _call_allies(victim: Dictionary, attacker: Dictionary) -> void:
@@ -447,15 +476,23 @@ func _apply_actor_fatigue(actor: Dictionary, amount: float) -> void:
 	fatigue["current"] = maxf(0.0, float(fatigue.get("current", 0.0)) - maxf(amount, 0.0))
 	actor["fatigue"] = fatigue
 
-func _stagger_animation(actor: Dictionary) -> String:
+func _stagger_animation(actor: Dictionary, blocked := false) -> String:
 	var root := actor.get("root") as Node3D
+	if blocked and (not is_instance_valid(root) or not bool(root.get("is_swimming"))):
+		var block_prefix := _prefix(actor)
+		var candidates := ["bowblockhit" if block_prefix == "bow" else block_prefix + "blockhit", "blockhit"]
+		var animations: Dictionary = actor.get("animations", {})
+		var requests: Dictionary = actor.get("animation_clip_requests", {})
+		for candidate: String in candidates:
+			if animations.has(candidate) or str(requests.get(candidate, "")) != "missing":
+				return candidate
 	if is_instance_valid(root) and bool(root.get("is_swimming")):
 		return "swimstagger"
 	var prefix := _prefix(actor)
 	return "bowblockhit" if prefix == "bow" else prefix + "stagger"
 
-func _begin_stagger(actor: Dictionary) -> void:
-	var clip := _stagger_animation(actor)
+func _begin_stagger(actor: Dictionary, blocked := false) -> void:
+	var clip := _stagger_animation(actor, blocked)
 	actor["hit_reaction"] = {"kind": "stagger", "animation": clip}
 	actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
 	actor["active_animation"] = ""
@@ -547,7 +584,7 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 				_combat_target_base_form_id(target_id), "Attack"
 			)
 	var prefix := _prefix(actor)
-	var suffixes: Array[String] = ["idle", "fastforward", "forward"]
+	var suffixes: Array[String] = ["idle", "fastforward", "forward", "blockidle", "blockhit"]
 	suffixes.append_array(_attack_suffixes(prefix))
 	if prefix == "handtohand":
 		suffixes.append_array(["attackright_jab", "attackleft_jab", "attackright_hook", "attackleft_hook"])
@@ -622,6 +659,9 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 	if str(combat.state) == "dodge":
 		_update_dodge(actor, root, flat, combat, delta)
 		return
+	if str(combat.state) == "block":
+		_update_block(actor, root, flat, combat, delta)
+		return
 	var is_attacking := str(combat.state) == "swing"
 	var attack_imminent := _target_attack_imminent(actor, root, target_id, target_actor, target, distance)
 	if not attack_imminent:
@@ -629,6 +669,9 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 	elif not bool(combat.get("dodge_attempted", false)):
 		combat["dodge_attempted"] = true
 		if float(combat.get("dodge_cooldown", 0.0)) <= 0.0:
+			if randf() * 100.0 < _block_chance(actor):
+				if _begin_block(actor, root, combat, flat, delta):
+					return
 			var dodge_clip := _select_dodge_clip(actor, root, target)
 			if not dodge_clip.is_empty():
 				if randf() * 100.0 < _dodge_chance(actor, is_attacking, dodge_clip):
@@ -739,6 +782,64 @@ func _dodge_chance(actor: Dictionary, is_attacking: bool, clip: String) -> float
 		var modifier_setting := "fAIDefaultDodgeDuringAttackMult" if is_attacking else "fAIDefaultDodgeNoAttackMult"
 		chance *= _setting_or(modifier_setting, 1.0)
 	return clampf(chance, 0.0, 100.0)
+
+## FUN_00546d40: block chance = under-attack multiplier * (CSTD chance + skill base + skill * skill multiplier / 100).
+## When Advanced is off, Oblivion.exe reads the four skill/multiplier terms from its default GMST values.
+func _block_chance(actor: Dictionary) -> float:
+	var style: Dictionary = actor.get("combat_style", {})
+	var use_advanced := bool(style.get("has_advanced_data", false)) and bool(style.get("advanced_enabled", false))
+	var base_chance := float(style.get("block_chance", BLOCK_DEFAULT_CHANCE))
+	var skill_multiplier := float(style.get("block_skill_modifier_mult", 20.0)) if use_advanced \
+		else _setting_or("fAIDefaultBlockSkillMult", 20.0)
+	var skill_base := float(style.get("block_skill_modifier_base", 0.0)) if use_advanced \
+		else _setting_or("fAIDefaultBlockSkillBase", 0.0)
+	var attack_multiplier := float(style.get("block_under_attack_mult", 2.0)) if use_advanced \
+		else _setting_or("fAIDefaultBlockDuringAttackMult", 2.0)
+	var skill := _skill_value(actor, SKILL_BLOCK)
+	return clampf((base_chance + skill_base + skill * skill_multiplier * 0.01) * attack_multiplier, 0.0, 100.0)
+
+func _begin_block(actor: Dictionary, root: Node3D, combat: Dictionary, flat: Vector2, delta: float) -> bool:
+	if bool(root.get("is_swimming")) or (
+		root.has_method("is_animation_grounded") and not bool(root.call("is_animation_grounded"))
+	):
+		return false
+	var animations: Dictionary = actor.get("animations", {})
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	var prefix := _prefix(actor)
+	var block_clip := ""
+	for candidate: String in [prefix + "blockidle", "blockidle"]:
+		if not (animations.get(candidate, {}) as Dictionary).is_empty():
+			block_clip = candidate
+			break
+	if block_clip.is_empty():
+		for candidate: String in [prefix + "blockidle", "blockidle"]:
+			if str(requests.get(candidate, "")) != "missing":
+				_request_clip(actor, candidate)
+				return false
+		return false
+	if str(combat.get("state", "")) == "swing":
+		_interrupt_actor_attack(actor)
+	_stop_route(root)
+	_face(root, flat, delta)
+	combat["state"] = "block"
+	combat["block_clip"] = block_clip
+	combat["block_time_remaining"] = BLOCK_HOLD_DURATION_S
+	combat["clip"] = ""
+	combat["hit_done"] = true
+	actor["combat_anim"] = block_clip
+	actor["active_animation"] = ""
+	return true
+
+func _update_block(actor: Dictionary, root: Node3D, flat: Vector2, combat: Dictionary, delta: float) -> void:
+	_face(root, flat, delta)
+	var block_clip := str(combat.get("block_clip", _prefix(actor) + "blockidle"))
+	actor["combat_anim"] = block_clip
+	combat["block_time_remaining"] = maxf(0.0, float(combat.get("block_time_remaining", 0.0)) - delta)
+	if float(combat["block_time_remaining"]) <= 0.0:
+		combat["state"] = "chase"
+		combat["repath"] = 0.0
+		combat["cooldown"] = maxf(float(combat.get("cooldown", 0.0)), 0.25)
+		actor["combat_anim"] = _prefix(actor) + "idle"
 
 func _select_dodge_clip(actor: Dictionary, root: Node3D, target: Node3D) -> String:
 	var away := root.global_position - target.global_position
