@@ -24,7 +24,13 @@ const NUDGE_REACH_M := 2.5
 ## A rag doll is at rest below these speeds; the get-up clip then lines up with it.
 const SETTLED_LINEAR_MPS := 0.25
 const SETTLED_ANGULAR_RPS := 1.0
-const ALIGN_MIN_LENGTH := 0.05
+const ALIGN_MIN_FIT := 0.001
+## Bones that line the get-up clip up with the bodies, with their weights.
+const ALIGN_BONES := [
+	["Bip01 Head", 3.0], ["Bip01 Spine1", 3.0], ["Bip01 L Thigh", 1.0], ["Bip01 R Thigh", 1.0],
+	["Bip01 L UpperArm", 1.0], ["Bip01 R UpperArm", 1.0], ["Bip01 L Calf", 1.0], ["Bip01 R Calf", 1.0],
+	["Bip01 L Forearm", 0.5], ["Bip01 R Forearm", 0.5],
+]
 const FLOOR_MASK := 2
 
 ## One rigid segment per entry: it runs from `bone` to `end` (empty: it carries on away from its parent), hangs on
@@ -194,19 +200,29 @@ static func hand_back(actor: Dictionary, host: Object, animation: Dictionary) ->
 	var actor_root := actor.get("root") as Node3D
 	var bodies: Dictionary = rig.get("bodies", {})
 	var pelvis := bodies.get("Bip01 Pelvis") as RigidBody3D
-	var head := bodies.get("Bip01 Head") as RigidBody3D
 	if is_instance_valid(skeleton) and is_instance_valid(actor_root) and is_instance_valid(pelvis) and not animation.is_empty():
 		host.call("_apply_animation_pose", skeleton, animation, float(animation.get("start_time", 0.0)), false)
 		var pelvis_index := skeleton.find_bone("Bip01 Pelvis")
-		var head_index := skeleton.find_bone("Bip01 Head")
 		var clip_pelvis := skeleton.get_bone_global_pose(pelvis_index).origin
-		var clip_head := skeleton.get_bone_global_pose(head_index).origin
 		var in_root := (actor_root.global_transform.affine_inverse() * skeleton.global_transform).basis
-		var clip_direction: Vector3 = in_root * (clip_head - clip_pelvis)
-		var body_direction := (head.global_position - pelvis.global_position) if is_instance_valid(head) else Vector3.ZERO
-		if Vector2(clip_direction.x, clip_direction.z).length() > ALIGN_MIN_LENGTH \
-				and Vector2(body_direction.x, body_direction.z).length() > ALIGN_MIN_LENGTH:
-			var yaw := atan2(clip_direction.z, clip_direction.x) - atan2(body_direction.z, body_direction.x)
+		# The yaw that lays the clip's pose over the bodies in the floor plane: the best fit of the main bones (the head
+		# and trunk count most). The direction of the head alone is not enough, as a body that lies propped up or curled has
+		# its head almost above the pelvis.
+		var dot_sum := 0.0
+		var cross_sum := 0.0
+		for fit: Array in ALIGN_BONES:
+			var fit_body := bodies.get(fit[0]) as RigidBody3D
+			var fit_index := skeleton.find_bone(str(fit[0]))
+			if not is_instance_valid(fit_body) or fit_index < 0:
+				continue
+			var clip_offset: Vector3 = in_root * (skeleton.get_bone_global_pose(fit_index).origin - clip_pelvis)
+			var body_offset := fit_body.global_position - pelvis.global_position
+			var weight := float(fit[1])
+			dot_sum += weight * (clip_offset.x * body_offset.x + clip_offset.z * body_offset.z)
+			cross_sum += weight * (clip_offset.x * body_offset.z - clip_offset.z * body_offset.x)
+		if Vector2(dot_sum, cross_sum).length() > ALIGN_MIN_FIT:
+			# Turning the actor by yaw turns floor-plane vectors by -yaw (see Basis(Vector3.UP, yaw)).
+			var yaw := -atan2(cross_sum, dot_sum)
 			actor_root.global_rotation = Vector3(0.0, yaw, 0.0)
 			actor["animation_heading"] = yaw
 		var clip_pelvis_world := skeleton.to_global(clip_pelvis)
