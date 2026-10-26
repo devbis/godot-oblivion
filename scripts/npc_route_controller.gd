@@ -215,10 +215,23 @@ func request_yield(
 	_route_blocked_elapsed = 0.0
 	_route_blocked_reported = false
 	set_physics_process(true)
-	print("OpenOB AI avoidance: %s yields from=%s to=%s" % [
-		name, str(global_position), str(_yield_path[_yield_path.size() - 1])
-	])
+	if _avoidance_log_due():
+		print("OpenOB AI avoidance: %s yields from=%s to=%s" % [
+			name, str(global_position), str(_yield_path[_yield_path.size() - 1])
+		])
 	return true
+
+var _last_avoidance_log_msec := -AVOIDANCE_LOG_INTERVAL_MSEC
+
+## Actors in a fight ask each other to yield every few frames; the log says so once in a while, not each time.
+func _avoidance_log_due() -> bool:
+	var now := Time.get_ticks_msec()
+	if now - _last_avoidance_log_msec < AVOIDANCE_LOG_INTERVAL_MSEC:
+		return false
+	_last_avoidance_log_msec = now
+	return true
+
+const AVOIDANCE_LOG_INTERVAL_MSEC := 5000
 
 func _current_route_direction() -> Vector3:
 	if waypoints.is_empty() or waypoint_index >= waypoints.size():
@@ -592,7 +605,8 @@ func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> vo
 		var clearance := get_collision_radius() + blocker_radius + 0.2
 		if bool(blocker.call("request_yield", away_direction, desired_horizontal_velocity, global_position, clearance)):
 			_yield_request_cooldown_remaining = YIELD_REQUEST_COOLDOWN_S
-			print("OpenOB AI avoidance: %s asked %s to yield by %.2fm" % [name, blocker.name, clearance])
+			if _avoidance_log_due():
+				print("OpenOB AI avoidance: %s asked %s to yield by %.2fm" % [name, blocker.name, clearance])
 			return
 
 func _rejoin_route_after_yield() -> void:

@@ -589,10 +589,16 @@ func _pathgrid_route(
 	for node_index: int in node_route:
 		_append_path_point(result, pathgrid_points[node_index])
 	_append_path_point(result, to)
-	print("OpenOB navigation: using cell PGRD 0x%08X nodes=%d snap=%.2f/%.2fm" % [
-		pathgrid_cell_form_id, node_route.size(), start_snap_distance, goal_snap_distance
-	])
+	# A chase plans a new path every few frames: say so once in a while.
+	var now_msec := Time.get_ticks_msec()
+	if now_msec - _last_pathgrid_log_msec >= 5000:
+		_last_pathgrid_log_msec = now_msec
+		print("OpenOB navigation: using cell PGRD 0x%08X nodes=%d snap=%.2f/%.2fm" % [
+			pathgrid_cell_form_id, node_route.size(), start_snap_distance, goal_snap_distance
+		])
 	return result
+
+var _last_pathgrid_log_msec := -5000
 
 ## The path ends on a ledge just above the target (a marker in a hall below the ledge a room opens onto): the caller
 ## finishes the last stretch with a drop.
