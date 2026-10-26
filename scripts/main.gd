@@ -45,8 +45,10 @@ const COMBAT_DAMAGE_SETTINGS := {
 	"fHandFatigueDamageMult": 0.5, "fHandFatigueDamageBase": 1.0, "fNPCAttributeHealthMult": 0.5,
 	"fFatigueBase": 1.0, "fFatigueMult": 0.5,
 }
-## Executable defaults used by NPC combat when the installed ESM does not override them.
+## Executable defaults used by combat when the installed ESM does not override them.
 const NPC_COMBAT_SETTINGS := {
+	"fPowerAttackDelay": 0.3,
+	"fPowerAttackFatiguePenalty": 5.0,
 	"fCombatMinEngageDistance": 64.0,
 	"iAIDefaultPowerAttackChance": 25.0,
 	"iAIDefaultPowerAttackNormalChance": 20.0,
@@ -308,6 +310,9 @@ var _player_combat_action_sound_pending := false
 var _player_unarmed_attack_index := 0
 var _player_hit_reaction: Dictionary = {}
 var _player_hit_attack_lock_remaining := 0.0
+var _player_attack_hold_pending := false
+var _player_attack_hold_elapsed := 0.0
+var _player_attack_power_started := false
 var _player_knockdown_state := ""
 var _player_reaction_clips_loading: Dictionary = {}
 var _player_combat_stances_loading: Dictionary = {}
@@ -454,6 +459,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
+	_update_player_attack_hold(_delta)
 	_update_skinned_physics_rigs()
 	for actor: Dictionary in _npc_actors:
 		if actor.has("ragdoll"):
@@ -5199,11 +5205,25 @@ func _combat_input_allowed() -> bool:
 
 ## While the weapon is drawn the mouse buttons fight instead of grabbing objects: left attacks, right blocks.
 func _handle_combat_input(event: InputEvent) -> bool:
-	if not (event is InputEventMouseButton) or not _combat_input_allowed():
+	if not (event is InputEventMouseButton):
 		return false
 	var mouse_button := event as InputEventMouseButton
+	if mouse_button.button_index == MOUSE_BUTTON_LEFT and not mouse_button.pressed \
+			and _player_attack_hold_pending:
+		if _combat_input_allowed() and not _player_attack_power_started:
+			_player_attack()
+		_clear_player_attack_hold()
+		get_viewport().set_input_as_handled()
+		return true
+	if not _combat_input_allowed():
+		return false
 	if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
-		_player_attack()
+		if _player_weapon_type() == WEAPON_TYPE_BOW:
+			_player_attack()
+		else:
+			_player_attack_hold_pending = true
+			_player_attack_hold_elapsed = 0.0
+			_player_attack_power_started = false
 		get_viewport().set_input_as_handled()
 		return true
 	if mouse_button.button_index == MOUSE_BUTTON_RIGHT:
@@ -5213,22 +5233,63 @@ func _handle_combat_input(event: InputEvent) -> bool:
 		return true
 	return false
 
-func _player_attack() -> void:
+func _clear_player_attack_hold() -> void:
+	_player_attack_hold_pending = false
+	_player_attack_hold_elapsed = 0.0
+	_player_attack_power_started = false
+
+func _update_player_attack_hold(delta: float) -> void:
+	if not _player_attack_hold_pending:
+		return
+	if not _combat_input_allowed():
+		_clear_player_attack_hold()
+		return
+	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		if not _player_attack_power_started:
+			_player_attack()
+		_clear_player_attack_hold()
+		return
+	if _player_attack_power_started:
+		return
+	_player_attack_hold_elapsed += delta
+	var delay := maxf(0.0, float(_player_game_settings.get("fPowerAttackDelay", 0.3)))
+	if _player_attack_hold_elapsed < delay:
+		return
+	if _player_attack(true, _player_power_attack_direction_suffix()):
+		_player_attack_power_started = true
+
+func _player_power_attack_direction_suffix() -> String:
+	if Input.is_action_pressed("move_forward"):
+		return "attackforwardpower"
+	if Input.is_action_pressed("move_back"):
+		return "attackbackpower"
+	if Input.is_action_pressed("move_left"):
+		return "attackleftpower"
+	if Input.is_action_pressed("move_right"):
+		return "attackrightpower"
+	return "attackpower"
+
+func _player_attack(power_attack := false, power_suffix := "") -> bool:
 	if not _player_knockdown_state.is_empty():
-		return
+		return false
+	if power_attack and _player_weapon_type() == WEAPON_TYPE_BOW:
+		return false
 	if _player_hit_attack_lock_remaining > 0.0:
-		return
+		return false
 	if not _player_hit_reaction.is_empty():
 		if str(_player_hit_reaction.get("kind", "")) != "stagger":
-			return
+			return false
 		_player_hit_reaction.clear()
 		_player_hit_attack_lock_remaining = 0.0
 		_player_active_animation_reset()
 		if player.is_first_person and _arms != null:
 			_arms.interrupt_hit_reaction()
-	var side := "right"
+	var power_clip_name := _player_power_attack_animation(power_suffix) if power_attack else ""
+	if power_attack and power_clip_name.is_empty():
+		return false
+	var side := "power" if power_attack else "right"
 	var unarmed_variant := ""
-	if _player_weapon_type() != WEAPON_TYPE_BOW:
+	if not power_attack and _player_weapon_type() != WEAPON_TYPE_BOW:
 		if _player_weapon_form_id <= 0:
 			side = "left" if _next_attack_left else "right"
 			_next_attack_left = not _next_attack_left
@@ -5238,23 +5299,30 @@ func _player_attack() -> void:
 			unarmed_variant = "jab" if _player_unarmed_attack_index % 2 == 0 else "hook"
 			_player_unarmed_attack_index += 1
 	if player.is_first_person:
-		if _arms.attack(side, unarmed_variant):
+		var arms_power_suffix := power_clip_name.substr(
+			str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand")).length()
+		) if power_attack else ""
+		var arms_attack_started := _arms.attack(
+			side, arms_power_suffix if power_attack else unarmed_variant, power_suffix
+		)
+		if arms_attack_started:
 			AudioManager.play_weapon_swing(player, _player_weapon_type())
-			_spend_player_attack_fatigue()
-		return
+			_spend_player_attack_fatigue(power_attack)
+		return arms_attack_started
 	if not _player_combat_action.is_empty():
-		return
-	var attack_animation := _player_attack_animation(side, unarmed_variant)
+		return false
+	var attack_animation := power_clip_name if power_attack else _player_attack_animation(side, unarmed_variant)
 	if attack_animation.is_empty():
-		return
+		return false
 	_player_combat_action = attack_animation
 	_player_combat_action_kind = "attack"
 	_player_combat_action_sound_pending = true
 	_player_blocking = false
 	_preload_player_combat_stance(_player_weapon_type())
-	_spend_player_attack_fatigue()
+	_spend_player_attack_fatigue(power_attack)
+	return true
 
-func _spend_player_attack_fatigue() -> void:
+func _spend_player_attack_fatigue(power_attack := false) -> void:
 	if not _player_actor_values_ready:
 		return
 	var fatigue_cost := NpcCombat.FATIGUE_ATTACK_COST
@@ -5262,6 +5330,8 @@ func _spend_player_attack_fatigue() -> void:
 		fatigue_cost = float(_player_game_settings.get("fFatigueAttackWeaponBase", fatigue_cost)) \
 			+ float(_player_weapon_record.get("damage", 0.0)) \
 			* float(_player_game_settings.get("fFatigueAttackWeaponMult", 0.0))
+	if power_attack:
+		fatigue_cost *= float(_player_game_settings.get("fPowerAttackFatiguePenalty", 5.0))
 	_player_actor_values.modify_fatigue(-fatigue_cost)
 	_update_player_knockdown_state()
 
@@ -5278,6 +5348,29 @@ func _player_attack_animation(side: String, unarmed_variant := "") -> String:
 		return requested
 	var fallback := prefix + "attackright"
 	return fallback if _player_combat_available_clips.has(fallback) else ""
+
+func _player_power_attack_animation(power_suffix: String) -> String:
+	var prefix := str(PLAYER_COMBAT_STANCE_PREFIXES.get(_player_weapon_type(), "handtohand"))
+	var variant: Dictionary = NpcCombat.POWER_ATTACK_SKILL_VARIANTS.get(power_suffix, {})
+	if not variant.is_empty():
+		var skill_index := int(NpcCombat.WEAPON_SKILLS.get(
+			_player_weapon_type(), NpcCombat.SKILL_HAND_TO_HAND if _player_weapon_type() < 0 else NpcCombat.SKILL_BLADE
+		))
+		var skills: PackedInt64Array = _player_base_record.get("skills", PackedInt64Array())
+		var skill := float(skills[skill_index]) if skills.size() > skill_index else 0.0
+		var setting := str(variant.get("setting", ""))
+		var required_skill := float(_player_game_settings.get(setting, variant.get("default", 0.0)))
+		var skill_clip := prefix + str(variant.get("clip_suffix", ""))
+		if skill >= required_skill and _player_combat_available_clips.has(skill_clip):
+			return skill_clip
+	var generic := prefix + power_suffix
+	if _player_combat_available_clips.has(generic):
+		return generic
+	for fallback_suffix: String in ["attackpower", "attackrightpower"]:
+		var fallback := prefix + fallback_suffix
+		if _player_combat_available_clips.has(fallback):
+			return fallback
+	return ""
 
 func _update_first_person_arms(delta: float) -> void:
 	if _arms == null or not _arms.built:
@@ -5301,7 +5394,9 @@ func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
 		AudioManager.play_bow_shot(player)
 		_loose_arrow()
 	elif clip_kind == "attack" and event_name == "hit":
-		if _melee_hit():
+		var attack_state := _arms.current_attack_state() if _arms != null else {}
+		var power_attack := str(attack_state.get("clip", "")).contains("power")
+		if _melee_hit(power_attack):
 			_player_block_attack()
 	elif clip_kind == "cast" and event_name == "hit":
 		_release_pending_cast()
@@ -5349,7 +5444,7 @@ func _loose_arrow() -> void:
 	_launch_projectile(arrow, aim)
 
 ## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
-func _melee_hit() -> bool:
+func _melee_hit(power_attack := false) -> bool:
 	var reach := MELEE_BASE_REACH_M * float(_player_weapon_record.get("reach", 1.0))
 	var origin: Vector3
 	var forward: Vector3
@@ -5365,7 +5460,7 @@ func _melee_hit() -> bool:
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
 	var blocked := _provoke_actor(
-		hit.get("collider"), _player_hit_fatigue_damage(), true, _player_hit_health_damage()
+		hit.get("collider"), _player_hit_fatigue_damage(), true, _player_hit_health_damage(power_attack)
 	)
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
@@ -5524,10 +5619,10 @@ func _finish_player_hit_reaction() -> void:
 func _player_hit_fatigue_damage() -> float:
 	return maxf(NpcCombat.FATIGUE_HIT_MIN, float(_player_weapon_record.get("damage", 4.0)) * NpcCombat.FATIGUE_HIT_COST_MULT)
 
-func _player_hit_health_damage() -> float:
+func _player_hit_health_damage(power_attack := false) -> float:
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
-	return _npc_combat.player_hit_damage()
+	return _npc_combat.player_hit_damage(power_attack)
 
 func _provoke_actor(
 	collider: Object, fatigue_damage: float = -1.0, allow_block := false, health_damage := 0.0
@@ -7453,7 +7548,7 @@ func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time
 				_player_weapon_is_held = false
 				_refresh_player_weapon_mount()
 		elif key_name == "hit" and _player_combat_action_kind == "attack" and _player_weapon_type() != WEAPON_TYPE_BOW:
-			if _melee_hit():
+			if _melee_hit(_player_combat_action.contains("power")):
 				_player_block_attack()
 		elif key_name == "release" and _player_combat_action_kind == "attack" and _player_weapon_type() == WEAPON_TYPE_BOW:
 			AudioManager.play_bow_shot(player)

@@ -327,7 +327,7 @@ func _refresh_visibility() -> void:
 		root.visible = _mode != Mode.HIDDEN and _posed and not _suppressed
 
 ## An attack with the stance's clips; `side` is "right", "left" or "power". Does nothing while another clip runs.
-func attack(side: String, variant := "") -> bool:
+func attack(side: String, variant := "", fallback_variant := "") -> bool:
 	if _mode != Mode.READY or is_busy():
 		return false
 	var prefix := str(_stance.prefix)
@@ -337,7 +337,23 @@ func attack(side: String, variant := "") -> bool:
 	elif prefix == UNARMED_STANCE.prefix and variant in ["jab", "hook"]:
 		candidates = [prefix + "attack" + side + "_" + variant, prefix + "attack" + side]
 	elif side == "power":
-		candidates = [prefix + "attackpower", prefix + "attackrightpower", prefix + "attackright"]
+		var requested := prefix + (variant if variant.begins_with("attack") else "attackpower")
+		var directional_fallback := fallback_variant
+		if directional_fallback.is_empty():
+			directional_fallback = {
+				"skill1attackpower": "attackpower",
+				"skill2attackleftpower": "attackleftpower",
+				"skill2attackrightpower": "attackrightpower",
+				"skill3attackbackpower": "attackbackpower",
+				"skill4attackforwardpower": "attackforwardpower",
+			}.get(variant, "")
+		for candidate: String in [
+			requested, prefix + directional_fallback, prefix + "attackpower", prefix + "attackrightpower",
+		]:
+			if _available_clips.has(candidate) and not candidates.has(candidate):
+				candidates.push_back(candidate)
+		if candidates.is_empty():
+			return false
 	else:
 		candidates = [prefix + "attack" + side, prefix + "attackright"]
 	_begin_one_shot(candidates, "attack")
@@ -768,6 +784,9 @@ func _preload_stance() -> void:
 		"fastforward", "fastbackward", "fastleft", "fastright", "blockidle",
 		"attackright", "attackleft", "attack", "attackright_chop", "attackleft_chop",
 		"attackright_hook", "attackleft_hook", "attackright_jab", "attackleft_jab",
+		"attackpower", "attackforwardpower", "attackbackpower", "attackleftpower", "attackrightpower",
+		"skill1attackpower", "skill2attackleftpower", "skill2attackrightpower",
+		"skill3attackbackpower", "skill4attackforwardpower",
 		"jumploop", "jumpstart", "jumpland", "turnleft", "turnright",
 		"swimidle", "swimforward", "swimbackward", "swimleft", "swimright",
 		"swimfastforward", "swimfastbackward", "swimfastleft", "swimfastright",
