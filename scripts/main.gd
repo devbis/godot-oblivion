@@ -6355,11 +6355,12 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 	var animation_root := str(actor.get("animation_root", ""))
 	if not animation_root.is_empty():
 		# A creature has only some of the clips a humanoid has: one it lacks is missing, not an error.
-		if not creature_has_clip(actor, clip_name):
+		var source_clip := _creature_clip_source(actor, clip_name)
+		if source_clip.is_empty():
 			requests[clip_name] = "missing"
 			actor["animation_clip_requests"] = requests
 			return
-		asset_path = animation_root + clip_name.to_lower() + ".kf"
+		asset_path = animation_root + source_clip + ".kf"
 	elif NPC_MOVEMENT_KFS.has(clip_name):
 		var info: Array = NPC_MOVEMENT_KFS[clip_name]
 		asset_path = str(info[0])
@@ -6385,10 +6386,26 @@ func creature_clip_names(animation_root: String) -> Dictionary:
 		_creature_clip_sets[animation_root] = names
 	return _creature_clip_sets[animation_root]
 
+## The file (lower case, without .kf) that plays as `clip_name` for a creature: the clip itself, or the one its folder
+## has in its place (a goblin runs with "runforward", where a rat has "fastforward"). Empty when it has none.
+func _creature_clip_source(actor: Dictionary, clip_name: String) -> String:
+	var lowered := clip_name.to_lower()
+	var names := creature_clip_names(str(actor.get("animation_root", "")))
+	if names.has(lowered):
+		return lowered
+	var candidates: Array[String] = []
+	if lowered.ends_with("fastforward"):
+		var stance := lowered.trim_suffix("fastforward")
+		candidates = [stance + "runforward", "runforward", stance + "forward", "forward"]
+	for candidate: String in candidates:
+		if names.has(candidate):
+			return candidate
+	return ""
+
 ## True for any clip of a humanoid; for a creature, only when its folder has the clip.
 func creature_has_clip(actor: Dictionary, clip_name: String) -> bool:
 	var animation_root := str(actor.get("animation_root", ""))
-	return animation_root.is_empty() or creature_clip_names(animation_root).has(clip_name.to_lower())
+	return animation_root.is_empty() or not _creature_clip_source(actor, clip_name).is_empty()
 
 func _load_npc_animation(actor: Dictionary, clip_name: String, asset_path: String, sequence_name: String) -> void:
 	await assets.meshes_for_model(asset_path)
