@@ -5871,6 +5871,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"base_form_id": int(reference.get("base_form_id", 0)),
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"creature": is_creature,
+			"creature_attack_damage": float(npc.get("attack_damage", 0)) if is_creature else 0.0,
+			"creature_attack_reach": float(npc.get("attack_reach", 0.0)) if is_creature else 0.0,
 			# The folder the actor's clips come from: a creature has its own next to its skeleton.
 			"animation_root": str(npc.get("model_path", "")).replace("\\", "/").get_base_dir() + "/" if is_creature else "",
 			"root": actor_root,
@@ -6350,6 +6352,11 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 	var sequence_name := ""
 	var animation_root := str(actor.get("animation_root", ""))
 	if not animation_root.is_empty():
+		# A creature has only some of the clips a humanoid has: one it lacks is missing, not an error.
+		if not creature_has_clip(actor, clip_name):
+			requests[clip_name] = "missing"
+			actor["animation_clip_requests"] = requests
+			return
 		asset_path = animation_root + clip_name.to_lower() + ".kf"
 	elif NPC_MOVEMENT_KFS.has(clip_name):
 		var info: Array = NPC_MOVEMENT_KFS[clip_name]
@@ -6362,6 +6369,24 @@ func _request_npc_animation(actor: Dictionary, clip_name: String) -> void:
 	requests[clip_name] = "loading"
 	actor["animation_clip_requests"] = requests
 	_load_npc_animation(actor, clip_name, asset_path, sequence_name)
+
+var _creature_clip_sets: Dictionary = {}
+
+## The clip names (lower case, without .kf) in a creature's animation folder.
+func creature_clip_names(animation_root: String) -> Dictionary:
+	if not _creature_clip_sets.has(animation_root):
+		var names := {}
+		for path_value: Variant in data_reader.list_assets("meshes/" + animation_root.to_lower()):
+			var path := str(path_value).replace("\\", "/")
+			if path.ends_with(".kf") and path.get_base_dir().get_file() == animation_root.trim_suffix("/").get_file().to_lower():
+				names[path.get_file().get_basename()] = true
+		_creature_clip_sets[animation_root] = names
+	return _creature_clip_sets[animation_root]
+
+## True for any clip of a humanoid; for a creature, only when its folder has the clip.
+func creature_has_clip(actor: Dictionary, clip_name: String) -> bool:
+	var animation_root := str(actor.get("animation_root", ""))
+	return animation_root.is_empty() or creature_clip_names(animation_root).has(clip_name.to_lower())
 
 func _load_npc_animation(actor: Dictionary, clip_name: String, asset_path: String, sequence_name: String) -> void:
 	await assets.meshes_for_model(asset_path)

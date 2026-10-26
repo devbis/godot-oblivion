@@ -220,9 +220,20 @@ func _prefix(actor: Dictionary) -> String:
 func _is_archer(actor: Dictionary) -> bool:
 	return _weapon_type(actor) == WEAPON_TYPE_BOW
 
+func _is_creature(actor: Dictionary) -> bool:
+	return bool(actor.get("creature", false))
+
+## A creature has only the clips its folder holds (a rat cannot block or dodge); a humanoid has them all.
+func _has_clip(actor: Dictionary, clip_name: String) -> bool:
+	return not _is_creature(actor) or bool(host.call("creature_has_clip", actor, clip_name))
+
 func _reach_m(actor: Dictionary) -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	if record.is_empty():
+		# CREA RNAM is the creature's reach in the units of a weapon's reach (1: a one-handed sword).
+		var creature_reach := float(actor.get("creature_attack_reach", 0.0))
+		if _is_creature(actor) and creature_reach > 0.0:
+			return maxf(UNARMED_REACH_M, host.MELEE_BASE_REACH_M * creature_reach)
 		return UNARMED_REACH_M
 	return host.MELEE_BASE_REACH_M * float(record.get("reach", 1.0))
 
@@ -261,6 +272,9 @@ func _hit_damage(actor: Dictionary, power: bool) -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	var strength := _attribute_value(actor, ATTRIBUTE_STRENGTH)
 	var fatigue_modifier := _fatigue_damage_modifier(actor)
+	# A creature's blow is the damage its record states, worn down by its fatigue as a weapon's is.
+	if _is_creature(actor) and float(actor.get("creature_attack_damage", 0.0)) > 0.0:
+		return float(actor.creature_attack_damage) * fatigue_modifier
 	if record.is_empty():
 		var hand_term := (_setting("fHandDamageStrengthBase") + _setting("fHandDamageStrengthMult") * strength * 0.01) \
 			* (_setting("fHandDamageSkillBase") + _setting("fHandDamageSkillMult") * _skill_value(actor, SKILL_HAND_TO_HAND) * 0.01) \
@@ -398,7 +412,7 @@ func _react_to_hit(
 		_begin_knockdown(actor)
 		return
 	_apply_actor_fatigue(actor, maxf(0.0, fatigue_damage))
-	if _actor_fatigue_current(actor) <= 0.0:
+	if _actor_fatigue_current(actor) <= 0.0 and not _is_creature(actor):
 		_begin_knockdown(actor)
 	else:
 		if is_instance_valid(root) and not actor.has("combat") and fight_target_id >= 0:
@@ -529,10 +543,20 @@ func _stagger_animation(actor: Dictionary, blocked := false) -> String:
 	if is_instance_valid(root) and bool(root.get("is_swimming")):
 		return "swimstagger"
 	var prefix := _prefix(actor)
+	if _is_creature(actor):
+		for candidate: String in [prefix + "stagger", prefix + "recoil", "stagger", "recoil"]:
+			if _has_clip(actor, candidate):
+				return candidate
+		return ""
 	return "bowblockhit" if prefix == "bow" else prefix + "stagger"
 
 func _begin_stagger(actor: Dictionary, blocked := false) -> void:
 	var clip := _stagger_animation(actor, blocked)
+	if clip.is_empty():
+		# A creature with no flinch clip only loses its swing.
+		actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
+		_interrupt_actor_attack(actor)
+		return
 	actor["hit_reaction"] = {"kind": "stagger", "animation": clip}
 	actor["hit_attack_lock_remaining"] = HIT_ATTACK_LOCK_S
 	actor["active_animation"] = ""
@@ -544,6 +568,9 @@ func _begin_stagger(actor: Dictionary, blocked := false) -> void:
 
 func _begin_knockdown(actor: Dictionary) -> void:
 	if str(actor.get("knockdown_state", "")) in ["falling", "downed"]:
+		return
+	# A creature has no fall and get-up clips for a drained fatigue: only death brings it down.
+	if _is_creature(actor) and not bool(actor.get("dead", false)):
 		return
 	var root := actor.get("root") as Node3D
 	actor["knockdown_state"] = "falling"
@@ -656,10 +683,14 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 	suffixes.append_array(_attack_suffixes(prefix))
 	if prefix == "handtohand":
 		suffixes.append_array(["attackright_jab", "attackleft_jab", "attackright_hook", "attackleft_hook"])
+	if _is_creature(actor):
+		suffixes.append_array(["attackpower", "attackforwardpower", "recoil", "stagger"])
 	for suffix: String in suffixes:
-		_request_clip(actor, prefix + suffix)
+		if _has_clip(actor, prefix + suffix):
+			_request_clip(actor, prefix + suffix)
 	for dodge_clip: String in DODGE_CLIPS:
-		_request_clip(actor, dodge_clip)
+		if _has_clip(actor, dodge_clip):
+			_request_clip(actor, dodge_clip)
 	_stop_route(root)
 	_cancel_package_route(actor)
 	print("OpenOB combat: %s attacks %s (aggression %d, weapon type %d)" % [
@@ -871,6 +902,8 @@ func _begin_block(actor: Dictionary, root: Node3D, combat: Dictionary, flat: Vec
 		root.has_method("is_animation_grounded") and not bool(root.call("is_animation_grounded"))
 	):
 		return false
+	if _is_creature(actor) and not _has_clip(actor, _prefix(actor) + "blockidle") and not _has_clip(actor, "blockidle"):
+		return false
 	var animations: Dictionary = actor.get("animations", {})
 	var requests: Dictionary = actor.get("animation_clip_requests", {})
 	var prefix := _prefix(actor)
@@ -937,6 +970,8 @@ func _select_dodge_clip(actor: Dictionary, root: Node3D, target: Node3D) -> Stri
 	_append_dodge_candidate(candidates, "dodgeback" if primary == "dodgeforward" else "dodgeforward")
 	var animations: Dictionary = actor.get("animations", {})
 	for candidate: String in candidates:
+		if not _has_clip(actor, candidate):
+			continue
 		if not (animations.get(candidate, {}) as Dictionary).is_empty():
 			return candidate
 		_request_clip(actor, candidate)
@@ -1063,11 +1098,30 @@ func _attack_suffixes(prefix: String) -> Array[String]:
 			return ["attackright", "attackleft"]
 	return ["attackright", "attackleft", "attackpower"]
 
+## A creature swings with whichever attack clips its folder has: the plain ones, or the power ones when it has no others.
+func _creature_attack_clips(actor: Dictionary, prefix: String) -> Array[String]:
+	var plain: Array[String] = []
+	var power: Array[String] = []
+	for clip_name_value: Variant in host.call("creature_clip_names", str(actor.get("animation_root", ""))):
+		var clip_name := str(clip_name_value)
+		if not clip_name.begins_with(prefix + "attack"):
+			continue
+		(power if clip_name.contains("power") else plain).push_back(clip_name)
+	plain.sort()
+	power.sort()
+	return plain if not plain.is_empty() else power
+
 func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void:
 	var animations: Dictionary = actor.animations
 	var clip_key := ""
 	var unarmed_index := int(combat.get("unarmed_attack_index", 0))
-	if prefix == "handtohand":
+	if _is_creature(actor):
+		var creature_clips := _creature_attack_clips(actor, prefix)
+		if creature_clips.is_empty():
+			combat.cooldown = 1.0
+			return
+		clip_key = creature_clips[randi() % creature_clips.size()]
+	elif prefix == "handtohand":
 		var side := "right" if unarmed_index % 2 == 0 else "left"
 		var variant := "jab" if int(unarmed_index / 2) % 2 == 0 else "hook"
 		clip_key = prefix + "attack" + side + "_" + variant
@@ -1099,7 +1153,7 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 	combat.clip = clip_key
 	combat.time = float(animation.get("start_time", 0.0))
 	combat.hit_done = false
-	combat.power = clip_key.ends_with("power")
+	combat.power = clip_key.ends_with("power") and not _is_creature(actor)
 	_apply_actor_fatigue(actor, _attack_fatigue_cost(actor))
 	if _actor_fatigue_current(actor) <= 0.0:
 		_begin_knockdown(actor)
