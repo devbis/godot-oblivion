@@ -5258,8 +5258,9 @@ func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	var projectile_kind := int(projectile.get("kind"))
 	var is_spell := projectile_kind == CombatProjectile.Kind.SPELL
 	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN if is_spell else _player_hit_fatigue_damage()
+	var hit_health_damage := _player_hit_health_damage() if projectile_kind == CombatProjectile.Kind.ARROW else 0.0
 	projectile.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
-		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell)
+		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell, hit_health_damage)
 		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
 			AudioManager.play_arrow_impact(hit_position)
 	)
@@ -5291,7 +5292,9 @@ func _melee_hit() -> void:
 		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	var blocked := _provoke_actor(hit.get("collider"), _player_hit_fatigue_damage(), true)
+	var blocked := _provoke_actor(
+		hit.get("collider"), _player_hit_fatigue_damage(), true, _player_hit_health_damage()
+	)
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
 		var flesh_hit := collider is CharacterBody3D and collider != player
@@ -5425,7 +5428,14 @@ func _finish_player_hit_reaction() -> void:
 func _player_hit_fatigue_damage() -> float:
 	return maxf(NpcCombat.FATIGUE_HIT_MIN, float(_player_weapon_record.get("damage", 4.0)) * NpcCombat.FATIGUE_HIT_COST_MULT)
 
-func _provoke_actor(collider: Object, fatigue_damage: float = -1.0, allow_block := false) -> bool:
+func _player_hit_health_damage() -> float:
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	return _npc_combat.player_hit_damage()
+
+func _provoke_actor(
+	collider: Object, fatigue_damage: float = -1.0, allow_block := false, health_damage := 0.0
+) -> bool:
 	var node := collider as Node
 	if node == null or not node.has_meta("reference_id"):
 		return false
@@ -5433,7 +5443,7 @@ func _provoke_actor(collider: Object, fatigue_damage: float = -1.0, allow_block 
 		_npc_combat = NpcCombat.new(self)
 	return _npc_combat.receive_player_hit(
 		int(node.get_meta("reference_id")), player.global_position,
-		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(), allow_block
+		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(), allow_block, health_damage
 	)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:

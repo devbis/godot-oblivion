@@ -273,6 +273,21 @@ func _hit_damage(actor: Dictionary, power: bool) -> float:
 	damage *= fatigue_modifier
 	return damage * (_setting("fDamagePowerAttackBonus") if power else 1.0)
 
+## Use the same Oblivion damage path for the player's melee and bow hits as NPC attacks.
+func player_hit_damage(power := false) -> float:
+	var player_base: Dictionary = host.get("_player_base_record")
+	if player_base.is_empty() or not bool(player_base.get("has_actor_values", false)):
+		return 0.0
+	var actor_values: RefCounted = host.get("_player_actor_values")
+	var vitals: Dictionary = actor_values.call("snapshot") if is_instance_valid(actor_values) else {}
+	var player_actor := {
+		"weapon_record": host.get("_player_weapon_record"),
+		"attributes": player_base.get("attributes", PackedInt64Array()),
+		"skills": player_base.get("skills", PackedInt64Array()),
+		"fatigue": vitals.get("fatigue", {}),
+	}
+	return _hit_damage(player_actor, power)
+
 ## The fatigue a bare-handed blow takes off the target (a weapon's blow takes as much as its damage here).
 func _hit_fatigue_damage(attacker: Dictionary, damage: float) -> float:
 	if (attacker.get("weapon_record", {}) as Dictionary).is_empty():
@@ -287,7 +302,8 @@ func _attack_fatigue_cost(actor: Dictionary) -> float:
 		+ _damage(actor) * float(settings.get(FATIGUE_ATTACK_WEAPON_MULT_SETTING, 0.0))
 
 func receive_player_hit(
-	reference_id: int, source_position: Vector3, fatigue_damage: float, allow_block := false
+	reference_id: int, source_position: Vector3, fatigue_damage: float, allow_block := false,
+	health_damage := 0.0
 ) -> bool:
 	var actor: Dictionary = {}
 	for candidate: Dictionary in host.get("_npc_actors"):
@@ -298,6 +314,26 @@ func receive_player_hit(
 		return false
 	provoke(reference_id)
 	var blocked := allow_block and _actor_blocks_hit(actor, source_position)
+	var applied_health_damage := maxf(0.0, health_damage)
+	if blocked:
+		applied_health_damage *= BLOCKED_DAMAGE_SHARE
+	if applied_health_damage > 0.0:
+		var health: Dictionary = actor.get("health", {})
+		if not health.is_empty():
+			var remaining := maxf(0.0, float(health.get("current", 0.0)) - applied_health_damage)
+			if bool(actor.get("essential", false)):
+				remaining = maxf(remaining, 1.0)
+			health["current"] = remaining
+			actor["health"] = health
+			var player_name := str((host.get("_player_base_record") as Dictionary).get("name", "Player"))
+			if remaining <= 0.0:
+				_run_actor_events(actor, "OnHit", player_name)
+				kill_actor(actor)
+				return blocked
+			_run_actor_events(actor, "OnHit", "")
+			_run_actor_events(actor, "OnHit", player_name)
+			if bool(actor.get("dead", false)):
+				return blocked
 	var received_fatigue := maxf(8.0, fatigue_damage * BLOCKED_DAMAGE_SHARE) if blocked else fatigue_damage
 	_react_to_hit(actor, source_position, received_fatigue, 0, _player_base_form_id(), blocked)
 	return blocked
