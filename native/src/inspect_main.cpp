@@ -756,6 +756,16 @@ int main(int argc, char** argv) {
                               << " pos=" << reference.position[0] << ',' << reference.position[1] << ','
                               << reference.position[2] << " rot=" << reference.rotation[0] << ','
                               << reference.rotation[1] << ',' << reference.rotation[2];
+                    if (const auto* creature = data.find_creature_base(reference.base_form_id)) {
+                        std::cout << " creature=" << creature->editor_id << " full=" << creature->name
+                                  << " model=" << creature->model_path << " health=" << creature->base_health
+                                  << " damage=" << creature->attack_damage << " nifz=" << creature->body_part_paths.size()
+                                  << " kffz=" << creature->animation_files.size() << " packages=";
+                        for (const auto package_id : creature->ai_package_form_ids) {
+                            const auto* package_name = data.find_editor_id(package_id);
+                            std::cout << std::hex << package_id << std::dec << ':' << (package_name ? *package_name : "?") << ' ';
+                        }
+                    }
                     if (const auto* npc = data.find_npc_base(reference.base_form_id)) {
                         std::cout << " npc=" << npc->editor_id << " full=" << npc->name
                                   << " race=" << std::hex << npc->race_form_id << std::dec

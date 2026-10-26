@@ -445,6 +445,51 @@ public:
         return result;
     }
 
+    Dictionary find_creature_base(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* creature = data_->find_creature_base(static_cast<uint32_t>(form_id));
+        if (!creature) return {};
+        Dictionary result;
+        result["form_id"] = static_cast<int64_t>(creature->form_id);
+        result["script_form_id"] = static_cast<int64_t>(creature->script_form_id);
+        result["editor_id"] = as_string(creature->editor_id);
+        result["name"] = as_string(creature->name);
+        result["model_path"] = as_string(creature->model_path);
+        PackedStringArray body_parts;
+        for (const auto& path : creature->body_part_paths) body_parts.push_back(as_string(path));
+        result["body_part_paths"] = body_parts;
+        PackedStringArray animation_files;
+        for (const auto& path : creature->animation_files) animation_files.push_back(as_string(path));
+        result["animation_files"] = animation_files;
+        result["flags"] = static_cast<int64_t>(creature->flags);
+        result["base_magicka"] = creature->base_magicka;
+        result["base_fatigue"] = creature->base_fatigue;
+        result["level_or_offset"] = creature->level_or_offset;
+        result["creature_type"] = creature->creature_type;
+        result["combat_skill"] = creature->combat_skill;
+        result["base_health"] = creature->base_health;
+        result["attack_damage"] = creature->attack_damage;
+        result["combat_style_form_id"] = static_cast<int64_t>(creature->combat_style_form_id);
+        result["base_scale"] = creature->base_scale;
+        result["attack_reach"] = creature->attack_reach;
+        result["aggression"] = creature->aggression;
+        result["confidence"] = creature->confidence;
+        result["creature"] = true;
+        PackedInt64Array attributes;
+        attributes.resize(static_cast<int64_t>(creature->attributes.size()));
+        for (int64_t i = 0; i < static_cast<int64_t>(creature->attributes.size()); ++i)
+            attributes.set(i, creature->attributes[static_cast<std::size_t>(i)]);
+        result["attributes"] = attributes;
+        PackedInt64Array faction_ids;
+        for (const auto& membership : creature->factions) faction_ids.push_back(static_cast<int64_t>(membership.first));
+        result["faction_form_ids"] = faction_ids;
+        PackedInt64Array ai_packages;
+        for (const auto package_id : creature->ai_package_form_ids) ai_packages.push_back(static_cast<int64_t>(package_id));
+        result["ai_package_form_ids"] = ai_packages;
+        return result;
+    }
+
     Dictionary find_npc_base(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
@@ -1017,6 +1062,7 @@ protected:
         ClassDB::bind_method(D_METHOD("find_reference_cell", "reference_form_id"), &OblivionData::find_reference_cell);
         ClassDB::bind_method(D_METHOD("find_pathgrid", "cell_form_id"), &OblivionData::find_pathgrid);
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
+        ClassDB::bind_method(D_METHOD("find_creature_base", "form_id"), &OblivionData::find_creature_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
         ClassDB::bind_method(D_METHOD("find_weapon", "form_id"), &OblivionData::find_weapon);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
@@ -1216,7 +1262,9 @@ public:
         const auto* game = game_.get();
         const auto form_id = form_id_arg(npc_form_id);
         const auto* npc = game ? game->find_npc_base(form_id) : nullptr;
-        const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
+        const auto* creature = game && !npc ? game->find_creature_base(form_id) : nullptr;
+        const auto script_id = npc ? npc->script_form_id : (creature ? creature->script_form_id : 0u);
+        const auto* script = game && script_id != 0 ? game->find_script(script_id) : nullptr;
         if (!script || !world_) return false;
         world_->add_actor(form_id, *script, utf8_value(reference_name));
         return true;
@@ -1402,10 +1450,12 @@ public:
         Dictionary result;
         const auto* driver = world_ ? world_->find(utf8_value(quest_editor_id)) : nullptr;
         const auto* game = game_.get();
-        const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
-        if (!driver || !npc) return result;
+        const auto base_id = game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u;
+        const auto* npc = game ? game->find_npc_base(base_id) : nullptr;
+        const auto* creature = game && !npc ? game->find_creature_base(base_id) : nullptr;
+        if (!driver || (!npc && !creature)) return result;
         std::vector<const oblivion::AiPackageRecord*> packages;
-        for (const auto package_id : npc->ai_package_form_ids)
+        for (const auto package_id : (npc ? npc->ai_package_form_ids : creature->ai_package_form_ids))
             if (const auto* package = game->find_ai_package(package_id)) packages.push_back(package);
         const auto* chosen = driver->select_package(packages);
         if (!chosen) return result;
@@ -1427,15 +1477,18 @@ public:
                                const String& detail, const Callable& distance) {
         auto* driver = world_ ? world_->find(utf8_value(quest_editor_id)) : nullptr;
         const auto* game = game_.get();
-        const auto* npc = game ? game->find_npc_base(game->find_form_id_by_editor_id(utf8_value(npc_editor_id))) : nullptr;
-        const auto* script = npc ? game->find_script(npc->script_form_id) : nullptr;
+        const auto base_id = game ? game->find_form_id_by_editor_id(utf8_value(npc_editor_id)) : 0u;
+        const auto* npc = game ? game->find_npc_base(base_id) : nullptr;
+        const auto* creature = game && !npc ? game->find_creature_base(base_id) : nullptr;
+        const auto script_id = npc ? npc->script_form_id : (creature ? creature->script_form_id : 0u);
+        const auto* script = (npc || creature) && script_id != 0 ? game->find_script(script_id) : nullptr;
         if (!driver || !script) {
             // Said apart from an event the script has no block for, so the caller can log which one it was.
             Dictionary missing;
-            missing["missing"] = String(!driver ? "quest" : (!npc ? "npc" : "script"));
+            missing["missing"] = String(!driver ? "quest" : (!npc && !creature ? "npc" : "script"));
             return missing;
         }
-        return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance), npc->form_id));
+        return tick_to_dictionary(driver->run_actor_event(*script, utf8_value(event), utf8_value(detail), distance_function(distance), base_id));
     }
 
     void attach(const Ref<OblivionData>& owner, std::shared_ptr<const oblivion::GameData> game,

@@ -260,6 +260,40 @@ Bytes esm_fixture() {
     append(records, make_npc_record(0x301, 0, "FixtureMale"));
     append(records, make_npc_record(0x302, 1, "FixtureFemale"));
 
+    // A creature: skeleton model, two skin NIFs and the AI package list.
+    Bytes creature_data;
+    append(creature_data, string_subrecord("EDID", "FixtureRat"));
+    append(creature_data, string_subrecord("FULL", "Fixture Rat"));
+    append(creature_data, string_subrecord("MODL", "Creatures\\Rat\\Skeleton.NIF"));
+    Bytes nifz;
+    raw(nifz, "Rat.NIF");
+    nifz.push_back(0);
+    raw(nifz, "Head.NIF");
+    nifz.push_back(0);
+    subrecord(creature_data, "NIFZ", nifz);
+    Bytes creature_acbs;
+    u32(creature_acbs, 0x2);
+    u16(creature_acbs, 0);
+    u16(creature_acbs, 50);
+    u16(creature_acbs, 0);
+    u16(creature_acbs, 3);
+    subrecord(creature_data, "ACBS", creature_acbs);
+    Bytes creature_stats;
+    creature_stats.push_back(0);  // type: animal
+    creature_stats.push_back(10); // combat skill
+    creature_stats.push_back(0);
+    creature_stats.push_back(0);
+    creature_stats.push_back(0);
+    creature_stats.push_back(0);
+    u16(creature_stats, 4);       // health
+    u16(creature_stats, 0);
+    u16(creature_stats, 2);       // attack damage
+    for (int attribute = 0; attribute < 8; ++attribute) creature_stats.push_back(static_cast<std::uint8_t>(40 + attribute));
+    subrecord(creature_data, "DATA", creature_stats);
+    append(creature_data, id_subrecord("PKID", 0x700));
+    append(creature_data, id_subrecord("PKID", 0x701));
+    append(records, record("CREA", 0x310, creature_data));
+
     // GMST DATA deliberately precedes EDID, the order the parser must tolerate.
     Bytes gmst_data;
     append(gmst_data, float_subrecord("DATA", {1.5f}));
@@ -408,6 +442,18 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(fixture_male != nullptr && fixture_female != nullptr);
     CHECK(fixture_male->race_form_id == 0x300 && fixture_male->face_symmetric == std::vector<float>({1.0f, 2.0f}));
     CHECK(fixture_female->race_form_id == 0x300 && fixture_female->face_asymmetric == std::vector<float>({3.0f}));
+
+    const auto* rat = database.find_creature_base(0x310);
+    CHECK(rat != nullptr && database.find_npc_base(0x310) == nullptr && database.find_creature_base(0x301) == nullptr);
+    CHECK(rat->editor_id == "FixtureRat" && rat->name == "Fixture Rat");
+    CHECK(rat->model_path == "Creatures\\Rat\\Skeleton.NIF");
+    CHECK(rat->body_part_paths == std::vector<std::string>({"Rat.NIF", "Head.NIF"}));
+    CHECK(rat->flags == 0x2 && rat->base_fatigue == 50 && rat->level_or_offset == 3);
+    CHECK(rat->base_health == 4 && rat->attack_damage == 2 && rat->combat_skill == 10);
+    CHECK(rat->attributes[0] == 40 && rat->attributes[7] == 47);
+    CHECK(rat->ai_package_form_ids == std::vector<std::uint32_t>({0x700, 0x701}));
+    CHECK(database.find_form_id_by_editor_id("fixturerat") == 0x310);
+    CHECK(*database.find_record_type(0x310) == "CREA");
 }
 
 void test_loose_assets(const std::filesystem::path& directory) {

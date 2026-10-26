@@ -143,7 +143,7 @@ QuestCondition parse_condition(const std::uint8_t* value, std::size_t size) {
 bool is_runtime_visual_record(std::string_view type) {
     static constexpr std::array relevant_types = {
         std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
-        std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"),
+        std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"), std::string_view("CREA"),
         std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
@@ -295,6 +295,11 @@ const CellRecord* Esm4Database::find_cell(std::uint32_t form_id) const {
 const NpcBaseRecord* Esm4Database::find_npc_base(std::uint32_t form_id) const {
     const auto it = npc_by_id_.find(form_id);
     return it == npc_by_id_.end() ? nullptr : &it->second;
+}
+
+const CreatureBaseRecord* Esm4Database::find_creature_base(std::uint32_t form_id) const {
+    const auto it = creature_by_id_.find(form_id);
+    return it == creature_by_id_.end() ? nullptr : &it->second;
 }
 
 const CombatStyleRecord* Esm4Database::find_combat_style(std::uint32_t form_id) const {
@@ -606,6 +611,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_game_setting = type == "GMST";
     const bool is_global = type == "GLOB";
     bool is_npc_base = type == "NPC_";
+    const bool is_creature = type == "CREA";
     const bool is_combat_style = type == "CSTY";
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
@@ -647,6 +653,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     reference.form_id = form_id;
     NpcBaseRecord npc;
     npc.form_id = form_id;
+    CreatureBaseRecord creature;
+    creature.form_id = form_id;
     CombatStyleRecord combat_style;
     combat_style.form_id = form_id;
     SpellRecord spell;
@@ -701,9 +709,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style)
+            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
+            if (is_creature) creature.editor_id = text;
             if (is_script) script.editor_id = text;
             if (is_topic) topic.editor_id = text;
             if (is_quest) quest.editor_id = text;
@@ -718,6 +727,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_race) {
             race_face_gen.display_name = lower_ascii(read_zstring(value, subrecord_size));
             record_display_name_by_id_[form_id] = race_face_gen.display_name;
+        } else if (tag == "FULL" && is_creature) {
+            creature.name = read_zstring(value, subrecord_size);
+            record_display_name_by_id_[form_id] = creature.name;
         } else if (tag == "FULL" && (is_item_model || is_spell)) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
@@ -790,6 +802,52 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT")) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
+        } else if (tag == "MODL" && is_creature) {
+            creature.model_path = read_zstring(value, subrecord_size);
+        } else if (tag == "NIFZ" && is_creature) {
+            // NIFZ and KFFZ hold several zero-terminated strings back to back.
+            std::size_t start = 0;
+            for (std::size_t i = 0; i < subrecord_size; ++i) {
+                if (value[i] != 0) continue;
+                if (i > start) creature.body_part_paths.emplace_back(reinterpret_cast<const char*>(value + start), i - start);
+                start = i + 1;
+            }
+        } else if (tag == "KFFZ" && is_creature) {
+            std::size_t start = 0;
+            for (std::size_t i = 0; i < subrecord_size; ++i) {
+                if (value[i] != 0) continue;
+                if (i > start) creature.animation_files.emplace_back(reinterpret_cast<const char*>(value + start), i - start);
+                start = i + 1;
+            }
+        } else if (tag == "ACBS" && is_creature && subrecord_size >= 4) {
+            creature.flags = u32(value);
+            if (subrecord_size >= 6) creature.base_magicka = u16(value + 4);
+            if (subrecord_size >= 8) creature.base_fatigue = u16(value + 6);
+            if (subrecord_size >= 12) creature.level_or_offset = static_cast<std::int16_t>(u16(value + 10));
+        } else if (tag == "DATA" && is_creature && subrecord_size >= 16) {
+            creature.creature_type = value[0];
+            creature.combat_skill = value[1];
+            creature.base_health = u16(value + 6);
+            creature.attack_damage = u16(value + 10);
+            std::copy_n(value + 12, std::min<std::size_t>(creature.attributes.size(), subrecord_size - 12),
+                        creature.attributes.begin());
+        } else if (tag == "ZNAM" && is_creature && subrecord_size >= 4) {
+            creature.combat_style_form_id = u32(value);
+        } else if (tag == "BNAM" && is_creature && subrecord_size >= 4) {
+            creature.base_scale = f32(value);
+        } else if (tag == "RNAM" && is_creature && subrecord_size >= 1) {
+            creature.attack_reach = static_cast<float>(value[0]);
+        } else if (tag == "SCRI" && is_creature && subrecord_size >= 4) {
+            creature.script_form_id = u32(value);
+        } else if (tag == "SPLO" && is_creature && subrecord_size >= 4) {
+            creature.spell_form_ids.push_back(u32(value));
+        } else if (tag == "AIDT" && is_creature && subrecord_size >= 2) {
+            creature.aggression = value[0];
+            creature.confidence = value[1];
+        } else if (tag == "SNAM" && is_creature && subrecord_size >= 5) {
+            creature.factions.emplace_back(u32(value), static_cast<std::int8_t>(value[4]));
+        } else if (tag == "PKID" && is_creature && subrecord_size >= 4) {
+            creature.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "MODL" && is_tree) {
             tree.model_path = read_zstring(value, subrecord_size);
         } else if ((tag == "BNAM" || tag == "MODT" || tag == "MODC" || tag == "MODS" || tag == "MODF")
@@ -1142,6 +1200,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_npc_base)
         npc_by_id_[form_id] = std::move(npc);
+    if (is_creature)
+        creature_by_id_[form_id] = std::move(creature);
     if (is_combat_style)
         combat_style_by_id_[form_id] = std::move(combat_style);
     if (is_spell)

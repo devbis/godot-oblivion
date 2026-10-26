@@ -190,6 +190,10 @@ const NpcBaseRecord* GameData::find_npc_base(std::uint32_t form_id) const {
     return esm_.find_npc_base(form_id);
 }
 
+const CreatureBaseRecord* GameData::find_creature_base(std::uint32_t form_id) const {
+    return esm_.find_creature_base(form_id);
+}
+
 const SpellRecord* GameData::find_spell(std::uint32_t form_id) const {
     return esm_.find_spell(form_id);
 }

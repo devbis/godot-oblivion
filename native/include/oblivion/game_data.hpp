@@ -24,6 +24,7 @@ public:
     [[nodiscard]] const CellRecord* find_cell(std::uint32_t form_id) const;
     [[nodiscard]] std::uint32_t cell_of_reference(std::uint32_t reference_form_id) const;
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const CreatureBaseRecord* find_creature_base(std::uint32_t form_id) const;
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const {
         return esm_.find_combat_style(form_id);
     }

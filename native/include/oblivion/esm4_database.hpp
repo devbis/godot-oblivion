@@ -148,6 +148,34 @@ struct NpcBaseRecord {
     std::vector<std::pair<std::uint32_t, std::int8_t>> factions;
 };
 
+struct CreatureBaseRecord {
+    std::uint32_t form_id = 0;
+    std::uint32_t script_form_id = 0;
+    std::string editor_id;
+    std::string name;
+    std::string model_path;                    // MODL: the skeleton NIF
+    std::vector<std::string> body_part_paths;  // NIFZ: the skin NIFs attached to the skeleton
+    std::vector<std::string> animation_files;  // KFFZ: extra clip names next to the skeleton
+    std::uint32_t flags = 0;                   // ACBS flags: Essential, Respawn, Walks, Flies, Swims, ...
+    std::uint16_t base_magicka = 0;
+    std::uint16_t base_fatigue = 0;
+    std::int16_t level_or_offset = 0;
+    // DATA: 0 animal, 1 creature, 2 daedra, 3 undead, 4 humanoid, 5 horse, 6 giant.
+    std::uint8_t creature_type = 0;
+    std::uint8_t combat_skill = 0;
+    std::uint16_t base_health = 0;
+    std::uint16_t attack_damage = 0;
+    std::array<std::uint8_t, 8> attributes{};
+    std::uint32_t combat_style_form_id = 0;
+    float base_scale = 1.0f;     // BNAM
+    float attack_reach = 0.0f;   // RNAM, in the units of weapon reach
+    std::uint8_t aggression = 0;
+    std::uint8_t confidence = 50;
+    std::vector<std::uint32_t> spell_form_ids;
+    std::vector<std::uint32_t> ai_package_form_ids;
+    std::vector<std::pair<std::uint32_t, std::int8_t>> factions;
+};
+
 struct RaceFaceGenRecord {
     std::uint32_t form_id = 0;
     std::string display_name;
@@ -238,6 +266,7 @@ public:
         return found == cell_by_reference_id_.end() ? 0u : found->second;
     }
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const CreatureBaseRecord* find_creature_base(std::uint32_t form_id) const;
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;
@@ -292,6 +321,7 @@ private:
     std::map<std::uint32_t, std::uint32_t> script_form_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
+    std::map<std::uint32_t, CreatureBaseRecord> creature_by_id_;
     std::map<std::uint32_t, CombatStyleRecord> combat_style_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
     std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
