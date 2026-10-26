@@ -5829,7 +5829,24 @@ func _player_head_model_to_head_transform() -> Transform3D:
 
 ## Radius and height (metres) of the body of a creature, from the extent of its skeleton at rest.
 ## An actor placed dead lies where it was placed: it dies at once, without the events of a death in a fight.
-func _spawn_actor_dead(actor: Dictionary) -> void:
+func _spawn_actor_dead(actor: Dictionary, floor_found: bool) -> void:
+	# No floor under the body (the collision of that part of the cell has none): it lies on a slab at the height it was
+	# placed at, instead of falling out of the world.
+	var root := actor.get("root") as Node3D
+	if not floor_found and is_instance_valid(root):
+		var support := StaticBody3D.new()
+		support.name = "PlacedDeadSupport"
+		support.top_level = true
+		support.collision_layer = 2
+		support.collision_mask = 0
+		var slab := CollisionShape3D.new()
+		var slab_shape := BoxShape3D.new()
+		slab_shape.size = Vector3(3.0, 1.0, 3.0)
+		slab.shape = slab_shape
+		support.add_child(slab)
+		root.add_child(support)
+		support.global_position = root.global_position - Vector3.UP * 0.5
+		print("OpenOB dead actor %s has no floor under it: lying on a slab at %s" % [str(actor.get("name", "")), str(root.global_position)])
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
 	var health: Dictionary = actor.get("health", {})
@@ -5952,7 +5969,11 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var spawn_adjustment := _separate_actor_spawn(actor_root, reference_id)
 		if spawn_adjustment > 0.001:
 			print("OpenOB separated overlapping spawn for %s by %.3fm" % [actor_name, spawn_adjustment])
-		if _place_actor_on_generated_floor(actor_root):
+		# A body placed dead lies where the editor put it, which can be under a shelf or a ledge: only the floor just
+		# above its position counts, not the top of whatever is over it.
+		var placed_dead := bool(reference.get("has_ragdoll_data", false))
+		var floor_found := _place_actor_on_generated_floor(actor_root, PLACED_DEAD_FLOOR_RISE_M if placed_dead else 2.1)
+		if floor_found:
 			grounded_actor_count += 1
 		var avatar := Node3D.new()
 		avatar.name = "OriginalActor"
@@ -6074,8 +6095,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_npc_pending_roots.erase(actor_root)
 		_npc_loaded_reference_ids[reference_id] = true
 		# The editor saved a ragdoll pose (XRGD) for a body it placed dead: it lies there to be looted, not to fight.
-		if bool(reference.get("has_ragdoll_data", false)):
-			_spawn_actor_dead(actor_state)
+		if placed_dead:
+			_spawn_actor_dead(actor_state, floor_found)
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])
@@ -6238,11 +6259,11 @@ func _actor_reference_transform(reference: Dictionary) -> Transform3D:
 	var godot_position := Vector3(position[0], position[2], -position[1]) * game_units_to_meters
 	return Transform3D(godot_rotation, godot_position)
 
-func _place_actor_on_generated_floor(actor_root: CharacterBody3D) -> bool:
+func _place_actor_on_generated_floor(actor_root: CharacterBody3D, rise_m := 2.1) -> bool:
 	var start_position := actor_root.global_position
 	# The floor may be a few metres below the placed position (the actor falls to it) or just above (it rises to it).
 	var query := PhysicsRayQueryParameters3D.create(
-		start_position + Vector3.UP * 2.1,
+		start_position + Vector3.UP * rise_m,
 		start_position - Vector3.UP * 12.0,
 		2,
 		[actor_root.get_rid(), player.get_rid()]
@@ -6478,6 +6499,8 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 ## maximum: the original special idles (pointing, halting) raise the arm in under a second and hold it, then ease back.
 const NPC_GESTURE_MIN_HOLD_S := 1.5
 const NPC_GESTURE_MAX_HOLD_S := 3.0
+## How far above the placed position of a body placed dead the floor under it is looked for.
+const PLACED_DEAD_FLOOR_RISE_M := 0.4
 const NPC_ANIMATION_DISTANCE_M := 60.0
 const NPC_ANIMATION_ALWAYS_NEAR_M := 8.0
 ## A momentary stair-edge floor miss should not start an NPC's jump cycle. Route hops are explicit; ordinary falls must
