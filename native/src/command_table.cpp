@@ -297,6 +297,10 @@ ScriptCommandLookup make_command_lookup(const std::vector<ScriptCommand>& comman
     // message (for example `MessageBox "Text" "Yes" "No"`), so its argument count is not limited.
     if (const auto it = signatures.find("messagebox"); it != signatures.end())
         it->second.max_arguments = std::numeric_limits<std::size_t>::max();
+    // Message's first string may contain format placeholders followed by substitution values;
+    // the executable table records only the format string, as in ValenDrethScript's debug message.
+    if (const auto it = signatures.find("message"); it != signatures.end())
+        it->second.max_arguments = std::numeric_limits<std::size_t>::max();
     return [signatures = std::move(signatures)](std::string_view name) -> std::optional<ScriptCommandSignature> {
         std::string key(name);
         for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

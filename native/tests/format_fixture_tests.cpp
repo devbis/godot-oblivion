@@ -652,6 +652,20 @@ void test_command_table(const std::filesystem::path& directory) {
     // MessageBox takes button labels after the message, so its arguments are not capped.
     CHECK(lookup("MessageBox") && lookup("MessageBox")->max_arguments > 1000);
 
+    // Message's executable signature only lists its format string, but scripts can provide
+    // values for format placeholders as additional arguments.
+    auto message_commands = commands;
+    message_commands.push_back({"Message", "", 0, false, {{"String", 0, false}}});
+    const auto message_lookup = oblivion::make_command_lookup(message_commands);
+    CHECK(message_lookup("Message") && message_lookup("Message")->max_arguments > 1000);
+    const auto formatted_message = oblivion::parse_script(
+        "scn FormattedMessage\n"
+        "begin GameMode\n"
+        "  message \"DEBUG: Valen Dreth convTimer to %.2f\", characterGen.convTimer\n"
+        "end\n",
+        message_lookup);
+    CHECK(formatted_message.diagnostics.empty());
+
     // The first load reads the executable and writes the cache; the second uses it.
     const auto exe_path = directory / "fixture.exe";
     write_bytes(exe_path, executable);
