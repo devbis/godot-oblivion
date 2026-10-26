@@ -674,6 +674,14 @@ public:
         return value ? static_cast<double>(*value) : default_value;
     }
 
+    int64_t get_int_game_setting(const String& name, int64_t default_value = 0) const {
+        const CharString utf8 = name.utf8();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return default_value;
+        const auto value = data_->find_integer_game_setting(utf8.get_data());
+        return value ? static_cast<int64_t>(*value) : default_value;
+    }
+
     Array get_outfit_items(int64_t form_id) const {
         Array result;
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1076,6 +1084,8 @@ protected:
         ClassDB::bind_method(D_METHOD("find_weapon", "form_id"), &OblivionData::find_weapon);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
                              &OblivionData::get_float_game_setting, DEFVAL(0.0));
+        ClassDB::bind_method(D_METHOD("get_int_game_setting", "name", "default_value"),
+                             &OblivionData::get_int_game_setting, DEFVAL(0));
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);
         ClassDB::bind_method(D_METHOD("get_ai_package_info", "form_id"), &OblivionData::get_ai_package_info);
         ClassDB::bind_method(D_METHOD("find_item_model_path", "form_id", "female"), &OblivionData::find_item_model_path);

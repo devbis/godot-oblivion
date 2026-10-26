@@ -313,6 +313,8 @@ public:
     [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::uint32_t>>& unplaced_references() const noexcept { return unplaced_references_; }
     [[nodiscard]] const std::map<std::string, float>& float_game_settings() const noexcept { return float_game_settings_; }
     [[nodiscard]] std::optional<float> find_float_game_setting(std::string_view name) const;
+    [[nodiscard]] const std::map<std::string, std::int32_t>& integer_game_settings() const noexcept { return integer_game_settings_; }
+    [[nodiscard]] std::optional<std::int32_t> find_integer_game_setting(std::string_view name) const;
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
 private:
@@ -355,6 +357,7 @@ private:
     std::map<std::string, std::uint32_t> quest_id_by_editor_id_;
     std::map<std::string, std::uint32_t> script_id_by_editor_id_;
     std::map<std::string, float> float_game_settings_;
+    std::map<std::string, std::int32_t> integer_game_settings_;
     struct MagicEffectRecord {
         std::uint32_t flags = 0;
         std::uint32_t school = 0;

@@ -54,6 +54,10 @@ const NPC_COMBAT_SETTINGS := {
 	"iAIDefaultPowerAttackBackwardChance": 20.0,
 	"iAIDefaultPowerAttackLeftChance": 20.0,
 	"iAIDefaultPowerAttackRightChance": 20.0,
+	"iSkillApprenticeMin": 25.0,
+	"iSkillJourneymanMin": 50.0,
+	"iSkillExpertMin": 75.0,
+	"iSkillMasterMin": 100.0,
 }
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
@@ -645,7 +649,11 @@ func _initialize_player_game_state() -> void:
 	for setting_name: String in COMBAT_DAMAGE_SETTINGS:
 		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, float(COMBAT_DAMAGE_SETTINGS[setting_name]))
 	for setting_name: String in NPC_COMBAT_SETTINGS:
-		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, float(NPC_COMBAT_SETTINGS[setting_name]))
+		var default_value := float(NPC_COMBAT_SETTINGS[setting_name])
+		if setting_name.begins_with("i"):
+			_player_game_settings[setting_name] = data_reader.get_int_game_setting(setting_name, int(default_value))
+		else:
+			_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, default_value)
 	_player_actor_values.configure_game_settings(_player_game_settings)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")

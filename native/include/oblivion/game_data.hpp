@@ -77,6 +77,9 @@ public:
     [[nodiscard]] std::optional<float> find_float_game_setting(std::string_view name) const {
         return esm_.find_float_game_setting(name);
     }
+    [[nodiscard]] std::optional<std::int32_t> find_integer_game_setting(std::string_view name) const {
+        return esm_.find_integer_game_setting(name);
+    }
     [[nodiscard]] const std::vector<std::filesystem::path>& archive_paths() const noexcept { return archive_paths_; }
 
 private:

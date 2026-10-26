@@ -205,6 +205,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     references_by_cell_id_.clear();
     cell_by_reference_id_.clear();
     float_game_settings_.clear();
+    integer_game_settings_.clear();
     global_value_by_id_.clear();
     record_count_ = 0;
     unplaced_reference_count_ = 0;
@@ -320,6 +321,12 @@ const WeaponRecord* Esm4Database::find_weapon(std::uint32_t form_id) const {
 std::optional<float> Esm4Database::find_float_game_setting(std::string_view name) const {
     const auto it = float_game_settings_.find(std::string(name));
     if (it == float_game_settings_.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<std::int32_t> Esm4Database::find_integer_game_setting(std::string_view name) const {
+    const auto it = integer_game_settings_.find(std::string(name));
+    if (it == integer_game_settings_.end()) return std::nullopt;
     return it->second;
 }
 
@@ -681,6 +688,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     std::string base_editor_id;
     // GMST DATA can precede EDID, so the value is held until the name is known.
     std::optional<float> game_setting_value;
+    std::optional<std::int32_t> integer_game_setting_value;
     std::optional<float> global_value;  // GLOB FLTV: every global is stored as a float, whatever its FNAM type
 
     std::size_t cursor = 0;
@@ -1143,6 +1151,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             }
         } else if (tag == "DATA" && is_game_setting && subrecord_size >= 4) {
             game_setting_value = f32(value);
+            integer_game_setting_value = static_cast<std::int32_t>(u32(value));
         } else if (tag == "FLTV" && is_global && subrecord_size >= 4) {
             global_value = f32(value);
         }
@@ -1182,8 +1191,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         pathgrid_by_cell_id_[active_cell_id] = std::move(pathgrid);
     }
 
-    if (is_game_setting && game_setting_value && !base_editor_id.empty() && base_editor_id.front() == 'f')
-        float_game_settings_[base_editor_id] = *game_setting_value;
+    if (is_game_setting && !base_editor_id.empty()) {
+        if (base_editor_id.front() == 'f' && game_setting_value)
+            float_game_settings_[base_editor_id] = *game_setting_value;
+        else if (base_editor_id.front() == 'i' && integer_game_setting_value)
+            integer_game_settings_[base_editor_id] = *integer_game_setting_value;
+    }
 
     if (is_cell) {
         cell.worldspace_form_id = worldspace_form_id;

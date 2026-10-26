@@ -49,6 +49,14 @@ const POWER_ATTACK_DIRECTIONS := [
 	{"suffix": "attackleftpower", "style_key": "power_attack_left_chance", "setting": "iAIDefaultPowerAttackLeftChance"},
 	{"suffix": "attackrightpower", "style_key": "power_attack_right_chance", "setting": "iAIDefaultPowerAttackRightChance"},
 ]
+## Oblivion uses the corresponding skill-rank animation once the weapon skill reaches its GMST threshold.
+const POWER_ATTACK_SKILL_VARIANTS := {
+	"attackpower": {"clip_suffix": "skill1attackpower", "setting": "iSkillApprenticeMin", "default": 25.0},
+	"attackleftpower": {"clip_suffix": "skill2attackleftpower", "setting": "iSkillJourneymanMin", "default": 50.0},
+	"attackrightpower": {"clip_suffix": "skill2attackrightpower", "setting": "iSkillJourneymanMin", "default": 50.0},
+	"attackbackpower": {"clip_suffix": "skill3attackbackpower", "setting": "iSkillExpertMin", "default": 75.0},
+	"attackforwardpower": {"clip_suffix": "skill4attackforwardpower", "setting": "iSkillMasterMin", "default": 100.0},
+}
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
 const CREATURE_MIN_REACH_M := 0.8
@@ -269,6 +277,19 @@ func _attribute_value(actor: Dictionary, index: int) -> float:
 func _skill_value(actor: Dictionary, index: int) -> float:
 	var skills: PackedInt64Array = actor.get("skills", PackedInt64Array())
 	return minf(float(skills[index]) if skills.size() > index else 30.0, 100.0)
+
+## Select the skill-tier variant only when its matching Oblivion rank setting is reached.
+func _power_attack_animation(actor: Dictionary, prefix: String, suffix: String) -> String:
+	var variant: Dictionary = POWER_ATTACK_SKILL_VARIANTS.get(suffix, {})
+	if variant.is_empty():
+		return prefix + suffix
+	var skill_index := int(WEAPON_SKILLS.get(_weapon_type(actor), SKILL_BLADE))
+	var required_skill := _setting_or(str(variant.get("setting", "")), float(variant.get("default", 0.0)))
+	if _skill_value(actor, skill_index) < required_skill:
+		return prefix + suffix
+	var skill_clip := prefix + str(variant.get("clip_suffix", ""))
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	return prefix + suffix if str(requests.get(skill_clip, "")) == "missing" else skill_clip
 
 ## The fatigue term of a blow (FUN_00547f00): half of it at no fatigue.
 func _fatigue_damage_modifier(actor: Dictionary) -> float:
@@ -1216,6 +1237,7 @@ func _begin_swing(
 			clip_key = fallback
 	else:
 		var options := _attack_suffixes(prefix)
+		var skill_power_clip := ""
 		if prefix in ["onehand", "twohand"] \
 				and randf() * 100.0 < _power_attack_chance(actor):
 			var style: Dictionary = actor.get("combat_style", {})
@@ -1225,12 +1247,12 @@ func _begin_swing(
 			else:
 				power_suffix = _movement_power_attack_suffix(actor, prefix, distance, root)
 			if not power_suffix.is_empty():
-				options = [power_suffix]
+				skill_power_clip = _power_attack_animation(actor, prefix, power_suffix)
 			else:
 				options.erase("attackpower")
 		else:
 			options.erase("attackpower")
-		clip_key = prefix + options[randi() % options.size()]
+		clip_key = skill_power_clip if not skill_power_clip.is_empty() else prefix + options[randi() % options.size()]
 	var animation: Dictionary = animations.get(clip_key, {})
 	if animation.is_empty():
 		# The clip is still loading: ask again and try shortly.

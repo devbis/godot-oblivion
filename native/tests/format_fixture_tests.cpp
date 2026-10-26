@@ -299,6 +299,10 @@ Bytes esm_fixture() {
     append(gmst_data, float_subrecord("DATA", {1.5f}));
     append(gmst_data, string_subrecord("EDID", "fFixtureSetting"));
     append(records, record("GMST", 0x400, gmst_data));
+    Bytes integer_gmst_data;
+    append(integer_gmst_data, id_subrecord("DATA", 75));
+    append(integer_gmst_data, string_subrecord("EDID", "iFixtureSkillSetting"));
+    append(records, record("GMST", 0x401, integer_gmst_data));
 
     // A quest-style script with a 2-entry variable table, one reference and a source text.
     Bytes script_header;
@@ -432,6 +436,8 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(database.find_record_type(0x400) != nullptr && *database.find_record_type(0x400) == "GMST");
     CHECK(database.float_game_settings().count("fFixtureSetting") == 1);
     CHECK(database.float_game_settings().at("fFixtureSetting") == 1.5f);
+    CHECK(database.integer_game_settings().count("iFixtureSkillSetting") == 1);
+    CHECK(database.integer_game_settings().at("iFixtureSkillSetting") == 75);
 
     const auto* fixture_race = database.find_race_face_gen(0x300);
     CHECK(fixture_race != nullptr);
