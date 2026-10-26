@@ -47,6 +47,7 @@ const COMBAT_DAMAGE_SETTINGS := {
 }
 ## Executable defaults used by NPC combat when the installed ESM does not override them.
 const NPC_COMBAT_SETTINGS := {
+	"fCombatMinEngageDistance": 64.0,
 	"iAIDefaultPowerAttackChance": 25.0,
 	"iAIDefaultPowerAttackNormalChance": 20.0,
 	"iAIDefaultPowerAttackForwardChance": 20.0,

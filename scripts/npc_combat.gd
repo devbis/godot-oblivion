@@ -39,6 +39,9 @@ const MELEE_VERTICAL_REACH_M := 1.8
 const BLOCKED_DAMAGE_SHARE := 0.3
 const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
+const POWER_ATTACK_MIN_ENGAGE_DISTANCE_SETTING := "fCombatMinEngageDistance"
+const POWER_ATTACK_DEFAULT_MIN_ENGAGE_DISTANCE_GAME_UNITS := 64.0
+const POWER_ATTACK_MOVEMENT_RANGE_MULTIPLIER := 1.25
 const POWER_ATTACK_DIRECTIONS := [
 	{"suffix": "attackpower", "style_key": "power_attack_normal_chance", "setting": "iAIDefaultPowerAttackNormalChance"},
 	{"suffix": "attackforwardpower", "style_key": "power_attack_forward_chance", "setting": "iAIDefaultPowerAttackForwardChance"},
@@ -806,7 +809,7 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		_face(root, flat, delta)
 		actor["combat_anim"] = prefix + "idle"
 		if float(combat.cooldown) <= 0.0:
-			_begin_swing(actor, combat, prefix)
+			_begin_swing(actor, combat, prefix, distance, root)
 		return
 	combat.repath = float(combat.repath) - delta
 	if float(combat.repath) <= 0.0:
@@ -1121,8 +1124,32 @@ func _power_attack_chance(actor: Dictionary) -> float:
 		return clampf(float(style.get("power_attack_chance", fallback)), 0.0, 100.0)
 	return clampf(fallback, 0.0, 100.0)
 
-## CombatStyle's percent-choice flag uses five independent chance values. Other selection paths depend on
-## distance and movement constraints that are not fully modeled here, so those keep the generic power clip.
+## With the CombatStyle movement flag, the executable chooses back inside the minimum engage distance,
+## forward outside 1.25x attack reach, and otherwise uses left/right only while strafing.
+func _movement_power_attack_suffix(actor: Dictionary, prefix: String, distance: float, root: Node3D) -> String:
+	var units_to_meters := float(host.get("game_units_to_meters"))
+	var minimum_distance := _setting_or(
+		POWER_ATTACK_MIN_ENGAGE_DISTANCE_SETTING,
+		POWER_ATTACK_DEFAULT_MIN_ENGAGE_DISTANCE_GAME_UNITS
+	) * units_to_meters
+	var suffix := "attackpower"
+	if distance < minimum_distance:
+		suffix = "attackbackpower"
+	elif distance > _reach_m(actor) * POWER_ATTACK_MOVEMENT_RANGE_MULTIPLIER:
+		suffix = "attackforwardpower"
+	else:
+		var body := root as CharacterBody3D
+		if is_instance_valid(body):
+			var world_velocity := Vector3(body.velocity.x, 0.0, body.velocity.z)
+			var local_velocity := body.global_basis.inverse() * world_velocity
+			if local_velocity.x < -0.05:
+				suffix = "attackleftpower"
+			elif local_velocity.x > 0.05:
+				suffix = "attackrightpower"
+	var requests: Dictionary = actor.get("animation_clip_requests", {})
+	return "" if str(requests.get(prefix + suffix, "")) == "missing" else suffix
+
+## CombatStyle's percent-choice flag uses five independent chance values. The movement-choice path is resolved above.
 func _weighted_power_attack_suffix(actor: Dictionary, prefix: String) -> String:
 	var style: Dictionary = actor.get("combat_style", {})
 	if not bool(style.get("choose_attack_using_chance", false)):
@@ -1163,7 +1190,9 @@ func _creature_attack_clips(actor: Dictionary, prefix: String) -> Array[String]:
 	power.sort()
 	return plain if not plain.is_empty() else power
 
-func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void:
+func _begin_swing(
+	actor: Dictionary, combat: Dictionary, prefix: String, distance: float, root: Node3D
+) -> void:
 	var animations: Dictionary = actor.animations
 	var clip_key := ""
 	var unarmed_index := int(combat.get("unarmed_attack_index", 0))
@@ -1189,7 +1218,12 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 		var options := _attack_suffixes(prefix)
 		if prefix in ["onehand", "twohand"] \
 				and randf() * 100.0 < _power_attack_chance(actor):
-			var power_suffix := _weighted_power_attack_suffix(actor, prefix)
+			var style: Dictionary = actor.get("combat_style", {})
+			var power_suffix := ""
+			if bool(style.get("choose_attack_using_chance", false)):
+				power_suffix = _weighted_power_attack_suffix(actor, prefix)
+			else:
+				power_suffix = _movement_power_attack_suffix(actor, prefix, distance, root)
 			if not power_suffix.is_empty():
 				options = [power_suffix]
 			else:
