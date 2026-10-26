@@ -629,12 +629,13 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 	elif not bool(combat.get("dodge_attempted", false)):
 		combat["dodge_attempted"] = true
 		if float(combat.get("dodge_cooldown", 0.0)) <= 0.0:
-			if randf() * 100.0 < _dodge_chance(is_attacking):
-				var dodge_clip := _select_dodge_clip(actor, root, target)
-				if not dodge_clip.is_empty() and _begin_dodge(actor, root, combat, dodge_clip):
-					return
-			else:
-				combat["dodge_cooldown"] = _failed_dodge_lockout()
+			var dodge_clip := _select_dodge_clip(actor, root, target)
+			if not dodge_clip.is_empty():
+				if randf() * 100.0 < _dodge_chance(actor, is_attacking, dodge_clip):
+					if _begin_dodge(actor, root, combat, dodge_clip):
+						return
+				else:
+					combat["dodge_cooldown"] = _failed_dodge_lockout(actor)
 	if is_attacking:
 		_update_swing(actor, root, target, target_actor, combat, delta, flat)
 		return
@@ -716,11 +717,27 @@ func _attacker_faces_actor(attacker_id: int, attacker_root: Node3D, actor_positi
 	return forward.length_squared() > 0.0001 and toward_actor.length_squared() > 0.0001 \
 		and forward.normalized().dot(toward_actor.normalized()) > 0.15
 
-func _dodge_chance(is_attacking: bool) -> float:
-	# COMBATSTYLE data is not exposed on placed actors yet; use the exe's default and any loaded GMST override.
-	var modifier_setting := "fAIDefaultDodgeDuringAttackMult" if is_attacking else "fAIDefaultDodgeNoAttackMult"
-	var chance := _setting_or(DODGE_BASE_CHANCE_SETTING, DODGE_DEFAULT_CHANCE)
-	chance *= _setting_or(modifier_setting, 1.0)
+func _dodge_chance(actor: Dictionary, is_attacking: bool, clip: String) -> float:
+	var style: Dictionary = actor.get("combat_style", {})
+	var chance := float(style.get("dodge_chance", _setting_or(DODGE_BASE_CHANCE_SETTING, DODGE_DEFAULT_CHANCE)))
+	if bool(style.get("has_advanced_data", false)) and bool(style.get("advanced_enabled", false)):
+		var fatigue: Dictionary = actor.get("fatigue", {})
+		var maximum_fatigue := float(fatigue.get("max", 0.0))
+		var fatigue_ratio := clampf(float(fatigue.get("current", maximum_fatigue)) / maximum_fatigue, 0.0, 1.0) \
+			if maximum_fatigue > 0.0 else 1.0
+		chance += fatigue_ratio * float(style.get("dodge_fatigue_mod_mult", 0.0)) \
+			+ float(style.get("dodge_fatigue_mod_base", 0.0))
+		chance *= float(style.get("dodge_under_attack_mult", 1.0))
+		match clip:
+			"dodgeback":
+				chance *= float(style.get("dodge_back_under_attack_mult", 1.0))
+			"dodgeforward":
+				var forward_multiplier := "dodge_forward_while_attacking_mult" if is_attacking \
+					else "dodge_forward_not_attacking_mult"
+				chance *= float(style.get(forward_multiplier, 1.0))
+	else:
+		var modifier_setting := "fAIDefaultDodgeDuringAttackMult" if is_attacking else "fAIDefaultDodgeNoAttackMult"
+		chance *= _setting_or(modifier_setting, 1.0)
 	return clampf(chance, 0.0, 100.0)
 
 func _select_dodge_clip(actor: Dictionary, root: Node3D, target: Node3D) -> String:
@@ -737,7 +754,9 @@ func _select_dodge_clip(actor: Dictionary, root: Node3D, target: Node3D) -> Stri
 	if absf(right_score) > absf(forward_score):
 		primary = "dodgeleft" if right_score < 0.0 else "dodgeright"
 	var lateral_preference := randf() * 100.0 < clampf(
-		_setting_or(DODGE_LEFT_RIGHT_CHANCE_SETTING, DODGE_DEFAULT_LEFT_RIGHT_CHANCE), 0.0, 100.0
+		float((actor.get("combat_style", {}) as Dictionary).get(
+			"dodge_left_right_chance", _setting_or(DODGE_LEFT_RIGHT_CHANCE_SETTING, DODGE_DEFAULT_LEFT_RIGHT_CHANCE)
+		)), 0.0, 100.0
 	)
 	var side_choice := "dodgeleft" if randf() < 0.5 else "dodgeright"
 	var candidates: Array[String] = []
@@ -777,7 +796,7 @@ func _begin_dodge(actor: Dictionary, root: Node3D, combat: Dictionary, clip: Str
 	combat["state"] = "dodge"
 	combat["dodge_clip"] = clip
 	combat["dodge_time"] = start_time
-	combat["dodge_cooldown"] = _dodge_repeat_delay(clip, animation)
+	combat["dodge_cooldown"] = _dodge_repeat_delay(actor, clip, animation)
 	combat["clip"] = ""
 	combat["hit_done"] = true
 	actor["combat_anim"] = clip
@@ -797,23 +816,28 @@ func _dodge_world_direction(root: Node3D, clip: String) -> Vector3:
 			return root.global_basis.x
 	return Vector3.ZERO
 
-func _dodge_repeat_delay(clip: String, animation: Dictionary) -> float:
+func _dodge_repeat_delay(actor: Dictionary, clip: String, animation: Dictionary) -> float:
+	var style: Dictionary = actor.get("combat_style", {})
 	var minimum := 0.25
 	var maximum := maxf(minimum, float(animation.get("stop_time", 0.63)) - float(animation.get("start_time", 0.0)))
 	match clip:
 		"dodgeleft", "dodgeright":
-			minimum = _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)
-			maximum = _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)
+			minimum = float(style.get("dodge_left_right_min_time", _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)))
+			maximum = float(style.get("dodge_left_right_max_time", _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)))
 		"dodgeforward":
-			minimum = _setting_or("fAIDefaultDodgeForwardMinTime", 0.5)
-			maximum = maxf(minimum, _setting_or("fAIDefaultDodgeForwardMaxTime", 1.0))
+			minimum = float(style.get("dodge_forward_min_time", _setting_or("fAIDefaultDodgeForwardMinTime", 0.5)))
+			maximum = float(style.get("dodge_forward_max_time", _setting_or("fAIDefaultDodgeForwardMaxTime", 1.0)))
 		"dodgeback":
-			minimum = _setting_or("fAIDefaultDodgeBackwardMinTime", 0.25)
+			minimum = float(style.get("dodge_backward_min_time", _setting_or("fAIDefaultDodgeBackwardMinTime", 0.25)))
+			maximum = float(style.get("dodge_backward_max_time", animation.get("stop_time", 0.75)))
+	minimum = maxf(minimum, 0.0)
 	return randf_range(minimum, maxf(minimum, maximum))
 
-func _failed_dodge_lockout() -> float:
-	var minimum := _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)
-	var maximum := _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)
+func _failed_dodge_lockout(actor: Dictionary) -> float:
+	var style: Dictionary = actor.get("combat_style", {})
+	var minimum := float(style.get("dodge_left_right_min_time", _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)))
+	var maximum := float(style.get("dodge_left_right_max_time", _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)))
+	minimum = maxf(minimum, 0.0)
 	return randf_range(minimum, maxf(minimum, maximum))
 
 func _update_dodge(actor: Dictionary, root: Node3D, flat: Vector2, combat: Dictionary, delta: float) -> void:

@@ -56,6 +56,28 @@ struct NpcInventoryEntry {
     std::int32_t count = 0;
 };
 
+struct CombatStyleRecord {
+    std::uint32_t form_id = 0;
+    std::uint8_t dodge_chance = 75;
+    std::uint8_t dodge_left_right_chance = 50;
+    float dodge_left_right_min_time = 0.5f;
+    float dodge_left_right_max_time = 1.5f;
+    float dodge_forward_min_time = 0.5f;
+    float dodge_forward_max_time = 1.0f;
+    float dodge_backward_min_time = 0.25f;
+    float dodge_backward_max_time = 0.75f;
+    bool has_advanced_data = false;
+    bool advanced_enabled = false;
+    float dodge_fatigue_mod_mult = -20.0f;
+    float dodge_fatigue_mod_base = 0.0f;
+    float dodge_under_attack_mult = 1.0f;
+    float dodge_not_under_attack_mult = 0.75f;
+    float dodge_back_under_attack_mult = 1.0f;
+    float dodge_back_not_under_attack_mult = 0.7f;
+    float dodge_forward_while_attacking_mult = 1.0f;
+    float dodge_forward_not_attacking_mult = 0.5f;
+};
+
 struct SpellEffectRecord {
     std::string code;
     std::uint32_t magnitude = 0;
@@ -102,6 +124,7 @@ struct NpcBaseRecord {
     std::array<std::uint8_t, 8> attributes{};
     bool has_actor_values = false;
     std::uint32_t race_form_id = 0;
+    std::uint32_t combat_style_form_id = 0;
     std::uint32_t hair_form_id = 0;
     std::uint32_t eye_form_id = 0;
     std::uint32_t default_outfit_form_id = 0;
@@ -210,6 +233,7 @@ public:
         return found == cell_by_reference_id_.end() ? 0u : found->second;
     }
     [[nodiscard]] const NpcBaseRecord* find_npc_base(std::uint32_t form_id) const;
+    [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
@@ -263,6 +287,7 @@ private:
     std::map<std::uint32_t, std::uint32_t> script_form_id_by_id_;
     std::map<std::string, std::uint32_t> form_id_by_editor_id_;
     std::map<std::uint32_t, NpcBaseRecord> npc_by_id_;
+    std::map<std::uint32_t, CombatStyleRecord> combat_style_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
     std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;

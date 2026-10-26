@@ -482,6 +482,30 @@ public:
         result["skills"] = skills;
         result["female"] = (npc->flags & 0x000001) != 0;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
+        result["combat_style_form_id"] = static_cast<int64_t>(npc->combat_style_form_id);
+        Dictionary combat_style;
+        if (const auto* style = data_->find_combat_style(npc->combat_style_form_id)) {
+            combat_style["form_id"] = static_cast<int64_t>(style->form_id);
+            combat_style["dodge_chance"] = style->dodge_chance;
+            combat_style["dodge_left_right_chance"] = style->dodge_left_right_chance;
+            combat_style["dodge_left_right_min_time"] = style->dodge_left_right_min_time;
+            combat_style["dodge_left_right_max_time"] = style->dodge_left_right_max_time;
+            combat_style["dodge_forward_min_time"] = style->dodge_forward_min_time;
+            combat_style["dodge_forward_max_time"] = style->dodge_forward_max_time;
+            combat_style["dodge_backward_min_time"] = style->dodge_backward_min_time;
+            combat_style["dodge_backward_max_time"] = style->dodge_backward_max_time;
+            combat_style["has_advanced_data"] = style->has_advanced_data;
+            combat_style["advanced_enabled"] = style->advanced_enabled;
+            combat_style["dodge_fatigue_mod_mult"] = style->dodge_fatigue_mod_mult;
+            combat_style["dodge_fatigue_mod_base"] = style->dodge_fatigue_mod_base;
+            combat_style["dodge_under_attack_mult"] = style->dodge_under_attack_mult;
+            combat_style["dodge_not_under_attack_mult"] = style->dodge_not_under_attack_mult;
+            combat_style["dodge_back_under_attack_mult"] = style->dodge_back_under_attack_mult;
+            combat_style["dodge_back_not_under_attack_mult"] = style->dodge_back_not_under_attack_mult;
+            combat_style["dodge_forward_while_attacking_mult"] = style->dodge_forward_while_attacking_mult;
+            combat_style["dodge_forward_not_attacking_mult"] = style->dodge_forward_not_attacking_mult;
+        }
+        result["combat_style"] = combat_style;
         const auto* male_voice_folder = data_->find_race_voice_folder(npc->race_form_id, false);
         const auto* female_voice_folder = data_->find_race_voice_folder(npc->race_form_id, true);
         result["voice_folder_male"] = male_voice_folder ? as_string(*male_voice_folder) : String();

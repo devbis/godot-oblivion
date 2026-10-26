@@ -149,7 +149,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
         std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
-        std::string_view("MGEF"),
+        std::string_view("MGEF"), std::string_view("CSTY"),
         std::string_view("HAIR"), std::string_view("EYES"), std::string_view("ALCH"),
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
@@ -173,6 +173,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     script_form_id_by_id_.clear();
     form_id_by_editor_id_.clear();
     npc_by_id_.clear();
+    combat_style_by_id_.clear();
     spell_by_id_.clear();
     weapon_by_id_.clear();
     magic_effect_by_code_.clear();
@@ -294,6 +295,11 @@ const CellRecord* Esm4Database::find_cell(std::uint32_t form_id) const {
 const NpcBaseRecord* Esm4Database::find_npc_base(std::uint32_t form_id) const {
     const auto it = npc_by_id_.find(form_id);
     return it == npc_by_id_.end() ? nullptr : &it->second;
+}
+
+const CombatStyleRecord* Esm4Database::find_combat_style(std::uint32_t form_id) const {
+    const auto it = combat_style_by_id_.find(form_id);
+    return it == combat_style_by_id_.end() ? nullptr : &it->second;
 }
 
 const SpellRecord* Esm4Database::find_spell(std::uint32_t form_id) const {
@@ -600,6 +606,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_game_setting = type == "GMST";
     const bool is_global = type == "GLOB";
     bool is_npc_base = type == "NPC_";
+    const bool is_combat_style = type == "CSTY";
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
     bool is_magic_effect = type == "MGEF";
@@ -640,6 +647,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     reference.form_id = form_id;
     NpcBaseRecord npc;
     npc.form_id = form_id;
+    CombatStyleRecord combat_style;
+    combat_style.form_id = form_id;
     SpellRecord spell;
     spell.form_id = form_id;
     MagicEffectRecord magic_effect;
@@ -692,7 +701,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree)
+            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_script) script.editor_id = text;
@@ -826,6 +835,28 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             }
         } else if (tag == "RNAM" && is_npc_base && subrecord_size >= 4) {
             npc.race_form_id = u32(value);
+        } else if (tag == "ZNAM" && is_npc_base && subrecord_size >= 4) {
+            npc.combat_style_form_id = u32(value);
+        } else if (tag == "CSTD" && is_combat_style) {
+            if (subrecord_size >= 1) combat_style.dodge_chance = value[0];
+            if (subrecord_size >= 2) combat_style.dodge_left_right_chance = value[1];
+            if (subrecord_size >= 8) combat_style.dodge_left_right_min_time = f32(value + 4);
+            if (subrecord_size >= 12) combat_style.dodge_left_right_max_time = f32(value + 8);
+            if (subrecord_size >= 16) combat_style.dodge_forward_min_time = f32(value + 12);
+            if (subrecord_size >= 20) combat_style.dodge_forward_max_time = f32(value + 16);
+            if (subrecord_size >= 24) combat_style.dodge_backward_min_time = f32(value + 20);
+            if (subrecord_size >= 28) combat_style.dodge_backward_max_time = f32(value + 24);
+            if (subrecord_size >= 81) combat_style.advanced_enabled = (value[80] & 0x01) != 0;
+        } else if (tag == "CSAD" && is_combat_style) {
+            combat_style.has_advanced_data = subrecord_size > 0;
+            if (subrecord_size >= 4) combat_style.dodge_fatigue_mod_mult = f32(value);
+            if (subrecord_size >= 8) combat_style.dodge_fatigue_mod_base = f32(value + 4);
+            if (subrecord_size >= 20) combat_style.dodge_under_attack_mult = f32(value + 16);
+            if (subrecord_size >= 24) combat_style.dodge_not_under_attack_mult = f32(value + 20);
+            if (subrecord_size >= 28) combat_style.dodge_back_under_attack_mult = f32(value + 24);
+            if (subrecord_size >= 32) combat_style.dodge_back_not_under_attack_mult = f32(value + 28);
+            if (subrecord_size >= 36) combat_style.dodge_forward_while_attacking_mult = f32(value + 32);
+            if (subrecord_size >= 40) combat_style.dodge_forward_not_attacking_mult = f32(value + 36);
         } else if (tag == "VNAM" && is_race && subrecord_size >= 8) {
             race_face_gen.voice_form_id_male = u32(value);
             race_face_gen.voice_form_id_female = u32(value + 4);
@@ -1106,6 +1137,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     }
     if (is_npc_base)
         npc_by_id_[form_id] = std::move(npc);
+    if (is_combat_style)
+        combat_style_by_id_[form_id] = std::move(combat_style);
     if (is_spell)
         spell_by_id_[form_id] = std::move(spell);
     if (is_magic_effect && !base_editor_id.empty())

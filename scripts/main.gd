@@ -5683,6 +5683,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"animations": animations,
 			"attributes": npc.get("attributes", PackedInt64Array()),
 			"skills": npc.get("skills", PackedInt64Array()),
+			"combat_style": npc.get("combat_style", {}),
 			"fatigue": _initial_actor_fatigue(npc),
 			"knockdown_state": "",
 			"hit_reaction": {},
