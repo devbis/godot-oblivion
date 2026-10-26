@@ -755,6 +755,9 @@ void test_event_blocks_by_target() {
         "end\n"
         "begin OnPackageDone WalkB\n"
         "  set which to 2\n"
+        "end\n"
+        "begin OnHit player\n"
+        "  set which to 3\n"
         "end\n");
     oblivion::ScriptInterpreter interpreter(ast);
     RecordingHost host;
@@ -763,6 +766,8 @@ void test_event_blocks_by_target() {
     CHECK(!interpreter.run_event("OnPackageDone", "WalkC", host).found_block);
     CHECK(interpreter.run_event("OnPackageDone", "WalkA", host).found_block);
     CHECK(interpreter.variables().at("which").number == 1.0);
+    CHECK(interpreter.run_event("OnHit", "player", host).found_block);
+    CHECK(interpreter.variables().at("which").number == 3.0);
 }
 
 void test_script_fragment() {

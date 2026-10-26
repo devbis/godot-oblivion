@@ -326,17 +326,17 @@ func receive_player_hit(
 				remaining = maxf(remaining, 1.0)
 			health["current"] = remaining
 			actor["health"] = health
-			var player_name := str((host.get("_player_base_record") as Dictionary).get("name", "Player"))
 			if remaining <= 0.0:
-				_run_actor_events(actor, "OnHit", player_name)
+				_run_actor_events(actor, "OnHit", "player")
 				kill_actor(actor)
 				return blocked
 			_run_actor_events(actor, "OnHit", "")
-			_run_actor_events(actor, "OnHit", player_name)
+			_run_actor_events(actor, "OnHit", "player")
 			if bool(actor.get("dead", false)):
 				return blocked
 	var received_fatigue := maxf(8.0, fatigue_damage * BLOCKED_DAMAGE_SHARE) if blocked else fatigue_damage
-	_react_to_hit(actor, source_position, received_fatigue, 0, _player_base_form_id(), blocked)
+	var fight_back_target := 0 if not _calmed.has(reference_id) else -1
+	_react_to_hit(actor, source_position, received_fatigue, fight_back_target, _player_base_form_id(), blocked)
 	return blocked
 
 ## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
