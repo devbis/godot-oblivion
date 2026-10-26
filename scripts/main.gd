@@ -22,6 +22,7 @@ const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
 const AnimationSampling := preload("res://scripts/animation_sampling.gd")
 const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
 const NpcCombat := preload("res://scripts/npc_combat.gd")
+const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
@@ -420,6 +421,9 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_update_skinned_physics_rigs()
+	for actor: Dictionary in _npc_actors:
+		if actor.has("ragdoll"):
+			ActorRagdoll.update(actor.ragdoll)
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
 	if _player_blocking and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_player_blocking = false
@@ -6430,6 +6434,9 @@ func _update_npc_actors(delta: float) -> void:
 		var actor_root := actor.get("root") as Node3D
 		var skeleton := actor.get("skeleton") as Skeleton3D
 		if not is_instance_valid(actor_root) or not is_instance_valid(skeleton) or not actor_root.visible:
+			continue
+		# A rag doll is posed by its bodies (see _process), not by an animation.
+		if actor.has("ragdoll"):
 			continue
 		_restore_npc_head_pose(actor, skeleton)
 		# Animating a skeleton and morphing a face costs the main thread every frame: an NPC that is far away, or out of

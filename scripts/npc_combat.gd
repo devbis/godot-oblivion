@@ -7,6 +7,7 @@ extends RefCounted
 ## at the clip's "Hit" or "Release" key and costs the player health and fatigue.
 
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
+const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
 
 const AGGRESSION_ATTACKS_ON_SIGHT := 50
 const DETECT_RADIUS_M := 22.0
@@ -460,7 +461,7 @@ func _run_actor_events(actor: Dictionary, event: String, detail: String) -> void
 	if bool(host.call("_needs_route_refresh", result)):
 		host.call("_refresh_npc_routes")
 
-## The actor dies: it falls and stays down, and its OnDeath script runs.
+## The actor dies: it goes limp as a rag doll, and its OnDeath script runs.
 func kill_actor(actor: Dictionary) -> void:
 	if bool(actor.get("dead", false)):
 		return
@@ -473,6 +474,7 @@ func kill_actor(actor: Dictionary) -> void:
 	_provoked.erase(reference_id)
 	_set_weapon_drawn(actor, false)
 	_begin_knockdown(actor)
+	ActorRagdoll.start(actor)
 	if is_instance_valid(root):
 		# The body lies where it fell but does not block the living (its layer is off; it still rests on the floor).
 		(root as CollisionObject3D).collision_layer = 0
