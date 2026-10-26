@@ -430,6 +430,30 @@ void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap&
         output.max_friction = desc.maxFriction;
         result.physics_constraints.push_back(std::move(output));
     }
+
+    // A limited hinge (the bucket hung on the end of its rope): the axis in the first body, a direction perpendicular to
+    // it that marks angle zero, and the angle limits around the axis.
+    for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
+        auto* hinge = header.GetBlock<nifly::bhkLimitedHingeConstraint>(block_index);
+        if (!hinge || hinge->entityRefs.GetSize() < 2) continue;
+        const auto node_a = body_node_names.find(hinge->entityRefs.GetBlockRef(0));
+        const auto node_b = body_node_names.find(hinge->entityRefs.GetBlockRef(1));
+        if (node_a == body_node_names.end() || node_b == body_node_names.end()) continue;
+
+        const auto& desc = hinge->limitedHinge;
+        NifPhysicsConstraintData output;
+        output.type = "limited_hinge";
+        output.body_a_node_name = node_a->second;
+        output.body_b_node_name = node_b->second;
+        output.pivot_a = havok_point_to_game_units({desc.pivotA.x, desc.pivotA.y, desc.pivotA.z});
+        output.pivot_b = havok_point_to_game_units({desc.pivotB.x, desc.pivotB.y, desc.pivotB.z});
+        output.twist_axis_a = havok_point_to_game_units({desc.axleA.x, desc.axleA.y, desc.axleA.z});
+        output.plane_axis_a = havok_point_to_game_units({desc.axleInA1.x, desc.axleInA1.y, desc.axleInA1.z});
+        output.plane_min_angle = desc.minAngle;
+        output.plane_max_angle = desc.maxAngle;
+        output.max_friction = desc.maxFriction;
+        result.physics_constraints.push_back(std::move(output));
+    }
 }
 
 // Uniform cubic B-spline with clamped (open) knots, as Gamebryo's NiBSplineBasis evaluates it: `x` runs over [0, n - 3]

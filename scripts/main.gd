@@ -417,6 +417,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
+	_update_skinned_physics_rigs()
 	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
 	if _player_blocking and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_player_blocking = false
@@ -2653,6 +2654,28 @@ func _stream_exterior_if_needed() -> void:
 	_world_loading = false
 	_start_deferred_cell_loading()
 
+## Skeletons of skinned physics models (a rope hung from a hook) and the bodies that move their bones.
+var _skinned_physics_rigs: Array[Dictionary] = []
+
+## Puts each driven bone where its rigid body is, so the skinned mesh follows the physics.
+func _update_skinned_physics_rigs() -> void:
+	for rig_index in range(_skinned_physics_rigs.size() - 1, -1, -1):
+		var rig: Dictionary = _skinned_physics_rigs[rig_index]
+		var skeleton := rig.get("skeleton") as Skeleton3D
+		if not is_instance_valid(skeleton):
+			_skinned_physics_rigs.remove_at(rig_index)
+			continue
+		var to_skeleton := skeleton.global_transform.affine_inverse()
+		for bone_value: Variant in rig.get("bones", []):
+			var bone: Dictionary = bone_value
+			var body := bone.get("body") as RigidBody3D
+			if not is_instance_valid(body):
+				continue
+			var pose := to_skeleton * body.global_transform
+			# The skeleton carries the game-unit scale; the pose must not.
+			pose.basis = pose.basis.orthonormalized()
+			skeleton.set_bone_global_pose(int(bone.index), pose)
+
 func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool:
 	var bodies: Array = metadata.get("physics_bodies", [])
 	var constraints: Array = metadata.get("physics_constraints", [])
@@ -2665,13 +2688,17 @@ func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool
 		var node_name := str(mesh.get("parent_node_name", ""))
 		if not node_name.is_empty():
 			meshes_by_node[node_name] = true
+		# A skinned mesh (a rope) is drawn by its bones: a body on a bone needs no mesh of its own.
+		for bone_name: Variant in mesh.get("bone_names", []):
+			meshes_by_node[str(bone_name)] = true
 	var body_names: Dictionary = {}
 	var has_dynamic_body := false
 	for body_value: Variant in bodies:
 		var body: Dictionary = body_value
 		var node_name := str(body.get("node_name", ""))
 		var shape: Dictionary = body.get("shape", {})
-		if node_name.is_empty() or not meshes_by_node.has(node_name) or body_names.has(node_name):
+		var is_anchor := float(body.get("mass", 0.0)) <= 0.0
+		if node_name.is_empty() or body_names.has(node_name) or not (meshes_by_node.has(node_name) or is_anchor):
 			return false
 		if str(shape.get("type", "")) not in ["capsule", "convex_vertices", "sphere"]:
 			return false
@@ -2682,7 +2709,7 @@ func _supports_imported_nif_physics(metadata: Dictionary, meshes: Array) -> bool
 		return false
 	for constraint_value: Variant in constraints:
 		var constraint: Dictionary = constraint_value
-		if str(constraint.get("type", "")) != "ragdoll":
+		if str(constraint.get("type", "")) not in ["ragdoll", "limited_hinge"]:
 			return false
 		if not body_names.has(str(constraint.get("body_a_node_name", ""))):
 			return false
@@ -2864,11 +2891,41 @@ func _instantiate_imported_nif_physics(
 
 	var mesh_count := 0
 	var visual_mesh_instances: Array[MeshInstance3D] = []
+	var rig_skeleton: Skeleton3D = null
 	for mesh_index in range(meshes.size()):
 		var mesh_entry: Dictionary = meshes[mesh_index]
 		if bool(mesh_entry.get("editor_marker", false)):
 			continue
 		var node_name := str(mesh_entry.get("parent_node_name", ""))
+		var skin_bone_names: Array = mesh_entry.get("bone_names", [])
+		if not skin_bone_names.is_empty():
+			# A skinned mesh (the rope of a bucket) follows the bodies of its bones through a skeleton.
+			if rig_skeleton == null:
+				rig_skeleton = ActorFactory.build_skeleton(metadata.get("nodes", []))
+				if rig_skeleton == null:
+					physics_root.queue_free()
+					return {}
+				rig_skeleton.transform = reference_transform
+				physics_root.add_child(rig_skeleton)
+			var skinned := MeshInstance3D.new()
+			skinned.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
+			skinned.mesh = mesh_entry.get("mesh") as ArrayMesh
+			skinned.set_meta("reference_id", reference_id)
+			skinned.material_override = await _material_for_reference(
+				model_path,
+				str(mesh_entry.get("diffuse_texture_path", "")),
+				bool(mesh_entry.get("alpha_blend", false)),
+				bool(mesh_entry.get("alpha_test", false)),
+				int(mesh_entry.get("alpha_threshold", 128))
+			)
+			rig_skeleton.add_child(skinned)
+			skinned.skeleton = NodePath("..")
+			skinned.skin = ActorFactory.skin_for_mesh(skin_bone_names, rig_skeleton)
+			# The bodies move around the rest pose: the bounds follow the whole rope.
+			skinned.custom_aabb = AABB(Vector3(-400.0, -600.0, -400.0), Vector3(800.0, 700.0, 800.0))
+			visual_mesh_instances.push_back(skinned)
+			mesh_count += 1
+			continue
 		if not body_nodes.has(node_name):
 			var static_mesh := MeshInstance3D.new()
 			static_mesh.name = model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Mesh")).replace(":", "_")
@@ -2929,6 +2986,9 @@ func _instantiate_imported_nif_physics(
 		var world_anchor_a := body_a.global_transform * pivot_a
 		var world_anchor_b := body_b.global_transform * pivot_b
 		largest_initial_anchor_error = maxf(largest_initial_anchor_error, world_anchor_a.distance_to(world_anchor_b))
+		if str(constraint.get("type", "")) == "limited_hinge":
+			_add_limited_hinge_joint(physics_root, constraint, body_a, body_b, (world_anchor_a + world_anchor_b) * 0.5)
+			continue
 		var twist_axis: Vector3 = constraint.get("twist_axis_a", Vector3.ZERO)
 		twist_axis = body_a.global_basis * twist_axis
 		if twist_axis.length_squared() < 0.000001:
@@ -2959,6 +3019,16 @@ func _instantiate_imported_nif_physics(
 		joint.transform = Transform3D(Basis(x_axis, y_axis, z_axis), (world_anchor_a + world_anchor_b) * 0.5)
 		physics_root.add_child(joint)
 
+	if rig_skeleton != null:
+		var driven_bones: Array[Dictionary] = []
+		for body_name: Variant in body_nodes.keys():
+			var bone_index := rig_skeleton.find_bone(str(body_name))
+			var driven_body := (body_nodes[body_name] as Dictionary).get("node") as PhysicsBody3D
+			if bone_index >= 0 and driven_body is RigidBody3D:
+				driven_bones.push_back({"index": bone_index, "body": driven_body})
+		# Parents first: a bone's pose is set relative to its parent's current one.
+		driven_bones.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a.index) < int(b.index))
+		_skinned_physics_rigs.push_back({"skeleton": rig_skeleton, "bones": driven_bones})
 	print("OpenOB imported original Havok NIF physics: %s (%d bodies, %d dynamic, %d ragdoll joints; largest initial anchor mismatch %.4fm)" % [
 		model_path.get_file(), body_count, dynamic_count, constraints.size(), largest_initial_anchor_error
 	])
@@ -2969,6 +3039,30 @@ func _instantiate_imported_nif_physics(
 		"mesh_instances": visual_mesh_instances,
 		"dynamic_bodies": dynamic_bodies,
 	}
+
+## A Havok limited hinge: the bodies turn about one axis between two angles measured from their starting pose.
+func _add_limited_hinge_joint(
+	physics_root: Node3D, constraint: Dictionary, body_a: PhysicsBody3D, body_b: PhysicsBody3D, anchor: Vector3
+) -> void:
+	var axis: Vector3 = body_a.global_basis * (constraint.get("twist_axis_a", Vector3.ZERO) as Vector3)
+	axis = axis.normalized() if axis.length_squared() > 0.000001 else Vector3.RIGHT
+	var reference: Vector3 = body_a.global_basis * (constraint.get("plane_axis_a", Vector3.ZERO) as Vector3)
+	reference -= axis * reference.dot(axis)
+	if reference.length_squared() < 0.000001:
+		reference = Vector3.UP if absf(axis.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
+		reference -= axis * reference.dot(axis)
+	reference = reference.normalized()
+	# Godot's HingeJoint3D turns about its local Z axis.
+	var joint := HingeJoint3D.new()
+	joint.name = "OriginalHingeJoint_%s" % str(constraint.get("body_a_node_name", "Link"))
+	joint.node_a = NodePath("../" + body_a.name)
+	joint.node_b = NodePath("../" + body_b.name)
+	joint.exclude_nodes_from_collision = true
+	joint.set_flag(HingeJoint3D.FLAG_USE_LIMIT, true)
+	joint.set_param(HingeJoint3D.PARAM_LIMIT_LOWER, float(constraint.get("plane_min_angle", 0.0)))
+	joint.set_param(HingeJoint3D.PARAM_LIMIT_UPPER, float(constraint.get("plane_max_angle", 0.0)))
+	joint.transform = Transform3D(Basis(reference, axis.cross(reference), axis), anchor)
+	physics_root.add_child(joint)
 
 func _add_reference_collider(reference_id: int, reference_transform: Transform3D, model_path: String, track_exterior: bool) -> bool:
 	var model_key := model_path.to_lower().replace("\\", "/")
