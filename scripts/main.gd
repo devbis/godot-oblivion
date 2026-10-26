@@ -5832,9 +5832,10 @@ func _player_head_model_to_head_transform() -> Transform3D:
 ## Poses the skeleton as the editor saved the ragdoll of a body placed dead (XRGD): one entry per Havok body of the
 ## skeleton NIF, in the order the NIF lists them. An entry is the local pose of the body's node under its parent node
 ## (the first, the pose of its node in the world, at the reference); the nodes between bodies (the neck, the clavicles)
-## keep their rest pose. The angles are composed as Rz * Ry * Rx, counter-clockwise (checked against the corpses of the
-## prison: the skeleton lies on its back and the goblin on its belly, as in the original). False when the data does not
-## fit the skeleton.
+## keep their rest pose. The angles make Rx(-x) * Ry(-y) * Rz(-z), the transpose of the usual Rz * Ry * Rx: with it the
+## limbs of both corpses of the prison stay nearest their rest pose (20 degrees on average, against 30 to 40 for the other
+## orders and signs), and the skeleton lies flat on its back and the goblin on its belly, as in the original. False when
+## the data does not fit the skeleton.
 func _pose_skeleton_from_ragdoll_data(actor: Dictionary, reference: Dictionary) -> bool:
 	var data: PackedFloat32Array = reference.get("ragdoll_data", PackedFloat32Array())
 	var skeleton := actor.get("skeleton") as Skeleton3D
@@ -5858,9 +5859,9 @@ func _pose_skeleton_from_ragdoll_data(actor: Dictionary, reference: Dictionary) 
 	for bone_index: int in body_of_bone:
 		var base: int = int(body_of_bone[bone_index]) * 6
 		var source_rotation := (
-			Basis(Vector3(0.0, 0.0, 1.0), data[base + 5])
-			* Basis(Vector3(0.0, 1.0, 0.0), data[base + 4])
-			* Basis(Vector3(1.0, 0.0, 0.0), data[base + 3])
+			Basis(Vector3(1.0, 0.0, 0.0), -data[base + 3])
+			* Basis(Vector3(0.0, 1.0, 0.0), -data[base + 4])
+			* Basis(Vector3(0.0, 0.0, 1.0), -data[base + 5])
 		)
 		var rotation := (source_to_godot * source_rotation * source_to_godot.inverse()).orthonormalized()
 		var position := Vector3(data[base], data[base + 2], -data[base + 1])
