@@ -34,6 +34,8 @@ const DODGE_MOVEMENT_DURATION_S := 0.3
 const PLAYER_ATTACK_DODGE_RANGE_M := 3.0
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
+## A melee blow does not reach a target this far above or below the attacker, however close it is on the floor plan.
+const MELEE_VERTICAL_REACH_M := 1.8
 const BLOCKED_DAMAGE_SHARE := 0.3
 const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
@@ -783,6 +785,8 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		return
 	var archer := _is_archer(actor)
 	var in_attack_range := distance <= (ARCHER_RANGE_M if archer else _reach_m(actor) * 0.85)
+	if not archer and absf(target.global_position.y - root.global_position.y) > MELEE_VERTICAL_REACH_M:
+		in_attack_range = false
 	if archer:
 		in_attack_range = in_attack_range and distance >= ARCHER_MIN_RANGE_M and _sees_player(root, target)
 	if in_attack_range:
@@ -1196,7 +1200,8 @@ func _land_hit(actor: Dictionary, root: Node3D, player: CollisionObject3D, targe
 		_loose_arrow(actor, root, player, target_actor)
 		return
 	var distance := Vector2(player.global_position.x - root.global_position.x, player.global_position.z - root.global_position.z).length()
-	if distance > _reach_m(actor) + HIT_REACH_SLACK_M:
+	if distance > _reach_m(actor) + HIT_REACH_SLACK_M \
+			or absf(player.global_position.y - root.global_position.y) > MELEE_VERTICAL_REACH_M:
 		return
 	var damage := _hit_damage(actor, bool(combat.get("power", false)))
 	if target_actor.is_empty():
