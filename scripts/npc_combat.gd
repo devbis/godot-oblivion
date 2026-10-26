@@ -20,6 +20,15 @@ const RUNNING_ANIMATION_SPEED_MPS := 2.2
 const NPC_ATTACK_RECOVERY_MIN_S := 0.9
 const NPC_ATTACK_RECOVERY_MAX_S := 1.3
 const CLIP_FOLDER := "Characters/_male/"
+const DODGE_CLIPS := ["dodgeback", "dodgeforward", "dodgeleft", "dodgeright"]
+const DODGE_BASE_CHANCE_SETTING := "iAIDefaultDodgeChance"
+const DODGE_LEFT_RIGHT_CHANCE_SETTING := "iAIDefaultDodgeLeftRightChance"
+const DODGE_DEFAULT_CHANCE := 75.0
+const DODGE_DEFAULT_LEFT_RIGHT_CHANCE := 50.0
+const DODGE_REACTION_WINDOW_S := 0.3
+const DODGE_DISTANCE_M := 0.45
+const DODGE_MOVEMENT_DURATION_S := 0.3
+const PLAYER_ATTACK_DODGE_RANGE_M := 3.0
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
 const BLOCKED_DAMAGE_SHARE := 0.3
@@ -219,6 +228,10 @@ func _damage(actor: Dictionary) -> float:
 
 func _setting(setting_name: String) -> float:
 	return float((host.get("_player_game_settings") as Dictionary).get(setting_name, 0.0))
+
+func _setting_or(setting_name: String, fallback: float) -> float:
+	var settings: Dictionary = host.get("_player_game_settings")
+	return float(settings.get(setting_name, fallback))
 
 func _attribute_value(actor: Dictionary, index: int) -> float:
 	var attributes: PackedInt64Array = actor.get("attributes", PackedInt64Array())
@@ -518,7 +531,11 @@ func _request_special_clip(actor: Dictionary, clip_name: String, asset_path: Str
 		return
 
 func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_attack_voice := true) -> void:
-	actor["combat"] = {"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0, "hit_done": true, "target_id": target_id}
+	actor["combat"] = {
+		"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0,
+		"hit_done": true, "target_id": target_id, "dodge_cooldown": 0.0, "dodge_attempted": false,
+		"dodge_clip": "", "dodge_time": 0.0,
+	}
 	actor["combat_anim"] = ""
 	_set_weapon_drawn(actor, true)
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
@@ -536,6 +553,8 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 		suffixes.append_array(["attackright_jab", "attackleft_jab", "attackright_hook", "attackleft_hook"])
 	for suffix: String in suffixes:
 		_request_clip(actor, prefix + suffix)
+	for dodge_clip: String in DODGE_CLIPS:
+		_request_clip(actor, dodge_clip)
 	_stop_route(root)
 	_cancel_package_route(actor)
 	print("OpenOB combat: %s attacks %s (aggression %d, weapon type %d)" % [
@@ -598,8 +617,25 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		_end_combat(actor)
 		return
 	combat.cooldown = maxf(float(combat.cooldown) - delta, 0.0)
+	combat["dodge_cooldown"] = maxf(float(combat.get("dodge_cooldown", 0.0)) - delta, 0.0)
 	var prefix := _prefix(actor)
-	if str(combat.state) == "swing":
+	if str(combat.state) == "dodge":
+		_update_dodge(actor, root, flat, combat, delta)
+		return
+	var is_attacking := str(combat.state) == "swing"
+	var attack_imminent := _target_attack_imminent(actor, root, target_id, target_actor, target, distance)
+	if not attack_imminent:
+		combat["dodge_attempted"] = false
+	elif not bool(combat.get("dodge_attempted", false)):
+		combat["dodge_attempted"] = true
+		if float(combat.get("dodge_cooldown", 0.0)) <= 0.0:
+			if randf() * 100.0 < _dodge_chance(is_attacking):
+				var dodge_clip := _select_dodge_clip(actor, root, target)
+				if not dodge_clip.is_empty() and _begin_dodge(actor, root, combat, dodge_clip):
+					return
+			else:
+				combat["dodge_cooldown"] = _failed_dodge_lockout()
+	if is_attacking:
 		_update_swing(actor, root, target, target_actor, combat, delta, flat)
 		return
 	var archer := _is_archer(actor)
@@ -619,6 +655,184 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		_chase(actor, root, target, archer)
 	var speed := Vector2(root.velocity.x, root.velocity.z).length()
 	actor["combat_anim"] = prefix + ("fastforward" if speed > RUNNING_ANIMATION_SPEED_MPS else "forward")
+
+func _player_attack_state() -> Dictionary:
+	if str(host.get("_player_combat_action_kind")) == "attack":
+		var animations: Dictionary = host.get("_player_animations")
+		var clip := str(host.get("_player_combat_action"))
+		var animation: Dictionary = animations.get(clip, {})
+		if not animation.is_empty():
+			return {"animation": animation, "time": float(host.get("_animation_time"))}
+	var arms: Variant = host.get("_arms")
+	if arms != null and arms.has_method("current_attack_state"):
+		return arms.call("current_attack_state") as Dictionary
+	return {}
+
+func _target_attack_imminent(
+	actor: Dictionary, root: Node3D, target_id: int, target_actor: Dictionary,
+	target: CollisionObject3D, distance: float
+) -> bool:
+	var target_root := target as Node3D
+	if not is_instance_valid(target_root) or not _attacker_faces_actor(target_id, target_root, root.global_position):
+		return false
+	var attack_state: Dictionary = {}
+	var attack_range := PLAYER_ATTACK_DODGE_RANGE_M
+	if target_id == 0:
+		var player_weapon_type := int(host.call("_player_weapon_type"))
+		if player_weapon_type == WEAPON_TYPE_BOW:
+			attack_range = ARCHER_RANGE_M
+		attack_state = _player_attack_state()
+	else:
+		var attacker_combat: Dictionary = target_actor.get("combat", {})
+		if str(attacker_combat.get("state", "")) != "swing" \
+				or int(attacker_combat.get("target_id", -1)) != int(actor.get("reference_id", 0)) \
+				or bool(attacker_combat.get("hit_done", true)):
+			return false
+		attack_range = ARCHER_RANGE_M if _is_archer(target_actor) else _reach_m(target_actor) + HIT_REACH_SLACK_M
+		var attacker_animations: Dictionary = target_actor.get("animations", {})
+		var attacker_clip := str(attacker_combat.get("clip", ""))
+		var animation: Dictionary = attacker_animations.get(attacker_clip, {})
+		if animation.is_empty():
+			return false
+		attack_state = {"animation": animation, "time": float(attacker_combat.get("time", 0.0))}
+	if distance > attack_range:
+		return false
+	var incoming_animation: Dictionary = attack_state.get("animation", {})
+	if incoming_animation.is_empty():
+		return false
+	var time_to_hit := _hit_time(incoming_animation) - float(attack_state.get("time", 0.0))
+	return time_to_hit >= 0.0 and time_to_hit <= DODGE_REACTION_WINDOW_S
+
+func _attacker_faces_actor(attacker_id: int, attacker_root: Node3D, actor_position: Vector3) -> bool:
+	var forward := -attacker_root.global_basis.z
+	if attacker_id == 0:
+		var player := host.get("player") as CharacterBody3D
+		var camera := player.get("camera") as Camera3D if is_instance_valid(player) else null
+		if is_instance_valid(camera):
+			forward = -camera.global_basis.z
+	var toward_actor := actor_position - attacker_root.global_position
+	forward.y = 0.0
+	toward_actor.y = 0.0
+	return forward.length_squared() > 0.0001 and toward_actor.length_squared() > 0.0001 \
+		and forward.normalized().dot(toward_actor.normalized()) > 0.15
+
+func _dodge_chance(is_attacking: bool) -> float:
+	# COMBATSTYLE data is not exposed on placed actors yet; use the exe's default and any loaded GMST override.
+	var modifier_setting := "fAIDefaultDodgeDuringAttackMult" if is_attacking else "fAIDefaultDodgeNoAttackMult"
+	var chance := _setting_or(DODGE_BASE_CHANCE_SETTING, DODGE_DEFAULT_CHANCE)
+	chance *= _setting_or(modifier_setting, 1.0)
+	return clampf(chance, 0.0, 100.0)
+
+func _select_dodge_clip(actor: Dictionary, root: Node3D, target: Node3D) -> String:
+	var away := root.global_position - target.global_position
+	away.y = 0.0
+	if away.length_squared() <= 0.0001:
+		away = root.global_basis.z
+	away = away.normalized()
+	var local_forward := -root.global_basis.z.normalized()
+	var local_right := root.global_basis.x.normalized()
+	var forward_score := away.dot(local_forward)
+	var right_score := away.dot(local_right)
+	var primary := "dodgeforward" if forward_score > 0.0 else "dodgeback"
+	if absf(right_score) > absf(forward_score):
+		primary = "dodgeleft" if right_score < 0.0 else "dodgeright"
+	var lateral_preference := randf() * 100.0 < clampf(
+		_setting_or(DODGE_LEFT_RIGHT_CHANCE_SETTING, DODGE_DEFAULT_LEFT_RIGHT_CHANCE), 0.0, 100.0
+	)
+	var side_choice := "dodgeleft" if randf() < 0.5 else "dodgeright"
+	var candidates: Array[String] = []
+	if lateral_preference:
+		_append_dodge_candidate(candidates, side_choice)
+	_append_dodge_candidate(candidates, primary)
+	_append_dodge_candidate(candidates, side_choice)
+	_append_dodge_candidate(candidates, "dodgeleft" if side_choice == "dodgeright" else "dodgeright")
+	_append_dodge_candidate(candidates, "dodgeback" if primary == "dodgeforward" else "dodgeforward")
+	var animations: Dictionary = actor.get("animations", {})
+	for candidate: String in candidates:
+		if not (animations.get(candidate, {}) as Dictionary).is_empty():
+			return candidate
+		_request_clip(actor, candidate)
+	return ""
+
+func _append_dodge_candidate(candidates: Array[String], candidate: String) -> void:
+	if not candidates.has(candidate):
+		candidates.push_back(candidate)
+
+func _begin_dodge(actor: Dictionary, root: Node3D, combat: Dictionary, clip: String) -> bool:
+	var animations: Dictionary = actor.get("animations", {})
+	var animation: Dictionary = animations.get(clip, {})
+	if animation.is_empty() or not root.has_method("begin_combat_dodge"):
+		return false
+	if bool(root.get("is_swimming")) or (
+		root.has_method("is_animation_grounded") and not bool(root.call("is_animation_grounded"))
+	):
+		return false
+	var direction := _dodge_world_direction(root, clip)
+	if str(combat.get("state", "")) == "swing":
+		_interrupt_actor_attack(actor)
+	_stop_route(root)
+	if not bool(root.call("begin_combat_dodge", direction, DODGE_DISTANCE_M, DODGE_MOVEMENT_DURATION_S)):
+		return false
+	var start_time := float(animation.get("start_time", 0.0))
+	combat["state"] = "dodge"
+	combat["dodge_clip"] = clip
+	combat["dodge_time"] = start_time
+	combat["dodge_cooldown"] = _dodge_repeat_delay(clip, animation)
+	combat["clip"] = ""
+	combat["hit_done"] = true
+	actor["combat_anim"] = clip
+	actor["animation_time"] = start_time
+	actor["active_animation"] = ""
+	return true
+
+func _dodge_world_direction(root: Node3D, clip: String) -> Vector3:
+	match clip:
+		"dodgeforward":
+			return -root.global_basis.z
+		"dodgeback":
+			return root.global_basis.z
+		"dodgeleft":
+			return -root.global_basis.x
+		"dodgeright":
+			return root.global_basis.x
+	return Vector3.ZERO
+
+func _dodge_repeat_delay(clip: String, animation: Dictionary) -> float:
+	var minimum := 0.25
+	var maximum := maxf(minimum, float(animation.get("stop_time", 0.63)) - float(animation.get("start_time", 0.0)))
+	match clip:
+		"dodgeleft", "dodgeright":
+			minimum = _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)
+			maximum = _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)
+		"dodgeforward":
+			minimum = _setting_or("fAIDefaultDodgeForwardMinTime", 0.5)
+			maximum = maxf(minimum, _setting_or("fAIDefaultDodgeForwardMaxTime", 1.0))
+		"dodgeback":
+			minimum = _setting_or("fAIDefaultDodgeBackwardMinTime", 0.25)
+	return randf_range(minimum, maxf(minimum, maximum))
+
+func _failed_dodge_lockout() -> float:
+	var minimum := _setting_or("fAIDefaultDodgeLeftRightMinTime", 0.5)
+	var maximum := _setting_or("fAIDefaultDodgeLeftRightMaxTime", 1.5)
+	return randf_range(minimum, maxf(minimum, maximum))
+
+func _update_dodge(actor: Dictionary, root: Node3D, flat: Vector2, combat: Dictionary, delta: float) -> void:
+	var clip := str(combat.get("dodge_clip", ""))
+	var animations: Dictionary = actor.get("animations", {})
+	var animation: Dictionary = animations.get(clip, {})
+	if animation.is_empty():
+		combat["state"] = "chase"
+		combat["dodge_clip"] = ""
+		combat["repath"] = 0.0
+		actor["combat_anim"] = _prefix(actor) + "idle"
+		return
+	_face(root, flat, delta)
+	combat["dodge_time"] = float(combat.get("dodge_time", 0.0)) + delta
+	if float(combat["dodge_time"]) >= float(animation.get("stop_time", 0.0)):
+		combat["state"] = "chase"
+		combat["dodge_clip"] = ""
+		combat["repath"] = 0.0
+		actor["combat_anim"] = _prefix(actor) + "idle"
 
 func _chase(actor: Dictionary, root: Node3D, player: Node3D, archer: bool) -> void:
 	var arrival := (ARCHER_RANGE_M * 0.7) if archer else _reach_m(actor) * 0.6

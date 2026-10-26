@@ -343,6 +343,15 @@ func attack(side: String, variant := "") -> bool:
 	_begin_one_shot(candidates, "attack")
 	return true
 
+## The active first-person attack clip and its hit timing, for NPC threat decisions.
+func current_attack_state() -> Dictionary:
+	if _one_shot_kind != "attack" or _one_shot.is_empty():
+		return {}
+	var animation: Dictionary = _clips.get(_one_shot, {})
+	if animation.is_empty():
+		return {}
+	return {"clip": _one_shot, "time": _time, "animation": animation}
+
 ## A cast clip for a spell's range (0 self, 1 touch, 2 target). Waits for the equip clip if the weapon is not drawn yet.
 func cast(range_type: int) -> void:
 	var suffix: String = ["self", "touch", "target"][clampi(range_type, 0, 2)]

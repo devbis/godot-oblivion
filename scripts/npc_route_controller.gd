@@ -72,6 +72,9 @@ var _yield_request_cooldown_remaining := 0.0
 var _stepper := CharacterStepper.new()
 var _footstep_distance_m := 0.0
 var _hit_velocity := Vector3.ZERO
+var _combat_dodge_direction := Vector3.ZERO
+var _combat_dodge_speed_mps := 0.0
+var _combat_dodge_remaining_s := 0.0
 var _hop_active := false
 var _hop_to := Vector3.ZERO
 var _hop_elapsed := 0.0
@@ -84,6 +87,7 @@ func _ready() -> void:
 ## Moves the actor without walking: the route it was following and the remembered ground belong to the old place, so
 ## both go, and the package route is planned again from here.
 func teleport_to(destination: Vector3) -> void:
+	_cancel_combat_dodge()
 	_hop_active = false
 	_pending_route.clear()
 	global_position = destination
@@ -111,6 +115,7 @@ func configure_route(
 	if _hop_active:
 		_pending_route = [route, should_loop, initial_pause, final_arrival_distance_m, use_authored_route_height]
 		return
+	_cancel_combat_dodge()
 	_yield_path.clear()
 	_yield_waypoint_index = 0
 	waypoints.clear()
@@ -318,6 +323,7 @@ func is_teleport_waypoint(index: int) -> bool:
 func set_dialogue_paused(paused: bool) -> void:
 	dialogue_paused = paused
 	if paused:
+		_cancel_combat_dodge()
 		velocity = Vector3.ZERO
 		is_walking = false
 
@@ -325,9 +331,39 @@ func apply_hit_impulse(impulse: Vector3) -> void:
 	_hit_velocity = (_hit_velocity + Vector3(impulse.x, 0.0, impulse.z)).limit_length(HIT_IMPULSE_CAP_MPS)
 	_hit_velocity.y = 0.0
 
+## Brief collision-aware combat sidestep. Facing stays on the opponent; animation is selected by the combat AI.
+func begin_combat_dodge(direction: Vector3, distance_m: float, duration_s: float) -> bool:
+	var flat_direction := Vector3(direction.x, 0.0, direction.z)
+	if inactive or knocked_down or is_swimming or _hop_active or distance_m <= 0.0 or duration_s <= 0.0 \
+			or flat_direction.length_squared() <= 0.0001:
+		return false
+	_combat_dodge_direction = flat_direction.normalized()
+	_combat_dodge_speed_mps = distance_m / duration_s
+	_combat_dodge_remaining_s = duration_s
+	_pause_remaining = 0.0
+	_yield_path.clear()
+	_yield_waypoint_index = 0
+	waypoints.clear()
+	waypoint_speeds.clear()
+	waypoint_is_teleport.clear()
+	waypoint_teleport_destinations.clear()
+	waypoint_is_hop.clear()
+	waypoint_index = 0
+	velocity.x = 0.0
+	velocity.z = 0.0
+	is_walking = false
+	set_physics_process(not inactive)
+	return true
+
+func _cancel_combat_dodge() -> void:
+	_combat_dodge_direction = Vector3.ZERO
+	_combat_dodge_speed_mps = 0.0
+	_combat_dodge_remaining_s = 0.0
+
 func set_knocked_down(value: bool) -> void:
 	knocked_down = value
 	if value:
+		_cancel_combat_dodge()
 		_yield_path.clear()
 		waypoints.clear()
 		waypoint_speeds.clear()
@@ -389,7 +425,16 @@ func _physics_process(delta: float) -> void:
 		is_walking = false
 		return
 	var desired_horizontal_velocity := Vector3.ZERO
-	if _pause_remaining > 0.0:
+	if _combat_dodge_remaining_s > 0.0:
+		var remaining_after_step := maxf(0.0, _combat_dodge_remaining_s - delta)
+		var braking_scale := 1.0
+		if remaining_after_step < 0.06:
+			braking_scale = remaining_after_step / 0.06
+		desired_horizontal_velocity = _combat_dodge_direction * _combat_dodge_speed_mps * braking_scale
+		_combat_dodge_remaining_s = remaining_after_step
+		if remaining_after_step <= 0.0:
+			_cancel_combat_dodge()
+	elif _pause_remaining > 0.0:
 		_pause_remaining = maxf(0.0, _pause_remaining - delta)
 	elif not _yield_path.is_empty() and _yield_waypoint_index < _yield_path.size():
 		var offset := _yield_path[_yield_waypoint_index] - global_position
@@ -524,7 +569,7 @@ func _physics_process(delta: float) -> void:
 			if audio_manager != null:
 				audio_manager.call("play_footstep", self, desired_horizontal_velocity.length() > 1.8)
 	if not grounding_enabled and waypoints.is_empty() and _yield_path.is_empty() \
-			and _yield_cooldown_remaining <= 0.0:
+			and _yield_cooldown_remaining <= 0.0 and _combat_dodge_remaining_s <= 0.0:
 		set_physics_process(false)
 
 func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> void:

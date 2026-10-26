@@ -97,6 +97,10 @@ const PLAYER_SWIM_KFS := {
 	"swimstagger": ["Characters/_male/swimstagger.kf", "Stagger"],
 }
 const NPC_MOVEMENT_KFS := {
+	"dodgeback": ["Characters/_male/dodgeback.kf", "DodgeBack"],
+	"dodgeforward": ["Characters/_male/dodgeforward.kf", "DodgeForward"],
+	"dodgeleft": ["Characters/_male/dodgeleft.kf", "DodgeLeft"],
+	"dodgeright": ["Characters/_male/dodgeright.kf", "DodgeRight"],
 	"Backward": ["Characters/_male/walkbackward.kf", "Backward"],
 	"Left": ["Characters/_male/walkleft.kf", "Left"],
 	"Right": ["Characters/_male/walkright.kf", "Right"],
@@ -6369,11 +6373,13 @@ func _update_npc_actors(delta: float) -> void:
 				requested_animation = NPC_IDLE_KEY
 		var combat_animation := str(actor.get("combat_anim", ""))
 		if actor.has("combat"):
+			var combat_state_name := str((actor.get("combat", {}) as Dictionary).get("state", ""))
+			var dodge_active := combat_state_name == "dodge"
 			var stance_prefix := _npc_stance_prefix(actor)
 			if combat_animation.is_empty():
 				combat_animation = ("sneak" if bool(actor.get("sneaking", false)) else "") + stance_prefix + "idle"
 			elif (walking or swimming) and not combat_animation.contains("attack") \
-					and not combat_animation.contains("stagger") and not combat_animation.contains("block"):
+					and not combat_animation.contains("stagger") and not combat_animation.contains("block") and not dodge_active:
 				combat_animation = locomotion_animation if not locomotion_animation.is_empty() else stance_prefix + "idle"
 			_request_npc_animation(actor, combat_animation)
 			if animations.has(combat_animation):
@@ -6395,7 +6401,7 @@ func _update_npc_actors(delta: float) -> void:
 			base_name = hit_reaction_animation
 			_end_npc_idle(actor)
 		var combat_state: Dictionary = actor.get("combat", {})
-		var attack_action_active := str(combat_state.get("state", "")) == "swing"
+		var attack_action_active := str(combat_state.get("state", "")) in ["swing", "dodge"]
 		if hit_reaction_animation.is_empty() and not attack_action_active and not swimming:
 			var air_animation := _npc_air_animation(actor, actor_root, grounded)
 			if not air_animation.is_empty():
