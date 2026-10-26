@@ -160,7 +160,8 @@ func ensure_collision_shape(model_path: String) -> void:
 		if bool(mesh_entry.get("editor_marker", false)):
 			continue
 		var shape_name := str(mesh_entry.get("mesh_name", "")).to_lower()
-		if shape_name.contains("sky") or shape_name.contains("lightbeam") or shape_name.contains("dust"):
+		# Not "sky" alone: the Skylite wall pieces of the prison are floors and walls with a light shaft above them.
+		if shape_name.contains("skydome") or shape_name.contains("skybox") or shape_name.contains("lightbeam") or shape_name.contains("dust"):
 			continue
 		var mesh := mesh_entry.get("mesh") as ArrayMesh
 		if mesh != null:

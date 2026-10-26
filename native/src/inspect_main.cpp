@@ -895,7 +895,13 @@ int main(int argc, char** argv) {
                         const auto decoded = oblivion::decode_nif_asset(bytes);
                         for (std::size_t body_index = 0; body_index < decoded.physics_bodies.size(); ++body_index)
                             std::cout << "  body " << body_index << " block=" << decoded.physics_bodies[body_index].block_index
-                                      << " node=" << decoded.physics_bodies[body_index].node_name << '\n';
+                                      << " node=" << decoded.physics_bodies[body_index].node_name
+                                      << " node_pos=" << decoded.physics_bodies[body_index].node_global_translation[0] << ','
+                                      << decoded.physics_bodies[body_index].node_global_translation[1] << ','
+                                      << decoded.physics_bodies[body_index].node_global_translation[2]
+                                      << " havok_pos=" << decoded.physics_bodies[body_index].havok_translation[0] << ','
+                                      << decoded.physics_bodies[body_index].havok_translation[1] << ','
+                                      << decoded.physics_bodies[body_index].havok_translation[2] << '\n';
                     }
                     for (auto* shape : file.GetShapes()) {
                         std::vector<std::string> bones;
