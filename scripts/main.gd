@@ -5824,6 +5824,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var assembled: Dictionary = {}
 		var animations := {}
 		if is_creature:
+			# The rig hangs from its root bone, as a humanoid's does: the feet stand on the floor once it is lowered.
+			_align_avatar_to_floor_origin(avatar, skeleton)
 			var creature_ok: bool = await actors.assemble_creature_model(
 				avatar, skeleton, npc, func() -> bool: return stream_generation == _npc_stream_generation
 			)
