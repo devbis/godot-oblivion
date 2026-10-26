@@ -759,7 +759,7 @@ int main(int argc, char** argv) {
                     if (const auto* creature = data.find_creature_base(reference.base_form_id)) {
                         std::cout << " creature=" << creature->editor_id << " full=" << creature->name
                                   << " model=" << creature->model_path << " health=" << creature->base_health
-                                  << " damage=" << creature->attack_damage << " nifz=" << creature->body_part_paths.size()
+                                  << " damage=" << creature->attack_damage << " reach=" << creature->attack_reach << " nifz=" << creature->body_part_paths.size()
                                   << " kffz=" << creature->animation_files.size() << " packages=";
                         for (const auto package_id : creature->ai_package_form_ids) {
                             const auto* package_name = data.find_editor_id(package_id);

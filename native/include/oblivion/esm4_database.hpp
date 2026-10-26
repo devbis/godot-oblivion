@@ -168,7 +168,7 @@ struct CreatureBaseRecord {
     std::array<std::uint8_t, 8> attributes{};
     std::uint32_t combat_style_form_id = 0;
     float base_scale = 1.0f;     // BNAM
-    float attack_reach = 0.0f;   // RNAM, in the units of weapon reach
+    float attack_reach = 0.0f;   // RNAM, in game units
     std::uint8_t aggression = 0;
     std::uint8_t confidence = 50;
     std::vector<std::uint32_t> spell_form_ids;

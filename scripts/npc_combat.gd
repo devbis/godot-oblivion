@@ -41,6 +41,7 @@ const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
+const CREATURE_MIN_REACH_M := 0.8
 const HIT_ATTACK_LOCK_S := 0.45
 const FATIGUE_ATTACK_COST := 5.0
 const FATIGUE_HIT_COST_MULT := 1.5
@@ -232,10 +233,10 @@ func _has_clip(actor: Dictionary, clip_name: String) -> bool:
 func _reach_m(actor: Dictionary) -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	if record.is_empty():
-		# CREA RNAM is the creature's reach in the units of a weapon's reach (1: a one-handed sword).
+		# CREA RNAM is the creature's reach in game units (a rat: 96).
 		var creature_reach := float(actor.get("creature_attack_reach", 0.0))
 		if _is_creature(actor) and creature_reach > 0.0:
-			return maxf(UNARMED_REACH_M, host.MELEE_BASE_REACH_M * creature_reach)
+			return maxf(CREATURE_MIN_REACH_M, creature_reach * float(host.get("game_units_to_meters")))
 		return UNARMED_REACH_M
 	return host.MELEE_BASE_REACH_M * float(record.get("reach", 1.0))
 
