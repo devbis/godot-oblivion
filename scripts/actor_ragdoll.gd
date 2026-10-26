@@ -93,6 +93,7 @@ static func start(actor: Dictionary, walker: PhysicsBody3D = null) -> bool:
 	if actor_root is CharacterBody3D:
 		(actor_root as CharacterBody3D).velocity = Vector3.ZERO
 	actor_root.set_physics_process(false)
+	actor_root.set("ragdoll_driven", true)
 	var reference_id := int(actor.get("reference_id", 0))
 	var to_world := skeleton.global_transform
 	var bodies: Dictionary = {}
@@ -243,6 +244,7 @@ static func hand_back(actor: Dictionary, host: Object, animation: Dictionary) ->
 			(actor_root as CollisionObject3D).collision_mask = int(rig.get("root_mask", 0))
 		if actor_root is CharacterBody3D:
 			(actor_root as CharacterBody3D).velocity = Vector3.ZERO
+		actor_root.set("ragdoll_driven", false)
 		actor_root.set_physics_process(true)
 	var rag_root := rig.get("root") as Node
 	if is_instance_valid(rag_root):

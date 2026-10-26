@@ -412,7 +412,14 @@ func _update_swimming_state() -> void:
 	var depth := _water_surface_y - global_position.y
 	is_swimming = depth > (SWIM_EXIT_DEPTH_M if is_swimming else SWIM_ENTER_DEPTH_M)
 
+## A rag doll carries the body (see ActorRagdoll): the root stays where it fell. Water, route and grounding updates turn
+## physics processing back on, and a root with no collision left would then fall for ever, taking the skin with it.
+var ragdoll_driven := false
+
 func _physics_process(delta: float) -> void:
+	if ragdoll_driven:
+		velocity = Vector3.ZERO
+		return
 	_yield_cooldown_remaining = maxf(0.0, _yield_cooldown_remaining - delta)
 	_yield_request_cooldown_remaining = maxf(0.0, _yield_request_cooldown_remaining - delta)
 	if inactive:
