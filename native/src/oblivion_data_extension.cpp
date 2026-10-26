@@ -1134,6 +1134,7 @@ private:
         entry["initially_disabled"] = reference.initially_disabled;
         entry["enable_parent_form_id"] = static_cast<int64_t>(reference.enable_parent_form_id);
         entry["enable_parent_inverted"] = reference.enable_parent_inverted;
+        entry["has_ragdoll_data"] = reference.ragdoll_bone_count > 0;
         entry["reference_name"] = as_string(reference.reference_name);
         entry["base_editor_id"] = as_string(reference.base_editor_id);
         entry["position"] = PackedFloat32Array{reference.position[0], reference.position[1], reference.position[2]};

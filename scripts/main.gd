@@ -5828,6 +5828,15 @@ func _player_head_model_to_head_transform() -> Transform3D:
 	return Transform3D(head_basis.inverse(), Vector3.ZERO)
 
 ## Radius and height (metres) of the body of a creature, from the extent of its skeleton at rest.
+## An actor placed dead lies where it was placed: it dies at once, without the events of a death in a fight.
+func _spawn_actor_dead(actor: Dictionary) -> void:
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	var health: Dictionary = actor.get("health", {})
+	health["current"] = 0.0
+	actor["health"] = health
+	_npc_combat.kill_actor(actor, false)
+
 func _creature_capsule_size(skeleton: Skeleton3D, base_scale: float) -> Vector2:
 	var low := Vector3(INF, INF, INF)
 	var high := Vector3(-INF, -INF, -INF)
@@ -6064,6 +6073,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		_refresh_actor_route(actor_state)
 		_npc_pending_roots.erase(actor_root)
 		_npc_loaded_reference_ids[reference_id] = true
+		# The editor saved a ragdoll pose (XRGD) for a body it placed dead: it lies there to be looted, not to fight.
+		if bool(reference.get("has_ragdoll_data", false)):
+			_spawn_actor_dead(actor_state)
 		_apply_face_expression(actor_state)
 		actor_count += 1
 	print("OpenOB assembled %d placed NPCs (%d grounded), original idle/walk/fast-walk animations, and FaceGen head morphs" % [actor_count, grounded_actor_count])

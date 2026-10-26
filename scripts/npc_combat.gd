@@ -513,7 +513,7 @@ func _run_actor_events(actor: Dictionary, event: String, detail: String) -> void
 		host.call("_refresh_npc_routes")
 
 ## The actor dies: it goes limp as a rag doll, and its OnDeath script runs.
-func kill_actor(actor: Dictionary) -> void:
+func kill_actor(actor: Dictionary, run_death_events := true) -> void:
 	if bool(actor.get("dead", false)):
 		return
 	var root := actor.get("root") as Node3D
@@ -530,7 +530,8 @@ func kill_actor(actor: Dictionary) -> void:
 		# The body lies where it fell but does not block the living (its layer is off; it still rests on the floor).
 		(root as CollisionObject3D).collision_layer = 0
 	print("OpenOB combat: %s dies" % str(actor.get("reference_name", "NPC")))
-	_run_actor_events(actor, "OnDeath", "")
+	if run_death_events:
+		_run_actor_events(actor, "OnDeath", "")
 
 func _advance_actor_fatigue(actor: Dictionary, root: Node3D, delta: float) -> void:
 	var fatigue: Dictionary = actor.get("fatigue", {})

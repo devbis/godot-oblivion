@@ -284,6 +284,7 @@ int main(int argc, char** argv) {
                         if (reference.reference_name != argv[4]) continue;
                         std::cout << cell.editor_id << " " << std::hex << std::setw(8) << std::setfill('0') << reference.form_id
                                   << std::dec << " type=" << reference.record_type << " name=" << reference.reference_name
+                              << " ragdoll_bones=" << reference.ragdoll_bone_count
                                   << " script=" << (reference.script_form_id ? [&] {
                                          const auto* script = data.find_script(reference.script_form_id);
                                          return (script ? script->editor_id : std::string("?")) + "@" + std::to_string(0);
@@ -759,7 +760,7 @@ int main(int argc, char** argv) {
                     if (const auto* creature = data.find_creature_base(reference.base_form_id)) {
                         std::cout << " creature=" << creature->editor_id << " full=" << creature->name
                                   << " model=" << creature->model_path << " health=" << creature->base_health
-                                  << " damage=" << creature->attack_damage << " reach=" << creature->attack_reach << " nifz=" << creature->body_part_paths.size()
+                                  << " damage=" << creature->attack_damage << " reach=" << creature->attack_reach << " flags=" << std::hex << creature->flags << " script=" << creature->script_form_id << std::dec << ":" << (data.find_editor_id(creature->script_form_id) ? *data.find_editor_id(creature->script_form_id) : "?") << " level=" << creature->level_or_offset << " fatigue=" << creature->base_fatigue << " str_end=" << int(creature->attributes[0]) << "/" << int(creature->attributes[5]) << " nifz=" << creature->body_part_paths.size()
                                   << " kffz=" << creature->animation_files.size() << " packages=";
                         for (const auto package_id : creature->ai_package_form_ids) {
                             const auto* package_name = data.find_editor_id(package_id);

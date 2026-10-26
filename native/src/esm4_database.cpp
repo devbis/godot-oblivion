@@ -1137,6 +1137,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 reference.position[i] = f32(value + 4 * i);
                 reference.rotation[i] = f32(value + 12 + 4 * i);
             }
+        } else if (tag == "XRGD" && is_reference && subrecord_size >= 28) {
+            reference.ragdoll_bone_count = subrecord_size / 28;
         } else if (tag == "XESP" && is_reference && subrecord_size >= 5) {
             reference.enable_parent_form_id = u32(value);
             reference.enable_parent_inverted = (value[4] & 0x01) != 0;
