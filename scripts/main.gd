@@ -1146,7 +1146,10 @@ func log_missing_actor_event(actor: Dictionary, event: String, detail: String, r
 	if result.has("missing"):
 		reason = "no %s" % str(result.get("missing"))
 	elif result.has("event_found") and not bool(result.get("event_found")):
-		reason = "its script has no %s block%s" % [event, (" for " + detail) if not detail.is_empty() else ""]
+		if event == "OnHit" and detail.is_empty():
+			reason = "its script has no untargeted OnHit block"
+		else:
+			reason = "its script has no %s block%s" % [event, (" for " + detail) if not detail.is_empty() else ""]
 	if reason.is_empty():
 		return
 	# A hit block for one named attacker is optional by design: say it once for the event, not for each attacker.
