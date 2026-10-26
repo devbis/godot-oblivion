@@ -35,7 +35,8 @@ const PLAYER_ATTACK_DODGE_RANGE_M := 3.0
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
 const BLOCKED_DAMAGE_SHARE := 0.3
-const POWER_ATTACK_CHANCE := 0.2
+const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
+const POWER_ATTACK_DEFAULT_CHANCE := 25.0
 const UNARMED_DAMAGE := 4.0
 const UNARMED_REACH_M := 1.4
 const HIT_ATTACK_LOCK_S := 0.45
@@ -1080,7 +1081,8 @@ func _begin_swing(actor: Dictionary, combat: Dictionary, prefix: String) -> void
 			clip_key = fallback
 	else:
 		var options := _attack_suffixes(prefix)
-		if prefix in ["onehand", "twohand"] and randf() < POWER_ATTACK_CHANCE:
+		if prefix in ["onehand", "twohand"] \
+				and randf() * 100.0 < _setting_or(POWER_ATTACK_CHANCE_SETTING, POWER_ATTACK_DEFAULT_CHANCE):
 			options = ["attackpower"]
 		else:
 			options.erase("attackpower")
