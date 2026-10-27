@@ -4150,7 +4150,14 @@ func _equip_player_item(form_id: int) -> bool:
 	var slots := int(data_reader.get_item_biped_slots(form_id))
 	if slots == 0:
 		return false
-	item_meshes = await actors.add_actor_model(_player_avatar, _player_skeleton, model_path)
+	# Headgear and a shield are not skinned: they ride the head bone, or the bone their NIF names.
+	var attachment: Dictionary = await actors.equipment_attachment(form_id, model_path, item_type, _player_skeleton)
+	if bool(attachment.get("skip", false)) or _player_avatar == null:
+		return false
+	item_meshes = await actors.add_actor_model(
+		_player_avatar, _player_skeleton, model_path, str(attachment.get("bone", "")), PackedByteArray(), {},
+		bool(attachment.get("model_space", false)), "", "", "", bool(attachment.get("adjust_rotation", false))
+	)
 	if item_meshes.is_empty():
 		return false
 	var replaced_item_ids: Array[int] = []
@@ -4166,7 +4173,9 @@ func _equip_player_item(form_id: int) -> bool:
 		replaced_item_ids.push_back(equipped_id)
 	for equipped_id in replaced_item_ids:
 		_player_equipment.erase(equipped_id)
-	_player_equipment[form_id] = {"slots": slots, "meshes": item_meshes, "model_path": model_path}
+	_player_equipment[form_id] = {
+		"slots": slots, "meshes": item_meshes, "model_path": model_path, "attachment": attachment,
+	}
 	_refresh_player_hair_visibility()
 	_refresh_player_body_visibility()
 	_sync_arms_equipment()
@@ -4224,7 +4233,10 @@ func _sync_arms_equipment() -> void:
 	var entries: Array[Dictionary] = []
 	for equipment_value: Variant in _player_equipment.values():
 		var equipment: Dictionary = equipment_value
-		entries.push_back({"model_path": equipment.get("model_path", ""), "slots": equipment.get("slots", 0)})
+		entries.push_back({
+			"model_path": equipment.get("model_path", ""), "slots": equipment.get("slots", 0),
+			"attachment": equipment.get("attachment", {}),
+		})
 	_arms.set_equipment(entries)
 
 func _refresh_player_body_visibility() -> void:

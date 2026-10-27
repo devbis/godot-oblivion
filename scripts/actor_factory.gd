@@ -143,24 +143,15 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		var item_path := str(data_reader.find_item_model_path(item_form_id, is_female))
 		if item_path.is_empty():
 			continue
-		var attach_bone := ""
-		var adjust_bone_orientation := false
-		var model_space_bone_attachment := false
-		if item_type == "WEAP" or (int(data_reader.get_item_biped_slots(item_form_id)) & 0x2000) != 0:
-			attach_bone = await _parent_reference_node(item_path)
-			# The cell may have been left while the NIF loaded.
-			if not is_current.call() or not is_instance_valid(skeleton):
-				return {}
-			if attach_bone.is_empty():
-				push_warning("NPC equipment model %s has no NIF Prn attachment node" % item_path)
-				continue
-			if skeleton.find_bone(attach_bone) < 0:
-				push_warning("NPC equipment model %s references missing skeleton bone %s" % [item_path, attach_bone])
-				continue
-		elif (int(data_reader.get_item_biped_slots(item_form_id)) & 0x0003) != 0:
-			attach_bone = "Bip01 Head"
-			adjust_bone_orientation = true
-			model_space_bone_attachment = await _uses_model_space_head_attachment(item_path)
+		var attachment := await equipment_attachment(item_form_id, item_path, item_type, skeleton)
+		# The cell may have been left while the NIF loaded.
+		if not is_current.call() or not is_instance_valid(skeleton):
+			return {}
+		if bool(attachment.get("skip", false)):
+			continue
+		var attach_bone := str(attachment.get("bone", ""))
+		var adjust_bone_orientation := bool(attachment.get("adjust_rotation", false))
+		var model_space_bone_attachment := bool(attachment.get("model_space", false))
 		var item_meshes := await add_actor_model(
 			avatar, skeleton, item_path, attach_bone, PackedByteArray(), {}, model_space_bone_attachment,
 			race_texture_key, "", "", adjust_bone_orientation
@@ -510,6 +501,30 @@ func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
 	for item_id: int in inventory_weapons:
 		item_ids.push_back(item_id)
 	return item_ids
+
+## How a piece of equipment is fixed to a skeleton: {bone, model_space, adjust_rotation} for add_actor_model, or
+## {skip: true} when it cannot be placed. Headgear rides the head bone; a shield and a weapon ride the bone their NIF names
+## (its Prn node); body armor is skinned and needs no bone.
+func equipment_attachment(item_form_id: int, item_path: String, item_type: String, skeleton: Skeleton3D) -> Dictionary:
+	var slots := int(data_reader.get_item_biped_slots(item_form_id))
+	if item_type == "WEAP" or (slots & 0x2000) != 0:
+		var bone := await _parent_reference_node(item_path)
+		if not is_instance_valid(skeleton):
+			return {"skip": true}
+		if bone.is_empty():
+			push_warning("Equipment model %s has no NIF Prn attachment node" % item_path)
+			return {"skip": true}
+		if skeleton.find_bone(bone) < 0:
+			push_warning("Equipment model %s references missing skeleton bone %s" % [item_path, bone])
+			return {"skip": true}
+		return {"bone": bone}
+	if (slots & 0x0003) != 0:
+		return {
+			"bone": "Bip01 Head",
+			"adjust_rotation": true,
+			"model_space": await _uses_model_space_head_attachment(item_path),
+		}
+	return {}
 
 func _parent_reference_node(model_path: String) -> String:
 	await assets.meshes_for_model(model_path)

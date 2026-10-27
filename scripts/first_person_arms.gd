@@ -55,6 +55,8 @@ const HAND_FOLLOW_MAX_RAD := 0.14
 const BLEND_S := 0.15
 const WALK_SPEED_EPSILON := 0.08
 const ARM_BODY_SLOTS := 0x0004 | 0x0010
+## A shield is not skinned: it rides a forearm bone of the view model.
+const SHIELD_SLOT := 0x2000
 
 enum Mode { HIDDEN, EQUIPPING, READY, UNEQUIPPING }
 
@@ -185,6 +187,17 @@ func set_equipment(entries: Array) -> void:
 	var covered_slots := 0
 	for entry_value: Variant in entries:
 		var entry: Dictionary = entry_value
+		if (int(entry.get("slots", 0)) & SHIELD_SLOT) != 0:
+			var attachment: Dictionary = entry.get("attachment", {})
+			var bone := str(attachment.get("bone", ""))
+			if not bone.is_empty() and skeleton.find_bone(bone) >= 0:
+				var shield_meshes: Array[MeshInstance3D] = await host.get("actors").add_actor_model(
+					root, skeleton, str(entry.get("model_path", "")), bone
+				)
+				for mesh in shield_meshes:
+					mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+					_equipment_meshes.push_back(mesh)
+			continue
 		var slots := int(entry.get("slots", 0)) & ARM_BODY_SLOTS
 		if slots == 0:
 			continue
