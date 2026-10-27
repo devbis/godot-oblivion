@@ -422,6 +422,8 @@ func _update_swimming_state() -> void:
 ## A rag doll carries the body (see ActorRagdoll): the root stays where it fell. Water, route and grounding updates turn
 ## physics processing back on, and a root with no collision left would then fall for ever, taking the skin with it.
 var ragdoll_driven := false
+## An actor that is not fighting makes way for the player (see request_yield and _request_blocking_npcs_to_yield).
+var yields_to_player := true
 
 func _physics_process(delta: float) -> void:
 	if ragdoll_driven:
@@ -606,6 +608,14 @@ func _request_blocking_npcs_to_yield(desired_horizontal_velocity: Vector3) -> vo
 	for collision_index in range(get_slide_collision_count()):
 		var collision := get_slide_collision(collision_index)
 		var blocker := collision.get_collider() as Node3D
+		if blocker != null and blocker.is_in_group("player"):
+			# The player stands in the way: this actor steps aside, once it has been held up for a moment.
+			if yields_to_player and request_yield(
+				collision.get_normal(), -desired_horizontal_velocity, blocker.global_position, get_collision_radius() + 0.6
+			):
+				_yield_request_cooldown_remaining = YIELD_REQUEST_COOLDOWN_S
+				return
+			continue
 		if blocker == null or blocker == self or not blocker.has_method("request_yield"):
 			continue
 		var away_direction := -collision.get_normal()

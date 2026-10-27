@@ -519,6 +519,8 @@ func kill_actor(actor: Dictionary, run_death_events := true) -> void:
 	var root := actor.get("root") as Node3D
 	var reference_id := int(actor.get("reference_id", 0))
 	actor["dead"] = true
+	if is_instance_valid(root):
+		root.set("yields_to_player", false)
 	actor.erase("combat")
 	actor.erase("combat_anim")
 	_forced.erase(reference_id)
@@ -718,6 +720,9 @@ func _request_special_clip(actor: Dictionary, clip_name: String, asset_path: Str
 		return
 
 func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_attack_voice := true) -> void:
+	# A fighter does not step aside for the player.
+	if is_instance_valid(root):
+		root.set("yields_to_player", false)
 	actor["combat"] = {
 		"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0,
 		"hit_done": true, "target_id": target_id, "dodge_cooldown": 0.0, "dodge_attempted": false,
@@ -760,6 +765,8 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 
 func _end_combat(actor: Dictionary) -> void:
 	var root := actor.get("root") as Node3D
+	if is_instance_valid(root):
+		root.set("yields_to_player", true)
 	actor.erase("combat")
 	actor.erase("combat_anim")
 	_set_weapon_drawn(actor, false)

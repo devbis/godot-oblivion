@@ -80,6 +80,7 @@ var is_first_person: bool:
 		return not face_preview_enabled and not _third_person
 
 func _ready() -> void:
+	add_to_group("player")
 	_normal_camera_pivot_position = camera_pivot.position
 	var capsule := _collision_shape.shape as CapsuleShape3D
 	if capsule != null:
@@ -339,6 +340,7 @@ func _physics_process(delta: float) -> void:
 	var was_on_floor := is_on_floor()
 	move_and_slide()
 	_push_contacted_chains(requested_velocity)
+	_ask_npcs_to_yield(requested_velocity)
 	if (was_on_floor or _stepper.is_stepping()) and not is_on_floor() and velocity.y <= 0.0:
 		_stepper.try_step_down(self, max_step_height_m)
 	_update_footstep_audio(previous_position)
@@ -431,6 +433,29 @@ func _is_running_activity(previous_position: Vector3, delta: float) -> bool:
 ## True while a step is in progress, so the actor is still treated as grounded.
 func is_stepping() -> bool:
 	return _stepper.is_stepping()
+
+## A walker that bumps into an actor asks it to make way; it steps aside and goes back to its route (see
+## NpcRouteController.request_yield).
+func _ask_npcs_to_yield(requested_velocity: Vector3) -> void:
+	var horizontal_velocity := Vector3(requested_velocity.x, 0.0, requested_velocity.z)
+	if horizontal_velocity.length_squared() < 0.01:
+		return
+	var own_radius := (_collision_shape.shape as CapsuleShape3D).radius if _collision_shape.shape is CapsuleShape3D else 0.3
+	for collision_index in range(get_slide_collision_count()):
+		var collision := get_slide_collision(collision_index)
+		var blocker := collision.get_collider() as Node3D
+		if blocker == null or not blocker.has_method("request_yield") or not bool(blocker.get("yields_to_player")):
+			continue
+		var away := -collision.get_normal()
+		away.y = 0.0
+		if away.length_squared() <= 0.0001:
+			away = blocker.global_position - global_position
+			away.y = 0.0
+		if away.length_squared() <= 0.0001:
+			continue
+		var blocker_radius := float(blocker.call("get_collision_radius")) if blocker.has_method("get_collision_radius") else 0.3
+		if bool(blocker.call("request_yield", away, horizontal_velocity, global_position, own_radius + blocker_radius + 0.2)):
+			return
 
 func _push_contacted_chains(requested_velocity: Vector3) -> void:
 	var horizontal_velocity := Vector3(requested_velocity.x, 0.0, requested_velocity.z)
