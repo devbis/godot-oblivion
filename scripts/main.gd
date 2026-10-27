@@ -910,6 +910,9 @@ const NPC_HEAD_LOOK_MAX_ANGLE := deg_to_rad(48.0)
 
 func _open_doors_on_npc_routes() -> void:
 	for actor: Dictionary in _npc_actors:
+		# A creature can follow a route up to a door, but it cannot operate the door to clear the route.
+		if bool(actor.get("creature", false)):
+			continue
 		var package: Dictionary = actor.get("package", {})
 		if package.is_empty():
 			continue
