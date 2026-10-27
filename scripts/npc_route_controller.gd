@@ -332,6 +332,11 @@ func _end_hop() -> void:
 		_pending_route.clear()
 		configure_route(pending[0], pending[1], pending[2], pending[3], pending[4], pending[5])
 
+## Changes the pace of the route being walked, keeping its path.
+func set_route_speed(speed_mps: float) -> void:
+	for index in range(waypoint_speeds.size()):
+		waypoint_speeds[index] = speed_mps
+
 func is_teleport_waypoint(index: int) -> bool:
 	return index >= 0 and index < waypoint_is_teleport.size() and waypoint_is_teleport[index]
 

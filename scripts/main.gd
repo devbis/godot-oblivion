@@ -1037,6 +1037,24 @@ func _speech_seconds(speaker: int, quest: String, topic: String, reply: int, lin
 var _player_route_timer := 0.0
 const DYNAMIC_ROUTE_REPLAN_DISTANCE_M := 2.5
 const DYNAMIC_ROUTE_RENEW_REMAINING_M := 1.2
+const WALK_SPEED_MPS := 1.3
+const RUN_SPEED_MPS := 3.4
+## A follower runs once it is this far beyond its authored distance from the leader, and walks again when it is within the
+## second one (the gap between the two keeps it from changing pace at every step).
+const FOLLOW_RUN_START_GAP_M := 3.0
+const FOLLOW_RUN_STOP_GAP_M := 1.2
+
+## The pace of a follower: a run while it is far behind its leader (or its package says always run), a walk otherwise.
+func _follow_speed(actor: Dictionary, distance: float, arrival_distance: float, package_flags: int) -> float:
+	if (package_flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0:
+		return RUN_SPEED_MPS
+	var running := bool(actor.get("follow_running", false))
+	if running:
+		running = distance > arrival_distance + FOLLOW_RUN_STOP_GAP_M
+	else:
+		running = distance > arrival_distance + FOLLOW_RUN_START_GAP_M
+	actor["follow_running"] = running
+	return RUN_SPEED_MPS if running else WALK_SPEED_MPS
 
 ## How far an actor still has to walk along its route, from where it stands.
 func _remaining_route_length(root: Node3D, route: Array, route_index: int) -> float:
@@ -1084,6 +1102,7 @@ func _update_dynamic_target_routes() -> void:
 		if destination_distance <= arrival_distance:
 			var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 			if follows_actor:
+				actor["follow_running"] = false
 				_hold_dynamic_follow_route(actor, root, destination_form_id, arrival_distance)
 				continue
 			if not active_route.is_empty():
@@ -1099,6 +1118,13 @@ func _update_dynamic_target_routes() -> void:
 		var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 		var route_index := int(root.get("waypoint_index"))
 		var route_is_active := route_index >= 0 and route_index < active_route.size()
+		var flags := int(package.get("flags", 0))
+		var speed := _follow_speed(actor, destination_distance, arrival_distance, flags) \
+			if (follows_player or follows_actor) else (RUN_SPEED_MPS if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else WALK_SPEED_MPS)
+		# A follower that has fallen behind runs and drops back to a walk as it closes up: the route keeps its path, only
+		# its pace changes.
+		if route_is_active and root.has_method("set_route_speed"):
+			root.call("set_route_speed", speed)
 		# The target walks on while its follower walks: a new route for every step it takes would restart the follower
 		# each time, so the route is kept until the target has moved well away from where it leads.
 		# The route ends where the target was when it was planned. Planned again only on arrival it would stop there until the
@@ -1115,8 +1141,6 @@ func _update_dynamic_target_routes() -> void:
 			root.global_position, destination, _actor_collision_radius(root), true, arrival_distance
 		)
 		var route_uses_pathgrid := bool(director.get("last_navigation_path_uses_pathgrid"))
-		var flags := int(package.get("flags", 0))
-		var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 		waypoints = _navigation_waypoints(route_path, speed)
 		# The path starts at the actor itself; reaching that first point would end the stride for a frame.
 		while was_walking and waypoints.size() > 1 \
