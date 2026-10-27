@@ -13,8 +13,21 @@ namespace {
 
 constexpr int kMaxStageDepth = 8;  // stage results may set stages; this bounds the chain
 
+// Oblivion.exe's default iSpeakSoundLipDistance is 750 game units. SayTo is only attempted inside that range;
+// the voice itself is still positional audio and may be heard farther away.
+constexpr double kSayToMaxDistanceGameUnits = 750.0;
+
 // A distance the world cannot give counts as far away, so a condition that waits for the player to be near stays false.
 constexpr double kUnknownDistance = 1.0e9;
+
+bool say_to_in_range(const DistanceFunction& distance, std::string_view speaker_reference,
+                     std::string_view listener_reference) {
+    // Without scene positions (for example in offline inspection), retain the existing behavior. A live scene can
+    // answer both references, and an unknown reference is treated as out of range.
+    if (!distance || speaker_reference.empty() || listener_reference.empty()) return true;
+    const auto separation = distance(speaker_reference, listener_reference);
+    return separation && *separation <= kSayToMaxDistanceGameUnits;
+}
 
 // The distance the scene gives between two names. When it cannot, the question is recorded and the distance counts as far away.
 double distance_or_far(const DistanceFunction& distance, std::string_view from, std::string_view to, QuestTick& tick) {
@@ -134,8 +147,10 @@ public:
             const auto listener = lower(arguments[0].text) == "player" ? kPlayerReference
                 : driver_.world_->reference_base(arguments[0].text).value_or(0);
             const auto speaker_reference = target && target->is_text ? std::string_view(target->text) : std::string_view();
-            const auto seconds = driver_.world_->say(arguments[1].text, speaker, listener, tick_, distance_, depth_ + 1,
-                                                     speaker_reference);
+            const auto seconds = say_to_in_range(distance_, speaker_reference, arguments[0].text)
+                ? driver_.world_->say(arguments[1].text, speaker, listener, tick_, distance_, depth_ + 1,
+                                      speaker_reference)
+                : 0.0;
             reload_variables();
             return ScriptValue::from_number(seconds);
         }
@@ -539,11 +554,13 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
     }
     StageCommandValue command_value;
     if (world_) {
-        command_value = [this](std::string_view name, const ScriptValue* target,
+        command_value = [this, &distance](std::string_view name, const ScriptValue* target,
                                const std::vector<ScriptValue>& arguments) -> std::optional<ScriptValue> {
             const auto command = lower(name);
             if (command == "sayto" && target && target->is_text && arguments.size() >= 2
                 && arguments[0].is_text && arguments[1].is_text) {
+                if (!say_to_in_range(distance, target->text, arguments[0].text))
+                    return ScriptValue::from_number(0.0);
                 const auto speaker = world_->reference_base(target->text).value_or(0);
                 const auto listener = lower(arguments[0].text) == "player" ? kPlayerReference
                     : world_->reference_base(arguments[0].text).value_or(0);
@@ -579,7 +596,8 @@ void QuestDriver::enter_stage(unsigned stage, QuestTick& tick, const DistanceFun
                 const auto speaker = world_->reference_base(action.target).value_or(0);
                 const auto listener = lower(action.arguments[0].text) == "player" ? kPlayerReference
                     : world_->reference_base(action.arguments[0].text).value_or(0);
-                world_->say(action.arguments[1].text, speaker, listener, tick, distance, depth + 1, action.target);
+                if (say_to_in_range(distance, action.target, action.arguments[0].text))
+                    world_->say(action.arguments[1].text, speaker, listener, tick, distance, depth + 1, action.target);
             } else if (command == "say" && world_ && !action.target.empty()) {
                 // `Ref.Say topic`: the reference speaks to the player, whose subtitles the scene shows (as in an actor's script).
                 const auto speaker = world_->reference_base(action.target).value_or(0);
@@ -895,8 +913,10 @@ public:
             return ScriptValue::from_number(0.0);
         }
         if (command == "sayto" && arguments.size() >= 2 && arguments[1].is_text) {
-            const auto seconds = world_.say(arguments[1].text, speaker_, listener_of(arguments[0]), tick_, distance_, 0,
-                                            speaker_reference_);
+            const auto seconds = say_to_in_range(distance_, speaker_reference_, arguments[0].text)
+                ? world_.say(arguments[1].text, speaker_, listener_of(arguments[0]), tick_, distance_, 0,
+                             speaker_reference_)
+                : 0.0;
             take_writes_();
             return ScriptValue::from_number(seconds);
         }
