@@ -1035,6 +1035,18 @@ func _speech_seconds(speaker: int, quest: String, topic: String, reply: int, lin
 	return length
 
 var _player_route_timer := 0.0
+const DYNAMIC_ROUTE_REPLAN_DISTANCE_M := 2.5
+const DYNAMIC_ROUTE_RENEW_REMAINING_M := 1.2
+
+## How far an actor still has to walk along its route, from where it stands.
+func _remaining_route_length(root: Node3D, route: Array, route_index: int) -> float:
+	var length := 0.0
+	var point := root.global_position
+	for index in range(route_index, route.size()):
+		var next: Vector3 = route[index]
+		length += Vector2(next.x - point.x, next.z - point.z).length()
+		point = next
+	return length
 
 ## Player-targeted packages and Follow packages track their live target as it moves.
 func _update_dynamic_target_routes() -> void:
@@ -1087,8 +1099,15 @@ func _update_dynamic_target_routes() -> void:
 		var active_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
 		var route_index := int(root.get("waypoint_index"))
 		var route_is_active := route_index >= 0 and route_index < active_route.size()
-		if target.distance_to(destination) <= 1.0 and route_is_active:
+		# The target walks on while its follower walks: a new route for every step it takes would restart the follower
+		# each time, so the route is kept until the target has moved well away from where it leads.
+		# The route ends where the target was when it was planned. Planned again only on arrival it would stop there until the
+		# next check, so it is renewed while the actor is still on its way, a step before that end.
+		if route_is_active \
+				and target.distance_to(destination) <= DYNAMIC_ROUTE_REPLAN_DISTANCE_M \
+				and (target.distance_to(destination) <= 0.5 or _remaining_route_length(root, active_route, route_index) > DYNAMIC_ROUTE_RENEW_REMAINING_M):
 			continue
+		var was_walking := bool(root.get("is_walking")) and route_is_active
 		actor.erase("follow_hold_target_form_id")
 		actor["route_target"] = destination
 		var waypoints: Array[Dictionary] = []
@@ -1099,7 +1118,12 @@ func _update_dynamic_target_routes() -> void:
 		var flags := int(package.get("flags", 0))
 		var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
 		waypoints = _navigation_waypoints(route_path, speed)
-		root.call("configure_route", waypoints, false, 0.0, arrival_distance, route_uses_pathgrid)
+		# The path starts at the actor itself; reaching that first point would end the stride for a frame.
+		while was_walking and waypoints.size() > 1 \
+				and Vector2(waypoints[0].position.x - root.global_position.x, waypoints[0].position.z - root.global_position.z).length() < 0.15 \
+				and not waypoints[0].has("teleport_to"):
+			waypoints.remove_at(0)
+		root.call("configure_route", waypoints, false, 0.0, arrival_distance, route_uses_pathgrid, was_walking)
 		print("OpenOB AI route update: %s from=%s destination=%s at=%s authored_height=%s path=%s" % [
 			str(actor.get("reference_name", actor.get("name", "NPC"))),
 			str(root.global_position),

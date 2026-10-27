@@ -109,11 +109,11 @@ func teleport_to(destination: Vector3) -> void:
 
 func configure_route(
 	route: Array[Dictionary], should_loop: bool, initial_pause: float,
-	final_arrival_distance_m: float = -1.0, use_authored_route_height: bool = false
+	final_arrival_distance_m: float = -1.0, use_authored_route_height: bool = false, keep_motion: bool = false
 ) -> void:
 	# A hop in the air finishes first; the new route starts where it lands.
 	if _hop_active:
-		_pending_route = [route, should_loop, initial_pause, final_arrival_distance_m, use_authored_route_height]
+		_pending_route = [route, should_loop, initial_pause, final_arrival_distance_m, use_authored_route_height, keep_motion]
 		return
 	_cancel_combat_dodge()
 	_yield_path.clear()
@@ -139,8 +139,10 @@ func configure_route(
 	check_floor_ahead = waypoints.size() <= 1
 	_pause_remaining = initial_pause
 	waypoint_index = 0
-	velocity = Vector3.ZERO
-	is_walking = false
+	# A route re-planned for a moving target continues the stride instead of stopping and starting again.
+	if not keep_motion:
+		velocity = Vector3.ZERO
+		is_walking = false
 	_route_blocked_elapsed = 0.0
 	_route_blocked_reported = false
 	# A repath in mid-air must not take the airborne spot as the place to fall back to.
@@ -328,7 +330,7 @@ func _end_hop() -> void:
 	if not _pending_route.is_empty():
 		var pending := _pending_route.duplicate()
 		_pending_route.clear()
-		configure_route(pending[0], pending[1], pending[2], pending[3], pending[4])
+		configure_route(pending[0], pending[1], pending[2], pending[3], pending[4], pending[5])
 
 func is_teleport_waypoint(index: int) -> bool:
 	return index >= 0 and index < waypoint_is_teleport.size() and waypoint_is_teleport[index]

@@ -589,6 +589,7 @@ func _pathgrid_route(
 	for node_index: int in node_route:
 		_append_path_point(result, pathgrid_points[node_index])
 	_append_path_point(result, to)
+	result = _drop_passed_start_nodes(result)
 	# A chase plans a new path every few frames: say so once in a while.
 	var now_msec := Time.get_ticks_msec()
 	if now_msec - _last_pathgrid_log_msec >= 5000:
@@ -599,6 +600,30 @@ func _pathgrid_route(
 	return result
 
 var _last_pathgrid_log_msec := -5000
+
+## A route re-planned on the move starts at the pathgrid node nearest the actor, which may lie behind it; walking back to it
+## and turning round again is the stutter of a follower. The first nodes are dropped while the actor already stands past them
+## on the way to the next, close to that leg (not round a corner, where cutting would go through a wall).
+func _drop_passed_start_nodes(path: PackedVector3Array) -> PackedVector3Array:
+	var trimmed := path
+	while trimmed.size() > 2:
+		var from := trimmed[0]
+		var node := trimmed[1]
+		var next := trimmed[2]
+		var leg := Vector2(next.x - node.x, next.z - node.z)
+		var leg_length := leg.length()
+		if leg_length < 0.01:
+			break
+		var along := Vector2(from.x - node.x, from.z - node.z).dot(leg) / leg_length
+		if along <= 0.0 or along >= leg_length:
+			break
+		var off_leg := absf(Vector2(from.x - node.x, from.z - node.z).cross(leg)) / leg_length
+		if off_leg > PASSED_NODE_MAX_OFFSET_M:
+			break
+		trimmed.remove_at(1)
+	return trimmed
+
+const PASSED_NODE_MAX_OFFSET_M := 0.7
 
 ## The path ends on a ledge just above the target (a marker in a hall below the ledge a room opens onto): the caller
 ## finishes the last stretch with a drop.
