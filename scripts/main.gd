@@ -4340,6 +4340,8 @@ func _setup_targeting() -> void:
 	targeting.actor_lookup = func(collider: Node) -> Dictionary:
 		for actor: Dictionary in _npc_actors:
 			if actor.get("root") == collider:
+				# A fighter is not talked to: the reticle shows the attack icon and Space does nothing.
+				actor["hostile"] = _is_fighting(actor)
 				return actor
 		return {}
 
@@ -4489,7 +4491,13 @@ func _dialogue_player_identity() -> Dictionary:
 	}
 
 
+## An actor in a fight, or one that is dead, cannot be spoken to.
+func _is_fighting(actor: Dictionary) -> bool:
+	return (_npc_combat != null and _npc_combat.in_combat(actor)) or bool(actor.get("dead", false))
+
 func _begin_dialogue(actor: Dictionary, show_failure_toast: bool = true) -> bool:
+	if not actor.is_empty() and _is_fighting(actor):
+		return false
 	if _dialogue_active or actor.is_empty() or quest_world == null:
 		if show_failure_toast:
 			_show_interaction_toast("Dialogue system is not ready")
