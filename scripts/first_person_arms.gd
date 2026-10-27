@@ -75,6 +75,7 @@ var _nocked_arrow: Array[MeshInstance3D] = []
 var _nocked_arrow_attachment: BoneAttachment3D
 var _weapon_wanted := false
 var _equipment_meshes: Array[MeshInstance3D] = []
+var _shield_equipped := false
 var _body_meshes: Dictionary = {}
 var _clips: Dictionary = {}
 var _clips_requested: Dictionary = {}
@@ -184,6 +185,7 @@ func set_equipment(entries: Array) -> void:
 		if is_instance_valid(old_mesh):
 			old_mesh.queue_free()
 	_equipment_meshes.clear()
+	_shield_equipped = false
 	var covered_slots := 0
 	for entry_value: Variant in entries:
 		var entry: Dictionary = entry_value
@@ -191,6 +193,8 @@ func set_equipment(entries: Array) -> void:
 			var attachment: Dictionary = entry.get("attachment", {})
 			var bone := str(attachment.get("bone", ""))
 			if not bone.is_empty() and skeleton.find_bone(bone) >= 0:
+				_shield_equipped = true
+				_preload_stance()
 				var shield_meshes: Array[MeshInstance3D] = await host.get("actors").add_actor_model(
 					root, skeleton, str(entry.get("model_path", "")), bone
 				)
@@ -402,6 +406,14 @@ func cast(range_type: int) -> void:
 		return
 	_begin_one_shot(candidates, "cast")
 
+## The prefix of the clips that block. The one-hand and fist clips lower the left arm behind the view; with a shield the
+## authored shield clips (blockidle, blockhit, blockattack, without a prefix) raise it before the view instead.
+func _block_prefix() -> String:
+	var prefix := str(_stance.prefix)
+	if _shield_equipped and (prefix == "onehand" or prefix == UNARMED_STANCE.prefix):
+		return ""
+	return prefix
+
 func set_blocking(blocking: bool) -> void:
 	_blocking = blocking and _mode == Mode.READY
 
@@ -412,7 +424,7 @@ func react_to_hit(blocked := false) -> void:
 	_queued.clear()
 	var candidates: Array[String] = [prefix + "stagger", prefix + "blockhit", "blockhit"]
 	if blocked:
-		candidates = [prefix + "blockhit", "blockhit", prefix + "stagger"]
+		candidates = [_block_prefix() + "blockhit", prefix + "blockhit", "blockhit", prefix + "stagger"]
 	_begin_one_shot(candidates, "hit")
 
 ## The active attack was stopped by a defender's block; use the authored BlockAttack arm clip.
@@ -421,7 +433,7 @@ func react_to_blocked_attack() -> void:
 		return
 	var prefix := str(_stance.prefix)
 	var candidates: Array[String] = ["blockattack"]
-	if prefix == UNARMED_STANCE.prefix:
+	if prefix == UNARMED_STANCE.prefix and not _shield_equipped:
 		candidates.push_front(prefix + "blockattack")
 	_queued.clear()
 	_begin_one_shot(candidates, "hit")
@@ -483,7 +495,7 @@ func _base_clip(motion: Dictionary) -> String:
 	var prefix := str(_stance.prefix)
 	var sneak := "sneak" if bool(motion.get("crouching", false)) else ""
 	if _blocking:
-		return prefix + "blockidle"
+		return _block_prefix() + "blockidle"
 	if bool(motion.get("swimming", false)):
 		return _swim_clip(motion, prefix)
 	if not _movement_transition.is_empty():
@@ -805,5 +817,8 @@ func _preload_stance() -> void:
 		"swimfastforward", "swimfastbackward", "swimfastleft", "swimfastright",
 	]:
 		_request_clip(prefix + suffix)
+	if _shield_equipped:
+		for shield_clip: String in ["blockidle", "blockhit", "blockattack"]:
+			_request_clip(shield_clip)
 	for cast_name: String in ["castself", "casttouch", "casttarget"]:
 		_request_clip(cast_name)
