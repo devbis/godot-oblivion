@@ -155,7 +155,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
         std::string_view("SLGM"), std::string_view("SGST"),
         std::string_view("QUST"), std::string_view("SCPT"), std::string_view("GLOB"), std::string_view("DIAL"), std::string_view("INFO"),
-        std::string_view("PGRD"),
+        std::string_view("PGRD"), std::string_view("CONT"), std::string_view("LVLI"),
     };
     return std::find(relevant_types.begin(), relevant_types.end(), type) != relevant_types.end();
 }
@@ -176,6 +176,9 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     combat_style_by_id_.clear();
     spell_by_id_.clear();
     weapon_by_id_.clear();
+    container_by_id_.clear();
+    leveled_list_by_id_.clear();
+    item_stats_by_id_.clear();
     magic_effect_by_code_.clear();
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
@@ -316,6 +319,21 @@ const SpellRecord* Esm4Database::find_spell(std::uint32_t form_id) const {
 const WeaponRecord* Esm4Database::find_weapon(std::uint32_t form_id) const {
     const auto it = weapon_by_id_.find(form_id);
     return it == weapon_by_id_.end() ? nullptr : &it->second;
+}
+
+const ContainerRecord* Esm4Database::find_container(std::uint32_t form_id) const {
+    const auto it = container_by_id_.find(form_id);
+    return it == container_by_id_.end() ? nullptr : &it->second;
+}
+
+const LeveledListRecord* Esm4Database::find_leveled_list(std::uint32_t form_id) const {
+    const auto it = leveled_list_by_id_.find(form_id);
+    return it == leveled_list_by_id_.end() ? nullptr : &it->second;
+}
+
+const ItemStats* Esm4Database::find_item_stats(std::uint32_t form_id) const {
+    const auto it = item_stats_by_id_.find(form_id);
+    return it == item_stats_by_id_.end() ? nullptr : &it->second;
 }
 
 std::optional<float> Esm4Database::find_float_game_setting(std::string_view name) const {
@@ -624,6 +642,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_spell = type == "SPEL";
     bool is_magic_effect = type == "MGEF";
     bool is_outfit = type == "OTFT";
+    const bool is_container = type == "CONT";
+    const bool is_leveled_item = type == "LVLI";
+    ContainerRecord container;
+    container.form_id = form_id;
+    LeveledListRecord leveled_list;
+    leveled_list.form_id = form_id;
     bool is_ai_package = type == "PACK";
     const bool is_idle = type == "IDLE";
     const bool is_pathgrid = type == "PGRD";
@@ -717,7 +741,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style)
+            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -738,7 +762,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_creature) {
             creature.name = read_zstring(value, subrecord_size);
             record_display_name_by_id_[form_id] = creature.name;
-        } else if (tag == "FULL" && (is_item_model || is_spell)) {
+        } else if (tag == "FULL" && (is_item_model || is_spell || is_container)) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
         } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
@@ -807,7 +831,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if ((tag == "BTXT" || tag == "ATXT") && is_land && subrecord_size >= 4) {
             const auto texture_id = u32(value);
             if (texture_id != 0) ++land_texture_usage[texture_id];
-        } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT")) {
+        } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || is_container)) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
         } else if (tag == "MODL" && is_creature) {
@@ -882,6 +906,49 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             weapon.flags = u32(value + 12);
             weapon.damage = u16(value + 28);
             weapon_by_id_[form_id] = weapon;
+            if (subrecord_size >= 28) {
+                ItemStats& stats = item_stats_by_id_[form_id];
+                stats.value = static_cast<std::int32_t>(u32(value + 16));
+                stats.health = u32(value + 20);
+                stats.weight = f32(value + 24);
+            }
+        } else if (tag == "DATA" && is_container && subrecord_size >= 5) {
+            container.flags = value[0];
+            container.weight = f32(value + 1);
+        } else if (tag == "CNTO" && is_container && subrecord_size >= 8) {
+            container.contents.push_back({u32(value), static_cast<std::int32_t>(u32(value + 4))});
+        } else if (tag == "LVLD" && is_leveled_item && subrecord_size >= 1) {
+            leveled_list.chance_none = value[0];
+        } else if (tag == "LVLF" && is_leveled_item && subrecord_size >= 1) {
+            leveled_list.flags = value[0];
+        } else if (tag == "LVLO" && is_leveled_item && subrecord_size >= 8) {
+            leveled_list.entries.push_back({u16(value), u32(value + 4),
+                static_cast<std::uint16_t>(subrecord_size >= 10 ? u16(value + 8) : 1)});
+        } else if (tag == "DATA" && is_item_model) {
+            // Each item type lays out value and weight differently.
+            ItemStats& stats = item_stats_by_id_[form_id];
+            if (type == "ARMO" && subrecord_size >= 14) {
+                stats.armor_rating = u16(value);
+                stats.value = static_cast<std::int32_t>(u32(value + 2));
+                stats.health = u32(value + 6);
+                stats.weight = f32(value + 10);
+            } else if ((type == "CLOT" || type == "MISC" || type == "SLGM" || type == "KEYM") && subrecord_size >= 8) {
+                stats.value = static_cast<std::int32_t>(u32(value));
+                stats.weight = f32(value + 4);
+            } else if ((type == "APPA" || type == "SGST") && subrecord_size >= 9) {
+                stats.value = static_cast<std::int32_t>(u32(value + 1));
+                stats.weight = f32(value + 5);
+            } else if (type == "BOOK" && subrecord_size >= 10) {
+                stats.value = static_cast<std::int32_t>(u32(value + 2));
+                stats.weight = f32(value + 6);
+            } else if (type == "AMMO" && subrecord_size >= 12) {
+                stats.value = static_cast<std::int32_t>(u32(value + 8));
+                stats.weight = subrecord_size >= 16 ? f32(value + 12) : 0.0f;
+            } else if ((type == "ALCH" || type == "INGR") && subrecord_size >= 4) {
+                stats.weight = f32(value);
+            }
+        } else if (tag == "ENIT" && (type == "ALCH" || type == "INGR") && subrecord_size >= 4) {
+            item_stats_by_id_[form_id].value = static_cast<std::int32_t>(u32(value));
         } else if (tag == "BMDT" && (type == "ARMO" || type == "CLOT") && subrecord_size >= 2) {
             item_biped_slots_by_id_[form_id] = u16(value);
         } else if (tag == "INAM" && is_outfit && subrecord_size >= 4) {
@@ -1242,6 +1309,10 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         race_face_gen_by_id_[form_id] = std::move(race_face_gen);
     if (is_outfit)
         outfit_by_id_[form_id] = std::move(outfit);
+    if (is_container)
+        container_by_id_[form_id] = std::move(container);
+    if (is_leveled_item)
+        leveled_list_by_id_[form_id] = std::move(leveled_list);
     if (is_ai_package)
         ai_package_by_id_[form_id] = std::move(ai_package);
     if (is_idle)

@@ -61,6 +61,36 @@ struct NpcInventoryEntry {
     std::int32_t count = 0;
 };
 
+// What an item weighs and is worth, from the DATA (or, for potions and ingredients, ENIT) subrecord of its record.
+struct ItemStats {
+    std::int32_t value = 0;
+    float weight = 0.0f;
+    std::uint16_t armor_rating = 0; // ARMO only, in hundredths
+    std::uint32_t health = 0;       // ARMO and WEAP condition
+};
+
+// CONT: a chest, sack or corpse-sized store of items. An entry may name a leveled list instead of an item.
+struct ContainerRecord {
+    std::uint32_t form_id = 0;
+    std::uint8_t flags = 0;
+    float weight = 0.0f;
+    std::vector<NpcInventoryEntry> contents;
+};
+
+struct LeveledEntry {
+    std::uint16_t level = 0;
+    std::uint32_t form_id = 0;
+    std::uint16_t count = 1;
+};
+
+// LVLI: items chosen by the level of the looter.
+struct LeveledListRecord {
+    std::uint32_t form_id = 0;
+    std::uint8_t chance_none = 0;
+    std::uint8_t flags = 0; // 1 all levels up to the looter's, 2 each item of a count rolled alone, 4 use all
+    std::vector<LeveledEntry> entries;
+};
+
 struct CombatStyleRecord {
     std::uint32_t form_id = 0;
     std::uint8_t dodge_chance = 75;
@@ -280,6 +310,9 @@ public:
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;
+    [[nodiscard]] const ContainerRecord* find_container(std::uint32_t form_id) const;
+    [[nodiscard]] const LeveledListRecord* find_leveled_list(std::uint32_t form_id) const;
+    [[nodiscard]] const ItemStats* find_item_stats(std::uint32_t form_id) const;
     [[nodiscard]] const RaceFaceGenRecord* find_race_face_gen(std::uint32_t form_id) const;
     [[nodiscard]] const std::string* find_race_voice_folder(std::uint32_t form_id, bool female) const;
     [[nodiscard]] const OutfitRecord* find_outfit(std::uint32_t form_id) const;
@@ -337,6 +370,9 @@ private:
     std::map<std::uint32_t, CombatStyleRecord> combat_style_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
     std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
+    std::map<std::uint32_t, ContainerRecord> container_by_id_;
+    std::map<std::uint32_t, LeveledListRecord> leveled_list_by_id_;
+    std::map<std::uint32_t, ItemStats> item_stats_by_id_;
     std::map<std::uint32_t, RaceFaceGenRecord> race_face_gen_by_id_;
     std::map<std::uint32_t, OutfitRecord> outfit_by_id_;
     std::map<std::uint32_t, AiPackageRecord> ai_package_by_id_;

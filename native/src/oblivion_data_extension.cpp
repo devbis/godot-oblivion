@@ -652,6 +652,61 @@ public:
         return result;
     }
 
+    // The contents of a CONT record: {name, weight, flags, contents: [{form_id, count}]}; empty when it is no container.
+    Dictionary find_container(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* container = data_->find_container(form_id_arg(form_id));
+        if (!container) return {};
+        Dictionary result;
+        result["weight"] = container->weight;
+        result["flags"] = static_cast<int64_t>(container->flags);
+        Array contents;
+        for (const auto& item : container->contents) {
+            Dictionary entry;
+            entry["form_id"] = static_cast<int64_t>(item.form_id);
+            entry["count"] = item.count;
+            contents.push_back(entry);
+        }
+        result["contents"] = contents;
+        return result;
+    }
+
+    // An LVLI record: {chance_none, flags, entries: [{level, form_id, count}]}; empty when it is no leveled item list.
+    Dictionary find_leveled_list(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* list = data_->find_leveled_list(form_id_arg(form_id));
+        if (!list) return {};
+        Dictionary result;
+        result["chance_none"] = static_cast<int64_t>(list->chance_none);
+        result["flags"] = static_cast<int64_t>(list->flags);
+        Array entries;
+        for (const auto& item : list->entries) {
+            Dictionary entry;
+            entry["level"] = static_cast<int64_t>(item.level);
+            entry["form_id"] = static_cast<int64_t>(item.form_id);
+            entry["count"] = static_cast<int64_t>(item.count);
+            entries.push_back(entry);
+        }
+        result["entries"] = entries;
+        return result;
+    }
+
+    // {value, weight, armor_rating (hundredths), health}; empty when the record has no stats.
+    Dictionary find_item_stats(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* stats = data_->find_item_stats(form_id_arg(form_id));
+        if (!stats) return {};
+        Dictionary result;
+        result["value"] = stats->value;
+        result["weight"] = stats->weight;
+        result["armor_rating"] = static_cast<int64_t>(stats->armor_rating);
+        result["health"] = static_cast<int64_t>(stats->health);
+        return result;
+    }
+
     Dictionary find_weapon(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
@@ -716,6 +771,14 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
         const auto* path = data_->find_item_model_path(form_id_arg(form_id), female);
+        return path ? as_string(*path) : String{};
+    }
+
+    // The model an item has lying in the world (armor and clothing differ from the worn one); empty when it has none.
+    String find_world_item_model_path(int64_t form_id, bool female) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* path = data_->find_world_item_model_path(form_id_arg(form_id), female);
         return path ? as_string(*path) : String{};
     }
 
@@ -1082,6 +1145,9 @@ protected:
         ClassDB::bind_method(D_METHOD("find_creature_base", "form_id"), &OblivionData::find_creature_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
         ClassDB::bind_method(D_METHOD("find_weapon", "form_id"), &OblivionData::find_weapon);
+        ClassDB::bind_method(D_METHOD("find_container", "form_id"), &OblivionData::find_container);
+        ClassDB::bind_method(D_METHOD("find_leveled_list", "form_id"), &OblivionData::find_leveled_list);
+        ClassDB::bind_method(D_METHOD("find_item_stats", "form_id"), &OblivionData::find_item_stats);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
                              &OblivionData::get_float_game_setting, DEFVAL(0.0));
         ClassDB::bind_method(D_METHOD("get_int_game_setting", "name", "default_value"),
@@ -1089,6 +1155,7 @@ protected:
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);
         ClassDB::bind_method(D_METHOD("get_ai_package_info", "form_id"), &OblivionData::get_ai_package_info);
         ClassDB::bind_method(D_METHOD("find_item_model_path", "form_id", "female"), &OblivionData::find_item_model_path);
+        ClassDB::bind_method(D_METHOD("find_world_item_model_path", "form_id", "female"), &OblivionData::find_world_item_model_path);
         ClassDB::bind_method(D_METHOD("get_item_biped_slots", "form_id"), &OblivionData::get_item_biped_slots);
         ClassDB::bind_method(D_METHOD("find_form_id_by_editor_id", "editor_id"), &OblivionData::find_form_id_by_editor_id);
         ClassDB::bind_method(D_METHOD("find_editor_id", "form_id"), &OblivionData::find_editor_id);
