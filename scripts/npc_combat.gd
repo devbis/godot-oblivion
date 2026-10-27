@@ -62,7 +62,6 @@ const UNARMED_REACH_M := 1.4
 const CREATURE_MIN_REACH_M := 0.8
 const HIT_ATTACK_LOCK_S := 0.45
 const FATIGUE_ATTACK_COST := 5.0
-const FATIGUE_HIT_COST_MULT := 1.5
 const NPC_HIT_KNOCKBACK_MPS := 0.3
 const PLAYER_HIT_KNOCKBACK_MPS := 0.4
 ## Oblivion restores 10 fatigue/s; this exceeds what a ~2 s stagger clip restores between repeated hits.
@@ -80,9 +79,23 @@ const SKILL_BLOCK := 3
 const SKILL_HAND_TO_HAND := 5
 ## WEAP type -> the skill a blow uses: blades, blunt weapons and staves, bows (Marksman, 16).
 const WEAPON_SKILLS := {0: 2, 1: 2, 2: 4, 3: 4, 4: 4, 5: 16}
-## Blows between actors wear fatigue down by the damage they deal, not the player-sized minimum: with that, fights end in a
-## knockdown loop instead of a death.
-const ACTOR_HIT_FATIGUE_MULT := 1.0
+## Armor (Oblivion.exe FUN_00547370, FUN_0060e580): each worn piece rates `max(1, floor(skill x (fArmorRatingBase + (
+## fArmorRatingMax - fArmorRatingBase) x armor / 100))) x condition`, the skill being the Light or Heavy Armor skill with
+## the luck term (FUN_00547b90) and the pieces summing to at most fMaxArmorRating. Light or heavy is told by the piece's
+## weight against the iArmorWeight setting of its slot. The rating is the percent of a blow it takes off.
+const SKILL_HEAVY_ARMOR := 6
+const SKILL_LIGHT_ARMOR := 15
+const ATTRIBUTE_LUCK := 7
+const ARMOR_RATING_BASE_DEFAULT := 0.35
+const ARMOR_RATING_MAX_DEFAULT := 1.0
+const LUCK_SKILL_MULT_DEFAULT := 0.4
+const LUCK_SKILL_BASE_DEFAULT := -20.0
+const MAX_ARMOR_RATING_DEFAULT := 85.0
+## Biped slot bit -> the iArmorWeight setting and default weight above which a piece in it is heavy armor.
+const ARMOR_SLOT_WEIGHTS := {
+	0x1: ["iArmorWeightHelmet", 5.0], 0x4: ["iArmorWeightCuirass", 30.0], 0x8: ["iArmorWeightGreaves", 15.0],
+	0x10: ["iArmorWeightGauntlets", 5.0], 0x20: ["iArmorWeightBoots", 20.0], 0x2000: ["iArmorWeightShield", 15.0],
+}
 const ALLY_HELP_RADIUS_M := 25.0
 const CHASE_HOP_MAX_M := 8.0
 const CHASE_HOP_LANDING_OFFSET_M := 1.2
@@ -338,11 +351,54 @@ func player_hit_damage(power := false) -> float:
 	}
 	return _hit_damage(player_actor, power)
 
-## The fatigue a bare-handed blow takes off the target (a weapon's blow takes as much as its damage here).
+## The fatigue a bare-handed blow takes off the target (FUN_00547280); a weapon or a claw takes health only.
 func _hit_fatigue_damage(attacker: Dictionary, damage: float) -> float:
-	if (attacker.get("weapon_record", {}) as Dictionary).is_empty():
+	if (attacker.get("weapon_record", {}) as Dictionary).is_empty() and not _is_creature(attacker):
 		return damage * _setting("fHandFatigueDamageMult") + _setting("fHandFatigueDamageBase")
-	return damage * ACTOR_HIT_FATIGUE_MULT
+	return 0.0
+
+## The same for the player's blow with the weapon in hand (none: bare hands) that took `health_damage`.
+func player_hit_fatigue_damage(health_damage: float) -> float:
+	var weapon: Dictionary = host.get("_player_weapon_record")
+	if weapon.is_empty():
+		return health_damage * _setting("fHandFatigueDamageMult") + _setting("fHandFatigueDamageBase")
+	return 0.0
+
+## The player's armor rating: the worn pieces' ratings summed and capped (FUN_0060e580).
+func player_armor_rating() -> float:
+	var reader: Object = host.get("data_reader")
+	var player_base: Dictionary = host.get("_player_base_record")
+	if reader == null or player_base.is_empty():
+		return 0.0
+	var skills: PackedInt64Array = player_base.get("skills", PackedInt64Array())
+	var attributes: PackedInt64Array = player_base.get("attributes", PackedInt64Array())
+	var luck := float(attributes[ATTRIBUTE_LUCK]) if attributes.size() > ATTRIBUTE_LUCK else 50.0
+	var armor_base := _setting_or("fArmorRatingBase", ARMOR_RATING_BASE_DEFAULT)
+	var armor_max := _setting_or("fArmorRatingMax", ARMOR_RATING_MAX_DEFAULT)
+	var total := 0.0
+	for form_id_value: Variant in (host.get("_player_equipment") as Dictionary).keys():
+		var form_id := int(form_id_value)
+		if str(reader.find_record_type(form_id)) != "ARMO":
+			continue
+		var stats: Dictionary = reader.find_item_stats(form_id)
+		var armor := float(stats.get("armor_rating", 0)) / 100.0
+		if armor <= 0.0:
+			continue
+		var slots := int(reader.get_item_biped_slots(form_id))
+		var heavy := false
+		for slot_bit: int in ARMOR_SLOT_WEIGHTS:
+			if (slots & slot_bit) != 0:
+				var entry: Array = ARMOR_SLOT_WEIGHTS[slot_bit]
+				heavy = float(stats.get("weight", 0.0)) > _setting_or(str(entry[0]), float(entry[1]))
+				break
+		var skill_index := SKILL_HEAVY_ARMOR if heavy else SKILL_LIGHT_ARMOR
+		var skill := float(skills[skill_index]) if skills.size() > skill_index else 0.0
+		var effective_skill := clampf(
+			skill + luck * _setting_or("fActorLuckSkillMult", LUCK_SKILL_MULT_DEFAULT)
+				+ _setting_or("iActorLuckSkillBase", LUCK_SKILL_BASE_DEFAULT), 0.0, 100.0
+		)
+		total += maxf(1.0, floorf(effective_skill * (armor_base + (armor_max - armor_base) * armor / 100.0)))
+	return minf(total, _setting_or("fMaxArmorRating", MAX_ARMOR_RATING_DEFAULT))
 
 func _attack_fatigue_cost(actor: Dictionary) -> float:
 	if _weapon_type(actor) < 0:
@@ -383,7 +439,7 @@ func receive_player_hit(
 			_run_actor_events(actor, "OnHit", "player")
 			if bool(actor.get("dead", false)):
 				return blocked
-	var received_fatigue := maxf(8.0, fatigue_damage * BLOCKED_DAMAGE_SHARE) if blocked else fatigue_damage
+	var received_fatigue := fatigue_damage * BLOCKED_DAMAGE_SHARE if blocked else fatigue_damage
 	var fight_back_target := 0 if not _calmed.has(reference_id) else -1
 	_react_to_hit(actor, source_position, received_fatigue, fight_back_target, _player_base_form_id(), blocked)
 	return blocked
@@ -1357,6 +1413,7 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 		if from_actor.length() > 0.01 and view_forward.length() > 0.01 and from_actor.normalized().dot(view_forward.normalized()) > 0.3:
 			blocked = true
 			damage *= BLOCKED_DAMAGE_SHARE
+	damage *= 1.0 - player_armor_rating() * 0.01
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
 	if audio_manager != null:
 		if blocked:
@@ -1365,7 +1422,7 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 			audio_manager.call(
 				"play_weapon_impact", player.global_position + Vector3.UP, _weapon_type(actor), true, player
 			)
-	var fatigue_damage := maxf(8.0 if blocked else FATIGUE_HIT_MIN, damage * FATIGUE_HIT_COST_MULT)
+	var fatigue_damage := _hit_fatigue_damage(actor, damage)
 	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked, int(actor.get("base_form_id", 0)))
 	if blocked and not projectile_hit:
 		_begin_block_attack(actor)

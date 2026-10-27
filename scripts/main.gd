@@ -45,9 +45,14 @@ const COMBAT_DAMAGE_SETTINGS := {
 	"fHandDamageStrengthBase": 0.0, "fHandDamageStrengthMult": 0.75,
 	"fHandFatigueDamageMult": 0.5, "fHandFatigueDamageBase": 1.0, "fNPCAttributeHealthMult": 0.5,
 	"fFatigueBase": 1.0, "fFatigueMult": 0.5,
+	"fArmorRatingBase": 0.35, "fArmorRatingMax": 1.0, "fMaxArmorRating": 85.0, "fActorLuckSkillMult": 0.4,
 }
 ## Executable defaults used by combat when the installed ESM does not override them.
 const NPC_COMBAT_SETTINGS := {
+	"iActorLuckSkillBase": -20.0, "iNPCBasePerLevelHealthMult": 4.0, "iLowLevelNPCMaxLevel": 3.0,
+	"fLowLevelNPCBaseHealthMult": 0.4,
+	"iArmorWeightHelmet": 5.0, "iArmorWeightCuirass": 30.0, "iArmorWeightGreaves": 15.0,
+	"iArmorWeightGauntlets": 5.0, "iArmorWeightBoots": 20.0, "iArmorWeightShield": 15.0,
 	"fPowerAttackDelay": 0.3,
 	"fPowerAttackFatiguePenalty": 5.0,
 	"fCombatMinEngageDistance": 64.0,
@@ -5778,8 +5783,8 @@ func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 	projectile.excluded_bodies = excluded
 	var projectile_kind := int(projectile.get("kind"))
 	var is_spell := projectile_kind == CombatProjectile.Kind.SPELL
-	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN if is_spell else _player_hit_fatigue_damage()
 	var hit_health_damage := _player_hit_health_damage() if projectile_kind == CombatProjectile.Kind.ARROW else 0.0
+	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN if is_spell else _player_hit_fatigue_damage(hit_health_damage)
 	projectile.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
 		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell, hit_health_damage)
 		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
@@ -5814,9 +5819,8 @@ func _melee_hit(power_attack := false) -> bool:
 		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	var blocked := _provoke_actor(
-		hit.get("collider"), _player_hit_fatigue_damage(), true, _player_hit_health_damage(power_attack)
-	)
+	var health_damage := _player_hit_health_damage(power_attack)
+	var blocked := _provoke_actor(hit.get("collider"), _player_hit_fatigue_damage(health_damage), true, health_damage)
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
 		var flesh_hit := collider is CharacterBody3D and collider != player
@@ -5868,7 +5872,7 @@ func _player_take_combat_hit(
 		var away := player.global_position - source.global_position
 		away.y = 0.0
 		if away.length_squared() > 0.0001:
-			var knockback := NpcCombat.PLAYER_HIT_KNOCKBACK_MPS if fatigue_damage >= 20.0 \
+			var knockback := NpcCombat.PLAYER_HIT_KNOCKBACK_MPS if damage >= 20.0 \
 				else NpcCombat.NPC_HIT_KNOCKBACK_MPS
 			player.call("apply_hit_impulse", away.normalized() * knockback)
 	_update_player_knockdown_state()
@@ -5971,8 +5975,10 @@ func _finish_player_hit_reaction() -> void:
 		_player_hit_reaction.clear()
 
 ## An actor the player's weapon or spell hits fights back.
-func _player_hit_fatigue_damage() -> float:
-	return maxf(NpcCombat.FATIGUE_HIT_MIN, float(_player_weapon_record.get("damage", 4.0)) * NpcCombat.FATIGUE_HIT_COST_MULT)
+func _player_hit_fatigue_damage(health_damage: float) -> float:
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	return _npc_combat.player_hit_fatigue_damage(health_damage)
 
 func _player_hit_health_damage(power_attack := false) -> float:
 	if _npc_combat == null:
@@ -5989,7 +5995,7 @@ func _provoke_actor(
 		_npc_combat = NpcCombat.new(self)
 	return _npc_combat.receive_player_hit(
 		int(node.get_meta("reference_id")), player.global_position,
-		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(), allow_block, health_damage
+		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(health_damage), allow_block, health_damage
 	)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
@@ -6272,11 +6278,25 @@ func _creature_capsule_size(skeleton: Skeleton3D, base_scale: float) -> Vector2:
 	var radius := clampf(minf(extent.x, extent.z) * 0.5, 0.1, 0.6)
 	return Vector2(radius, maxf(extent.y + 0.1, radius * 2.0 + 0.02))
 
-func _initial_actor_health(npc: Dictionary) -> Dictionary:
-	# The record's base health plus the endurance share (fNPCAttributeHealthMult; how the original combines them is not traced).
+func _initial_actor_health(npc: Dictionary, is_creature: bool) -> Dictionary:
+	# A creature, and an NPC whose stats are not auto-calculated, has the health its record states. An auto-calculated NPC's
+	# health is FUN_00547f80 of Oblivion.exe: (int((strength + endurance) x fNPCAttributeHealthMult) + iNPCBasePerLevelHealthMult
+	# x (level - 1)) x a factor rising from fLowLevelNPCBaseHealthMult to 1 over the first iLowLevelNPCMaxLevel levels. Its
+	# per-level share also depends on the class (endurance as a favored attribute, the specialization), which is not read here.
+	var maximum := float(npc.get("base_health", 0.0))
 	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
-	var maximum := float(npc.get("base_health", 0.0)) \
-		+ (float(attributes[5]) * float(_player_game_settings.get("fNPCAttributeHealthMult", 0.5)) if attributes.size() > 5 else 0.0)
+	var flags := int(npc.get("flags", 0))
+	if not is_creature and (flags & 0x10) != 0 and attributes.size() > 5:
+		var offset := int(npc.get("level_or_offset", 1))
+		var level := maxi(1, 1 + offset if (flags & 0x80) != 0 else offset)
+		var steps := level - 1
+		var health := float(int(float(attributes[0] + attributes[5]) * float(_player_game_settings.get("fNPCAttributeHealthMult", 0.5)))) \
+			+ float(_player_game_settings.get("iNPCBasePerLevelHealthMult", 4)) * steps
+		var low_level_steps := float(_player_game_settings.get("iLowLevelNPCMaxLevel", 3))
+		if steps < low_level_steps:
+			var low_mult := float(_player_game_settings.get("fLowLevelNPCBaseHealthMult", 0.25))
+			health *= low_mult + float(steps) / low_level_steps * (1.0 - low_mult)
+		maximum = float(int(health))
 	maximum = maxf(maximum, 1.0)
 	return {"current": maximum, "max": maximum}
 
@@ -6475,7 +6495,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"hit_reaction": {},
 			"hit_attack_lock_remaining": 0.0,
 			"aggression": int(npc.get("aggression", 0)),
-			"health": _initial_actor_health(npc),
+			"health": _initial_actor_health(npc, is_creature),
 			"essential": (int(npc.get("flags", 0)) & 0x2) != 0,
 			"faction_form_ids": npc.get("faction_form_ids", PackedInt64Array()),
 			"dead": false,
