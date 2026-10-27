@@ -3,7 +3,7 @@ extends RefCounted
 ## the interact key acts on it, so the displayed target and the activated target are the same object.
 ##
 ## Snapshot fields: kind (none|item|container|door|npc), reference_id (-1 when absent), display_name,
-## action (none|take|enter|locked|talk|attack|open), reticle_icon (0 = default crosshair), crime, locked,
+## action (none|take|enter|locked|talk|attack|open|loot), reticle_icon (0 = default crosshair), crime, locked,
 ## lock_level (-1 when unavailable), enemy_health_ratio (negative when unavailable), plus the source record
 ## (`reference`/`item`) for the executor.
 
@@ -22,6 +22,7 @@ var collision_mask := 2 | 4 | 8 | 16
 const RETICLE_ICONS := {
 	"item": 1,
 	"container": 2,
+	"corpse": 2,
 	"door": 8,
 	"npc": 11,
 	"npc_attack": 12,
@@ -37,6 +38,9 @@ var door_lookup := Callable()
 var container_lookup := Callable()
 ## (collider: Node) -> Dictionary of the NPC actor owning that collider, or {}.
 var actor_lookup := Callable()
+## (ray_origin: Vector3, ray_direction: Vector3, max_length: float) -> Dictionary with `actor` and `distance` (along the
+## ray) of the nearest dead body the ray passes through, or {}. A body has no collider (it must not block the living).
+var corpse_lookup := Callable()
 
 static func empty_snapshot() -> Dictionary:
 	return {
@@ -93,6 +97,17 @@ func acquire() -> Dictionary:
 	query.collide_with_areas = true
 	query.collide_with_bodies = true
 	var hit := world_host.get_world_3d().direct_space_state.intersect_ray(query)
+	if corpse_lookup.is_valid():
+		var ray_length := max_reach + ray_origin.distance_to(reach_origin)
+		var corpse: Dictionary = corpse_lookup.call(ray_origin, ray_direction, ray_length)
+		var world_distance := ray_origin.distance_to(hit.get("position", ray_origin)) if not hit.is_empty() else INF
+		if not corpse.is_empty() and float(corpse.get("distance", INF)) < world_distance:
+			var corpse_point: Vector3 = ray_origin + ray_direction * float(corpse.get("distance", 0.0))
+			if corpse_point.distance_to(reach_origin) > container_range_m:
+				return empty_snapshot()
+			var dead: Dictionary = corpse.get("actor", {})
+			return _snapshot("corpse", "loot", int(dead.get("reference_id", -1)),
+				str(dead.get("display_name", dead.get("name", "Body"))), {"actor": dead})
 	if hit.is_empty():
 		return empty_snapshot()
 	var collider := hit.get("collider") as Node
@@ -151,8 +166,7 @@ func acquire() -> Dictionary:
 			var container_reference: Dictionary = container.get("reference", {})
 			var container_name := str(container.get("display_name", container_reference.get("base_editor_id", "Container")))
 			var container_lock := int(container_reference.get("lock_level", 0))
-			# Container contents are not available yet, so the action is a take-like placeholder with no effect.
-			return _snapshot("container", "take", reference_id, container_name, {
+			return _snapshot("container", "locked" if container_lock > 0 else "loot", reference_id, container_name, {
 				"reference": container_reference,
 				"locked": container_lock > 0,
 				"lock_level": container_lock,

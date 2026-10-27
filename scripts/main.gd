@@ -25,6 +25,7 @@ const NpcCombat := preload("res://scripts/npc_combat.gd")
 const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
 const PhysicsCollapse := preload("res://scripts/physics_collapse.gd")
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
+const LootInventory := preload("res://scripts/loot_inventory.gd")
 const PLAYER_DYNAMIC_GAME_SETTINGS := [
 	"fFatigueReturnBase", "fFatigueReturnMult", "fFatigueRunBase", "fFatigueRunMult",
 	"fFatigueJumpBase", "fFatigueJumpMult", "fMagickaReturnBase", "fMagickaReturnMult",
@@ -332,6 +333,18 @@ var _player_actor_values := PlayerActorValues.new()
 var _player_actor_values_ready := false
 var _player_game_settings: Dictionary = {}
 var _inventory_open := false
+## Loot mode is the inventory with a second panel: the contents of the aimed body or container beside the player's own.
+var _loot_target: Dictionary = {}
+var _loot_store: Dictionary = {}
+var _loot_panel: PanelContainer
+var _loot_title: Label
+var _loot_items: VBoxContainer
+var _loot_weight_label: Label
+## What each body and container still holds, by reference id; filled the first time it is opened and kept for the session.
+var _loot_contents: Dictionary = {}
+var _drop_serial := 0
+const CORPSE_TARGET_RADIUS_M := 0.1
+const DROPPED_ITEM_REFERENCE_BASE := 0x7E000000
 var _placed_items: Dictionary = {}
 var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
 var targeting := InteractionTargeting.new()
@@ -393,8 +406,13 @@ var _player_start_position := Vector3.ZERO
 var _fallback_support: StaticBody3D
 
 func _ready() -> void:
+	# The inventory pauses the tree. This node keeps running to take the menu's input and close it; the world nodes below
+	# (the player, the streamed cell, actors, projectiles) are set pausable.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	player.process_mode = Node.PROCESS_MODE_PAUSABLE
 	_setup_targeting()
 	_setup_dialogue_presentation()
+	_setup_loot_panel()
 	physics_grabber.configure(player, self)
 	player.gameplay_frame.connect(_on_player_gameplay_frame)
 	player.set_physics_process(false)
@@ -402,6 +420,7 @@ func _ready() -> void:
 	face_view_button.pressed.connect(_toggle_face_view)
 	cell_visual_root = Node3D.new()
 	cell_visual_root.name = "StreamedCell"
+	cell_visual_root.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(cell_visual_root)
 	_cell_material = StandardMaterial3D.new()
 	_cell_material.albedo_color = Color(0.62, 0.58, 0.5)
@@ -459,12 +478,13 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
-	_update_player_attack_hold(_delta)
-	_update_skinned_physics_rigs()
-	for actor: Dictionary in _npc_actors:
-		if actor.has("ragdoll"):
-			ActorRagdoll.update(actor.ragdoll)
-	_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
+	if not _inventory_open:
+		_update_player_attack_hold(_delta)
+		_update_skinned_physics_rigs()
+		for actor: Dictionary in _npc_actors:
+			if actor.has("ragdoll"):
+				ActorRagdoll.update(actor.ragdoll)
+		_interaction_toast_remaining = maxf(0.0, _interaction_toast_remaining - _delta)
 	if _player_blocking and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_player_blocking = false
 		if _arms != null:
@@ -492,6 +512,9 @@ func _process(_delta: float) -> void:
 		await _activate_target(targeting.acquire())
 		if not Input.is_action_pressed("interact"):
 			_interact_ready = true
+	# The world is paused while the inventory is open.
+	if _inventory_open:
+		return
 	if not _world_loading and not current_cell.is_empty() and not bool(current_cell.get("interior", true)):
 		await _stream_exterior_if_needed()
 	if _player_skeleton != null and not _world_loading:
@@ -528,6 +551,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		return
 	if is_instance_valid(player):
+		# A wheel turn the inventory's list did not use (it is at its end) must not zoom the camera behind it.
+		if _inventory_open and event is InputEventMouseButton:
+			return
 		var grabber_handled_input := _handle_combat_input(event)
 		if not grabber_handled_input and not _world_loading and not _inventory_open and not player.face_preview_enabled:
 			grabber_handled_input = physics_grabber.handle_input(event)
@@ -537,6 +563,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			player.handle_camera_input(event)
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
+	if _inventory_open and not _loot_target.is_empty():
+		if event.keycode == KEY_ESCAPE or event.keycode == KEY_SPACE:
+			_close_loot_menu()
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_R:
+			_loot_take_all()
+			get_viewport().set_input_as_handled()
+			return
 	if event.keycode == KEY_F9:
 		var report := start_quest("CharacterGen")
 		for line: String in report:
@@ -805,6 +840,9 @@ func _log_runtime_spawn_positions() -> void:
 	])
 
 func _physics_process(delta: float) -> void:
+	if _inventory_open:
+		_aimed_target = InteractionTargeting.empty_snapshot()
+		return
 	physics_grabber.physics_update(delta)
 	_physics_collapse.physics_update(delta)
 	_nudge_corpses()
@@ -4238,6 +4276,7 @@ func _setup_targeting() -> void:
 	targeting.item_lookup = func(reference_id: int) -> Dictionary: return _placed_items.get(reference_id, {})
 	targeting.door_lookup = _door_reference_by_id
 	targeting.container_lookup = _container_reference_by_id
+	targeting.corpse_lookup = _corpse_under_ray
 	targeting.actor_lookup = func(collider: Node) -> Dictionary:
 		for actor: Dictionary in _npc_actors:
 			if actor.get("root") == collider:
@@ -4254,7 +4293,7 @@ func _container_reference_by_id(reference_id: int) -> Dictionary:
 			continue
 		var base_form_id := int(reference.get("base_form_id", 0))
 		if str(data_reader.find_record_type(base_form_id)) == "CONT":
-			var name := str(data_reader.find_editor_id(base_form_id)).strip_edges()
+			var name := _record_display_name(base_form_id)
 			result = {"reference": reference, "display_name": name if not name.is_empty() else "Container"}
 		break
 	_container_reference_cache[reference_id] = result
@@ -4843,6 +4882,8 @@ func _activate_target(target: Dictionary) -> void:
 			await _transition_to_linked_cell(target.get("reference", {}))
 		"locked":
 			_show_interaction_toast("Locked")
+		"loot":
+			_open_loot_menu(target)
 		"talk":
 			_begin_dialogue(target.get("actor", {}))
 		"open":
@@ -4852,6 +4893,234 @@ func _activate_target(target: Dictionary) -> void:
 			var report := quest_bridge.set_door_open_state(door_reference, not is_open, self)
 			if not report.begins_with("applied:"):
 				_show_interaction_toast("Cannot open %s" % str(target.get("display_name", "door")))
+
+## The nearest dead body the ray passes through. A body has no collider (it must not block the living), so the bones are
+## tested instead: the ray has to pass within CORPSE_TARGET_RADIUS_M of one.
+func _corpse_under_ray(origin: Vector3, direction: Vector3, max_length: float) -> Dictionary:
+	var best := {}
+	var best_distance := max_length
+	for actor: Dictionary in _npc_actors:
+		if not bool(actor.get("dead", false)):
+			continue
+		var root := actor.get("root") as Node3D
+		var skeleton := actor.get("skeleton") as Skeleton3D
+		if not is_instance_valid(root) or not is_instance_valid(skeleton) or not root.visible:
+			continue
+		if root.global_position.distance_to(origin) > max_length + 3.0:
+			continue
+		var to_world := skeleton.global_transform
+		for bone in range(skeleton.get_bone_count()):
+			var point := to_world * skeleton.get_bone_global_pose(bone).origin
+			var along := (point - origin).dot(direction)
+			if along < 0.0 or along >= best_distance:
+				continue
+			if (origin + direction * along).distance_to(point) <= CORPSE_TARGET_RADIUS_M:
+				best_distance = along
+				best = {"actor": actor, "distance": along}
+	return best
+
+## The items a body or container starts with: a container's CNTO list, a body's carried items, outfit and weapon. Leveled
+## lists are rolled once, seeded by the reference, so the same body holds the same things.
+func _loot_store_for(target: Dictionary) -> Dictionary:
+	var reference_id := int(target.get("reference_id", 0))
+	if _loot_contents.has(reference_id):
+		return _loot_contents[reference_id]
+	var store := {}
+	var rng := RandomNumberGenerator.new()
+	rng.seed = reference_id
+	if str(target.get("kind", "")) == "container":
+		var reference: Dictionary = target.get("reference", {})
+		var record: Dictionary = data_reader.find_container(int(reference.get("base_form_id", 0)))
+		LootInventory.add_entries(store, data_reader, record.get("contents", []), 1, rng)
+	else:
+		var actor: Dictionary = target.get("actor", {})
+		var npc: Dictionary = data_reader.find_npc_base(int(actor.get("base_form_id", 0)))
+		LootInventory.add_entries(store, data_reader, npc.get("inventory", []), 1, rng)
+		var outfit_id := int(npc.get("default_outfit_form_id", 0))
+		if outfit_id != 0:
+			for item_value: Variant in data_reader.get_outfit_items(outfit_id):
+				var item_id := int(item_value)
+				if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
+					store[item_id] = 1
+		var weapon_id := int(actor.get("weapon_form_id", 0))
+		if weapon_id > 0 and not store.has(weapon_id):
+			store[weapon_id] = 1
+	_loot_contents[reference_id] = store
+	return store
+
+func _setup_loot_panel() -> void:
+	_loot_panel = PanelContainer.new()
+	_loot_panel.name = "LootPanel"
+	_loot_panel.visible = false
+	_loot_panel.anchor_left = 0.5
+	_loot_panel.anchor_right = 0.5
+	_loot_panel.anchor_top = 0.5
+	_loot_panel.anchor_bottom = 0.5
+	_loot_panel.offset_left = -570.0
+	_loot_panel.offset_right = -190.0
+	_loot_panel.offset_top = -150.0
+	_loot_panel.offset_bottom = 150.0
+	var margin := MarginContainer.new()
+	for side in ["left", "right"]:
+		margin.add_theme_constant_override("margin_" + side, 12)
+	for side in ["top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 10)
+	_loot_panel.add_child(margin)
+	var contents := VBoxContainer.new()
+	margin.add_child(contents)
+	_loot_title = Label.new()
+	contents.add_child(_loot_title)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(350, 190)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	contents.add_child(scroll)
+	_loot_items = VBoxContainer.new()
+	_loot_items.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_loot_items)
+	var footer := HBoxContainer.new()
+	contents.add_child(footer)
+	var take_all := Button.new()
+	take_all.text = "Take all (R)"
+	take_all.pressed.connect(_loot_take_all)
+	footer.add_child(take_all)
+	var close := Button.new()
+	close.text = "Close (Esc)"
+	close.pressed.connect(_close_loot_menu)
+	footer.add_child(close)
+	_loot_weight_label = Label.new()
+	_loot_weight_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_loot_weight_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	footer.add_child(_loot_weight_label)
+	$StatusLayer.add_child(_loot_panel)
+
+func _open_loot_menu(target: Dictionary) -> void:
+	if _world_loading or _inventory_open:
+		return
+	_loot_target = target
+	_loot_store = _loot_store_for(target)
+	if _gesture_panel_open():
+		_toggle_gesture_panel()
+	_toggle_inventory()
+	_refresh_inventory_hud()
+
+func _close_loot_menu() -> void:
+	if _inventory_open and not _loot_target.is_empty():
+		_toggle_inventory()
+
+func _refresh_loot_panel() -> void:
+	_loot_title.text = "%s · click: take stack · Shift+click: take one" % str(_loot_target.get("display_name", "Loot"))
+	for child in _loot_items.get_children():
+		child.queue_free()
+	for form_id: int in LootInventory.sorted_ids(_loot_store, data_reader):
+		var button := Button.new()
+		button.text = "%s  %s" % [str(data_reader.find_record_type(form_id)), _item_line(form_id, int(_loot_store[form_id]))]
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.pressed.connect(_loot_take_item.bind(form_id))
+		_loot_items.add_child(button)
+	if _loot_store.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "Empty"
+		_loot_items.add_child(empty_label)
+	_loot_weight_label.text = "%.1f wt left" % LootInventory.total_weight(_loot_store, data_reader)
+
+func _loot_take_item(form_id: int) -> void:
+	var amount := 1 if Input.is_key_pressed(KEY_SHIFT) else int(_loot_store.get(form_id, 0))
+	if LootInventory.transfer(_loot_store, _player_inventory, form_id, amount) > 0:
+		_refresh_inventory_hud()
+
+func _loot_take_all() -> void:
+	if _loot_target.is_empty():
+		return
+	for form_id: int in _loot_store.keys():
+		LootInventory.transfer(_loot_store, _player_inventory, form_id, int(_loot_store[form_id]))
+	_refresh_inventory_hud()
+
+## Takes the item off if it is worn: its meshes go, the body parts it covered show again.
+func _unequip_player_item(form_id: int) -> void:
+	if _player_weapon_form_id == form_id:
+		_unequip_player_weapon()
+		return
+	var equipped: Dictionary = _player_equipment.get(form_id, {})
+	if equipped.is_empty():
+		return
+	for mesh_value: Variant in equipped.get("meshes", []):
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.queue_free()
+	_player_equipment.erase(form_id)
+	_refresh_player_hair_visibility()
+	_refresh_player_body_visibility()
+	_sync_arms_equipment()
+
+## Removes up to `amount` from the inventory (taking the item off when the last one goes); the number removed.
+func _remove_inventory_item(form_id: int, amount: int) -> int:
+	var have := int(_player_inventory.get(form_id, 0))
+	var removed := mini(amount, have)
+	if removed <= 0:
+		return 0
+	if have - removed > 0:
+		_player_inventory[form_id] = have - removed
+	else:
+		_player_inventory.erase(form_id)
+		_unequip_player_item(form_id)
+	_refresh_inventory_hud()
+	return removed
+
+func _on_inventory_item_gui_input(event: InputEvent, form_id: int) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		_drop_inventory_item(form_id)
+
+## Drops one item on the floor in front of the player, where it can be picked up again.
+func _drop_inventory_item(form_id: int) -> void:
+	if _world_loading or not _inventory_open:
+		return
+	var model_path := str(data_reader.find_world_item_model_path(form_id, false))
+	if model_path.is_empty():
+		model_path = str(data_reader.find_item_model_path(form_id, false))
+	var meshes: Array = await assets.meshes_for_model(model_path) if not model_path.is_empty() else []
+	if meshes.is_empty():
+		_show_interaction_toast("Cannot drop %s" % _record_display_name(form_id))
+		return
+	if _remove_inventory_item(form_id, 1) == 0:
+		return
+	var origin := player.global_position + (-player.global_basis.z) * 0.9 + Vector3.UP
+	var query := PhysicsRayQueryParameters3D.create(origin, origin + Vector3.DOWN * 3.0, 2, [player.get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	var floor_point: Vector3 = (hit.get("position", origin + Vector3.DOWN) as Vector3) + Vector3.UP * 0.02
+	var item_transform := Transform3D(
+		Basis(Vector3.UP, randf() * TAU).scaled(Vector3.ONE * game_units_to_meters), floor_point
+	)
+	_drop_serial += 1
+	var reference_id := DROPPED_ITEM_REFERENCE_BASE + _drop_serial
+	var instances: Array[MeshInstance3D] = []
+	for mesh_entry: Dictionary in meshes:
+		var instance := MeshInstance3D.new()
+		instance.name = "Dropped_%08X" % form_id
+		instance.mesh = mesh_entry.mesh
+		instance.set_meta("reference_id", reference_id)
+		instance.material_override = await _material_for_reference(
+			model_path,
+			str(mesh_entry.diffuse_texture_path),
+			bool(mesh_entry.get("alpha_blend", false)),
+			bool(mesh_entry.get("alpha_test", false)),
+			int(mesh_entry.get("alpha_threshold", 128))
+		)
+		instance.transform = item_transform
+		cell_visual_root.add_child(instance)
+		instances.push_back(instance)
+	var item_name := _record_display_name(form_id)
+	_placed_items[reference_id] = {
+		"reference_id": reference_id,
+		"base_form_id": form_id,
+		"record_type": str(data_reader.find_record_type(form_id)),
+		"editor_id": str(data_reader.find_editor_id(form_id)),
+		"display_name": item_name,
+		"position": floor_point,
+		"mesh_instances": instances,
+		"target_area": _create_pickup_target_area(reference_id, item_transform, meshes),
+	}
+	_show_interaction_toast("Dropped %s" % item_name)
 
 func _show_interaction_toast(message: String) -> void:
 	_interaction_toast_text = message
@@ -4910,12 +5179,12 @@ func _refresh_inventory_hud() -> void:
 		var equipped := _player_equipment.has(form_id) or _player_weapon_form_id == form_id
 		var equipped_label := " · equipped" if equipped else ""
 		var item_button := Button.new()
-		item_button.text = "%s  %s ×%d%s" % [item_type, item_name, int(_player_inventory[form_id]), equipped_label]
+		item_button.text = "%s  %s%s" % [item_type, _item_line(form_id, int(_player_inventory[form_id])), equipped_label]
 		item_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		item_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		item_button.disabled = item_type not in ["ARMO", "CLOT", "WEAP"]
-		if not item_button.disabled:
-			item_button.pressed.connect(_equip_inventory_item.bind(form_id))
+		item_button.tooltip_text = "Click: equip / unequip · right click: drop"
+		item_button.pressed.connect(_equip_inventory_item.bind(form_id))
+		item_button.gui_input.connect(_on_inventory_item_gui_input.bind(form_id))
 		inventory_items_container.add_child(item_button)
 	if inventory_form_ids.is_empty():
 		var empty_label := Label.new()
@@ -4936,9 +5205,23 @@ func _refresh_inventory_hud() -> void:
 			spell_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			spell_button.pressed.connect(_select_player_spell.bind(spell_form_id))
 			inventory_items_container.add_child(spell_button)
-	inventory_label.text = "Inventory: %d items · %d types · %d spells" % [
-		item_count, _player_inventory.size(), _player_spell_form_ids.size()
+	inventory_label.text = "Inventory: %d items · %d types · %d spells · %.1f wt" % [
+		item_count, _player_inventory.size(), _player_spell_form_ids.size(),
+		LootInventory.total_weight(_player_inventory, data_reader)
 	]
+	if not _loot_target.is_empty():
+		_refresh_loot_panel()
+
+## "Name ×count · weight · value" for a list row.
+func _item_line(form_id: int, count: int) -> String:
+	var item_name := _record_display_name(form_id)
+	if item_name.is_empty():
+		item_name = "Item %08X" % form_id
+	var stats: Dictionary = data_reader.find_item_stats(form_id)
+	var line := "%s ×%d" % [item_name, count] if count > 1 else item_name
+	if not stats.is_empty():
+		line += "  ·  %.1f wt  ·  %d g" % [float(stats.get("weight", 0.0)), int(stats.get("value", 0))]
+	return line
 
 func _record_display_name(form_id: int) -> String:
 	if data_reader == null or form_id <= 0:
@@ -5431,6 +5714,7 @@ func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
 		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
 			AudioManager.play_arrow_impact(hit_position)
 	)
+	projectile.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(projectile)
 	projectile.global_position = aim.origin
 	projectile.look_at(aim.origin + (aim.direction as Vector3))
@@ -5705,17 +5989,27 @@ func _cycle_player_weapon() -> void:
 	_weapon_switch_busy = false
 	_refresh_inventory_hud()
 
+## A click on an item of the inventory: worn gear comes off, other gear goes on.
 func _equip_inventory_item(form_id: int) -> void:
 	if _world_loading or not _inventory_open:
 		return
-	if await _equip_player_item(form_id):
+	if _player_equipment.has(form_id) or _player_weapon_form_id == form_id:
+		_unequip_player_item(form_id)
+		_refresh_inventory_hud()
+	elif await _equip_player_item(form_id):
 		_refresh_inventory_hud()
 
 func _toggle_inventory() -> void:
 	if _world_loading:
 		return
 	_inventory_open = not _inventory_open
+	if not _inventory_open:
+		_loot_target = {}
+		_loot_store = {}
+		_interact_ready = false
 	inventory_panel.visible = _inventory_open
+	get_tree().paused = _inventory_open
+	_loot_panel.visible = _inventory_open and not _loot_target.is_empty()
 	player.set_physics_process(not _inventory_open)
 	if _inventory_open:
 		player.release_mouse()
@@ -5988,6 +6282,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		actor_root.collision_mask = 7
 		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 		actor_root.transform = _actor_reference_transform(reference)
+		actor_root.process_mode = Node.PROCESS_MODE_PAUSABLE
 		add_child(actor_root)
 		_npc_pending_roots.push_back(actor_root)
 		var actor_collision := CollisionShape3D.new()
