@@ -5010,14 +5010,17 @@ func _loot_store_for(target: Dictionary) -> Dictionary:
 		LootInventory.add_entries(store, data_reader, record.get("contents", []), 1, rng)
 	else:
 		var actor: Dictionary = target.get("actor", {})
-		var npc: Dictionary = data_reader.find_npc_base(int(actor.get("base_form_id", 0)))
-		LootInventory.add_entries(store, data_reader, npc.get("inventory", []), 1, rng)
-		var outfit_id := int(npc.get("default_outfit_form_id", 0))
-		if outfit_id != 0:
-			for item_value: Variant in data_reader.get_outfit_items(outfit_id):
-				var item_id := int(item_value)
-				if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
-					store[item_id] = 1
+		var base_form_id := int(actor.get("base_form_id", 0))
+		var is_creature := bool(actor.get("creature", false))
+		var base_record: Dictionary = data_reader.find_creature_base(base_form_id) if is_creature else data_reader.find_npc_base(base_form_id)
+		LootInventory.add_entries(store, data_reader, base_record.get("inventory", []), 1, rng)
+		if not is_creature:
+			var outfit_id := int(base_record.get("default_outfit_form_id", 0))
+			if outfit_id != 0:
+				for item_value: Variant in data_reader.get_outfit_items(outfit_id):
+					var item_id := int(item_value)
+					if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
+						store[item_id] = 1
 		var weapon_id := int(actor.get("weapon_form_id", 0))
 		if weapon_id > 0 and not store.has(weapon_id):
 			store[weapon_id] = 1
