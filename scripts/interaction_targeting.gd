@@ -60,6 +60,16 @@ static func icon_for(kind: String, action: String) -> int:
 		return int(RETICLE_ICONS["npc_attack"])
 	return int(RETICLE_ICONS.get(kind, 0))
 
+func _lock_info(reference: Dictionary) -> Dictionary:
+	if world_host != null and world_host.has_method("lock_info"):
+		var info: Dictionary = world_host.call("lock_info", reference)
+		return info
+	return {
+		"level": int(reference.get("lock_level", 0)),
+		"key_form_id": int(reference.get("lock_key_form_id", 0)),
+		"has_key": false,
+	}
+
 func _snapshot(kind: String, action: String, reference_id: int, display_name: String, extra: Dictionary = {}) -> Dictionary:
 	var snapshot := empty_snapshot()
 	snapshot["kind"] = kind
@@ -148,15 +158,17 @@ func acquire() -> Dictionary:
 				display_name = str(reference.get("base_editor_id", "Door"))
 			if display_name.is_empty():
 				display_name = "Door"
-			var lock_level := int(reference.get("lock_level", 0))
-			if world_host.has_method("door_lock_level"):
-				lock_level = int(world_host.call("door_lock_level", reference))
+			var lock: Dictionary = _lock_info(reference)
+			var lock_level := int(lock.get("level", 0))
+			var has_key := bool(lock.get("has_key", false))
 			var locked := lock_level > 0
-			var door_action := "locked" if locked else ("enter" if int(reference.get("teleport_cell_id", 0)) != 0 else "open")
+			var door_action := ("enter" if int(reference.get("teleport_cell_id", 0)) != 0 else "open") if (not locked or has_key) else "locked"
 			return _snapshot("door", door_action, reference_id, display_name, {
 				"reference": reference,
 				"locked": locked,
 				"lock_level": lock_level,
+				"key_form_id": int(lock.get("key_form_id", 0)),
+				"has_key": has_key,
 			})
 	if container_lookup.is_valid():
 		var container: Dictionary = container_lookup.call(reference_id)
@@ -165,10 +177,15 @@ func acquire() -> Dictionary:
 				return empty_snapshot()
 			var container_reference: Dictionary = container.get("reference", {})
 			var container_name := str(container.get("display_name", container_reference.get("base_editor_id", "Container")))
-			var container_lock := int(container_reference.get("lock_level", 0))
-			return _snapshot("container", "locked" if container_lock > 0 else "loot", reference_id, container_name, {
+			var container_lock: Dictionary = _lock_info(container_reference)
+			var container_level := int(container_lock.get("level", 0))
+			var container_has_key := bool(container_lock.get("has_key", false))
+			var container_locked := container_level > 0
+			return _snapshot("container", "loot" if (not container_locked or container_has_key) else "locked", reference_id, container_name, {
 				"reference": container_reference,
-				"locked": container_lock > 0,
-				"lock_level": container_lock,
+				"locked": container_locked,
+				"lock_level": container_level,
+				"key_form_id": int(container_lock.get("key_form_id", 0)),
+				"has_key": container_has_key,
 			})
 	return empty_snapshot()

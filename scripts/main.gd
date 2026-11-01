@@ -1374,8 +1374,17 @@ func _quest_world_command(command: String, target: String, _arguments: Array) ->
 	return null
 
 
+func lock_info(reference: Dictionary) -> Dictionary:
+	var key_form_id := int(reference.get("lock_key_form_id", 0))
+	return {
+		"level": quest_bridge.lock_level(reference, self),
+		"key_form_id": key_form_id,
+		"has_key": key_form_id > 0 and int(_player_inventory.get(key_form_id, 0)) > 0,
+	}
+
+
 func door_lock_level(reference: Dictionary) -> int:
-	return quest_bridge.door_lock_level(reference, self)
+	return int(lock_info(reference).get("level", 0))
 
 ## Origins of the loaded cell's references by name and by form id, built once per cell: a quest asks for a distance on
 ## every physics tick, and scanning every reference each time is wasteful.

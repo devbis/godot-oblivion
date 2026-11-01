@@ -301,11 +301,15 @@ func is_door_locked(reference: Dictionary, world: Node3D) -> bool:
 	return world.has_meta(state_key) and int(world.get_meta(state_key)) > 0
 
 
-func door_lock_level(reference: Dictionary, world: Node3D) -> int:
+func lock_level(reference: Dictionary, world: Node3D) -> int:
 	var state_key := "lock_level_%08x" % int(reference.get("form_id", 0))
 	if world.has_meta(state_key):
 		return int(world.get_meta(state_key))
 	return int(reference.get("lock_level", 0))
+
+
+func door_lock_level(reference: Dictionary, world: Node3D) -> int:
+	return lock_level(reference, world)
 
 
 func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D, label: String) -> String:
