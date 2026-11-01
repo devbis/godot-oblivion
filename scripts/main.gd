@@ -4955,6 +4955,21 @@ func _player_compass_heading_degrees() -> float:
 	var forward := -player.global_basis.z
 	return fposmod(rad_to_deg(atan2(forward.x, -forward.z)), 360.0)
 
+## A matching key opens a locked door or container without being consumed. The lock override keeps it open for the rest
+## of the session, so the next snapshot sees an ordinary target.
+func _use_key_if_locked(target: Dictionary) -> bool:
+	if not bool(target.get("locked", false)) or not bool(target.get("has_key", false)):
+		return false
+	set_meta("lock_level_%08x" % int(target.get("reference_id", 0)), 0)
+	var key_name := _record_display_name(int(target.get("key_form_id", 0)))
+	if key_name.is_empty():
+		key_name = "a key"
+	if str(target.get("kind", "")) == "door":
+		_show_interaction_toast("You opened the door with %s." % key_name)
+	else:
+		_show_interaction_toast("Opened the container with a key.")
+	return true
+
 ## Executes the action of one target snapshot; the HUD displays the same snapshot.
 func _activate_target(target: Dictionary) -> void:
 	match str(target.get("action", "none")):
@@ -4964,14 +4979,17 @@ func _activate_target(target: Dictionary) -> void:
 				if not item.is_empty():
 					await _pick_up_placed_item(item)
 		"enter":
+			_use_key_if_locked(target)
 			await _transition_to_linked_cell(target.get("reference", {}))
 		"locked":
 			_show_interaction_toast("Locked")
 		"loot":
+			_use_key_if_locked(target)
 			_open_loot_menu(target)
 		"talk":
 			_begin_dialogue(target.get("actor", {}))
 		"open":
+			_use_key_if_locked(target)
 			var door_reference: Dictionary = target.get("reference", {})
 			var state_key := "door_open_%08x" % int(target.get("reference_id", 0))
 			var is_open := has_meta(state_key) and bool(get_meta(state_key))
