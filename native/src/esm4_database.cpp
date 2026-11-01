@@ -878,6 +878,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             creature.confidence = value[1];
         } else if (tag == "SNAM" && is_creature && subrecord_size >= 5) {
             creature.factions.emplace_back(u32(value), static_cast<std::int8_t>(value[4]));
+        } else if (tag == "CNTO" && is_creature && subrecord_size >= 8) {
+            creature.inventory.push_back({u32(value), static_cast<std::int32_t>(u32(value + 4))});
         } else if (tag == "PKID" && is_creature && subrecord_size >= 4) {
             creature.ai_package_form_ids.push_back(u32(value));
         } else if (tag == "MODL" && is_tree) {

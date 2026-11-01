@@ -214,6 +214,7 @@ struct CreatureBaseRecord {
     std::vector<std::uint32_t> spell_form_ids;
     std::vector<std::uint32_t> ai_package_form_ids;
     std::vector<std::pair<std::uint32_t, std::int8_t>> factions;
+    std::vector<NpcInventoryEntry> inventory;
 };
 
 struct RaceFaceGenRecord {

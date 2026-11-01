@@ -292,6 +292,10 @@ Bytes esm_fixture() {
     subrecord(creature_data, "DATA", creature_stats);
     append(creature_data, id_subrecord("PKID", 0x700));
     append(creature_data, id_subrecord("PKID", 0x701));
+    Bytes creature_items;
+    u32(creature_items, 0x711);
+    u32(creature_items, 3);
+    subrecord(creature_data, "CNTO", creature_items);
     append(records, record("CREA", 0x310, creature_data));
 
     // GMST DATA deliberately precedes EDID, the order the parser must tolerate.
@@ -458,6 +462,8 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(rat->base_health == 4 && rat->attack_damage == 2 && rat->combat_skill == 10);
     CHECK(rat->attributes[0] == 40 && rat->attributes[7] == 47);
     CHECK(rat->ai_package_form_ids == std::vector<std::uint32_t>({0x700, 0x701}));
+    CHECK(rat->inventory.size() == 1);
+    CHECK(rat->inventory[0].form_id == 0x711 && rat->inventory[0].count == 3);
     CHECK(database.find_form_id_by_editor_id("fixturerat") == 0x310);
     CHECK(*database.find_record_type(0x310) == "CREA");
 }
