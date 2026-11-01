@@ -487,6 +487,14 @@ public:
         PackedInt64Array ai_packages;
         for (const auto package_id : creature->ai_package_form_ids) ai_packages.push_back(static_cast<int64_t>(package_id));
         result["ai_package_form_ids"] = ai_packages;
+        Array inventory;
+        for (const auto& item : creature->inventory) {
+            Dictionary entry;
+            entry["form_id"] = static_cast<int64_t>(item.form_id);
+            entry["count"] = item.count;
+            inventory.push_back(entry);
+        }
+        result["inventory"] = inventory;
         return result;
     }
 

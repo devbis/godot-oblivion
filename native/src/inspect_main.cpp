@@ -761,10 +761,22 @@ int main(int argc, char** argv) {
                         std::cout << " creature=" << creature->editor_id << " full=" << creature->name
                                   << " model=" << creature->model_path << " health=" << creature->base_health
                                   << " damage=" << creature->attack_damage << " reach=" << creature->attack_reach << " flags=" << std::hex << creature->flags << " script=" << creature->script_form_id << std::dec << ":" << (data.find_editor_id(creature->script_form_id) ? *data.find_editor_id(creature->script_form_id) : "?") << " level=" << creature->level_or_offset << " fatigue=" << creature->base_fatigue << " str_end=" << int(creature->attributes[0]) << "/" << int(creature->attributes[5]) << " nifz=" << creature->body_part_paths.size()
-                                  << " kffz=" << creature->animation_files.size() << " packages=";
+                                  << " kffz=" << creature->animation_files.size() << " inventory="
+                                  << creature->inventory.size() << " packages=";
                         for (const auto package_id : creature->ai_package_form_ids) {
                             const auto* package_name = data.find_editor_id(package_id);
                             std::cout << std::hex << package_id << std::dec << ':' << (package_name ? *package_name : "?") << ' ';
+                        }
+                        std::cout << " items=";
+                        for (const auto& item : creature->inventory) {
+                            const auto* editor_id = data.find_editor_id(item.form_id);
+                            const auto* item_type = data.find_record_type(item.form_id);
+                            const auto* model_path = data.find_item_model_path(item.form_id, false);
+                            std::cout << " [" << std::hex << item.form_id << std::dec << ':'
+                                      << (item_type ? *item_type : "?") << ':'
+                                      << (editor_id ? *editor_id : "?") << ':'
+                                      << "slots=" << std::hex << data.find_item_biped_slots(item.form_id) << std::dec << ':'
+                                      << (model_path ? *model_path : "") << ']';
                         }
                     }
                     if (const auto* npc = data.find_npc_base(reference.base_form_id)) {
