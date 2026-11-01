@@ -550,9 +550,19 @@ func _physics_process(delta: float) -> void:
 			_last_grounded_position = global_position
 			_has_last_grounded_position = true
 		elif _has_last_grounded_position and global_position.y < _last_grounded_position.y - max_route_drop_m:
-			global_position = _last_grounded_position
-			velocity = Vector3.ZERO
-			_pause_remaining = maxf(_pause_remaining, waypoint_pause_seconds)
+			# A real fall onto stairs or a ledge must not be cancelled: only snap back
+			# when there is no walkable floor below the actor (a genuine void fall).
+			var void_query := PhysicsRayQueryParameters3D.create(
+				global_position + Vector3.UP * 0.1,
+				global_position + Vector3.DOWN * (max_route_drop_m + 2.0),
+				2,
+				[get_rid()]
+			)
+			var void_hit := get_world_3d().direct_space_state.intersect_ray(void_query)
+			if void_hit.is_empty():
+				global_position = _last_grounded_position
+				velocity = Vector3.ZERO
+				_pause_remaining = maxf(_pause_remaining, waypoint_pause_seconds)
 	var horizontal_displacement := global_position - previous_position
 	horizontal_displacement.y = 0.0
 	if not _yield_path.is_empty():
