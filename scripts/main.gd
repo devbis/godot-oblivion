@@ -2837,16 +2837,18 @@ var _skinned_physics_rigs: Array[Dictionary] = []
 func _update_skinned_physics_rigs() -> void:
 	for rig_index in range(_skinned_physics_rigs.size() - 1, -1, -1):
 		var rig: Dictionary = _skinned_physics_rigs[rig_index]
-		var skeleton := rig.get("skeleton") as Skeleton3D
-		if not is_instance_valid(skeleton):
+		var skeleton_value: Variant = rig.get("skeleton")
+		if not is_instance_valid(skeleton_value):
 			_skinned_physics_rigs.remove_at(rig_index)
 			continue
+		var skeleton := skeleton_value as Skeleton3D
 		var to_skeleton := skeleton.global_transform.affine_inverse()
 		for bone_value: Variant in rig.get("bones", []):
 			var bone: Dictionary = bone_value
-			var body := bone.get("body") as RigidBody3D
-			if not is_instance_valid(body):
+			var body_value: Variant = bone.get("body")
+			if not is_instance_valid(body_value):
 				continue
+			var body := body_value as RigidBody3D
 			var pose := to_skeleton * body.global_transform
 			# The skeleton carries the game-unit scale; the pose must not.
 			pose.basis = pose.basis.orthonormalized()
