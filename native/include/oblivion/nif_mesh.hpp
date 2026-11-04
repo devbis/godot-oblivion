@@ -111,6 +111,7 @@ struct NifParticleEmitterData {
     std::array<float, 4> color{};
     std::string volume_shape;
     std::array<float, 3> volume_size{};
+    std::vector<std::array<float, 3>> mesh_emission_points;
     float speed = 0.0f;
     float speed_variation = 0.0f;
     float radius = 0.0f;

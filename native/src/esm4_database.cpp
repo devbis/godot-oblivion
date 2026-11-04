@@ -167,6 +167,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     cell_by_id_.clear();
     cell_by_editor_id_.clear();
     base_model_by_id_.clear();
+    light_by_id_.clear();
     base_editor_id_by_id_.clear();
     record_display_name_by_id_.clear();
     record_icon_path_by_id_.clear();
@@ -243,6 +244,8 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
         form_id_by_editor_id_.try_emplace(lower_ascii(editor_id), form_id);
     for (auto& cell : cells_) {
         for (auto& reference : cell.references) {
+            if (auto light = light_by_id_.find(reference.base_form_id); light != light_by_id_.end())
+                reference.light = light->second;
             if (reference.script_form_id == 0) {
                 if (const auto script = script_form_id_by_id_.find(reference.base_form_id);
                     script != script_form_id_by_id_.end())
@@ -768,6 +771,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
             const std::uint16_t cell_flags = subrecord_size >= 2 ? u16(value) : value[0];
             cell.interior = (cell_flags & 0x0001) != 0;
+        } else if (tag == "DATA" && type == "LIGH" && subrecord_size >= 16) {
+            LightData light;
+            light.radius = u32(value + 4);
+            std::copy_n(value + 8, 3, light.color.begin());
+            light.flags = u32(value + 12);
+            light_by_id_[form_id] = light;
         } else if (tag == "DATA" && is_pathgrid && subrecord_size >= 2) {
             pathgrid_node_count = static_cast<std::int16_t>(u16(value));
         } else if (tag == "PGRP" && is_pathgrid) {

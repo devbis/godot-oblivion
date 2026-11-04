@@ -732,6 +732,19 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                 } else if (auto* cylinder = dynamic_cast<nifly::NiPSysCylinderEmitter*>(emitter)) {
                     output.volume_shape = "cylinder";
                     output.volume_size = {cylinder->radius, cylinder->height, 0.0f};
+                } else if (auto* mesh_emitter = dynamic_cast<nifly::NiPSysMeshEmitter*>(emitter)) {
+                    const auto system_inverse = transform.InverseTransform();
+                    for (uint32_t target_index = 0; target_index < mesh_emitter->meshRefs.GetSize(); ++target_index) {
+                        auto* target = header.GetBlock<nifly::NiAVObject>(mesh_emitter->meshRefs.GetBlockRef(target_index));
+                        auto* shape = dynamic_cast<nifly::NiShape*>(target);
+                        auto* geometry = shape ? shape->GetGeomData() : nullptr;
+                        if (!target || !geometry) continue;
+                        const auto target_transform = global_transform(parents, target, global_transforms);
+                        for (const auto& vertex : geometry->vertices) {
+                            const auto point = to_godot(system_inverse.ApplyTransform(target_transform.ApplyTransform(vertex)));
+                            output.mesh_emission_points.push_back(point);
+                        }
+                    }
                 }
                 output.color = {emitter->color.r, emitter->color.g, emitter->color.b, emitter->color.a};
                 output.speed = emitter->speed;

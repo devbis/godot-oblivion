@@ -19,6 +19,12 @@
 
 namespace oblivion {
 
+struct LightData {
+    std::uint32_t radius = 0;
+    std::array<std::uint8_t, 3> color{};
+    std::uint32_t flags = 0;
+};
+
 struct PlacedReference {
     std::uint32_t form_id = 0;
     std::uint32_t base_form_id = 0;
@@ -36,6 +42,7 @@ struct PlacedReference {
     std::string base_editor_id;
     std::string editor_id;
     std::string model_path;
+    LightData light;
     bool initially_disabled = false;  // record flag 0x0800: a script enables the reference later
     std::uint32_t enable_parent_form_id = 0;  // XESP: the reference follows this one's enabled state (0 when none)
     bool enable_parent_inverted = false;      // XESP flag 1: it is enabled while the parent is disabled
@@ -364,6 +371,7 @@ private:
     std::vector<CellRecord> cells_;
     std::map<std::uint32_t, std::size_t> cell_by_id_;
     std::map<std::uint32_t, std::string> base_model_by_id_;
+    std::map<std::uint32_t, LightData> light_by_id_;
     std::map<std::uint32_t, std::string> base_editor_id_by_id_;
     std::map<std::uint32_t, std::string> record_display_name_by_id_;
     std::map<std::uint32_t, std::string> record_icon_path_by_id_;

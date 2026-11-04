@@ -945,6 +945,10 @@ public:
             item["color"] = Color(emitter.color[0], emitter.color[1], emitter.color[2], emitter.color[3]);
             item["volume_shape"] = as_string(emitter.volume_shape);
             item["volume_size"] = Vector3(emitter.volume_size[0], emitter.volume_size[1], emitter.volume_size[2]);
+            PackedVector3Array mesh_emission_points;
+            for (const auto& point : emitter.mesh_emission_points)
+                mesh_emission_points.push_back(Vector3(point[0], point[1], point[2]));
+            item["mesh_emission_points"] = mesh_emission_points;
             item["speed"] = emitter.speed;
             item["speed_variation"] = emitter.speed_variation;
             item["radius"] = emitter.radius;
@@ -1269,6 +1273,9 @@ private:
         entry["teleport_rotation"] = PackedFloat32Array{reference.teleport_rotation[0], reference.teleport_rotation[1], reference.teleport_rotation[2]};
         entry["editor_id"] = as_string(reference.editor_id);
         entry["model_path"] = as_string(reference.model_path);
+        entry["light_radius"] = static_cast<int64_t>(reference.light.radius);
+        entry["light_color"] = Color(reference.light.color[0] / 255.0f, reference.light.color[1] / 255.0f, reference.light.color[2] / 255.0f);
+        entry["light_flags"] = static_cast<int64_t>(reference.light.flags);
         entry["is_tree"] = reference.is_tree;
         entry["tree_billboard_width"] = reference.tree_billboard_width;
         entry["tree_billboard_height"] = reference.tree_billboard_height;

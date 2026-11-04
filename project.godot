@@ -62,4 +62,5 @@ crouch={
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+limits/opengl/max_lights_per_object=24
 textures/default_filters/use_nearest_mipmap_filter=false

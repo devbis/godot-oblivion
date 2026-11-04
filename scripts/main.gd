@@ -478,6 +478,8 @@ func _set_cell_environment(cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
 	if not is_exterior:
 		_interior_environment.ambient_light_color = cell.get("ambient_color", Color(0.55, 0.62, 0.78)) if bool(cell.get("has_ambient_color", false)) else Color(0.55, 0.62, 0.78)
+		# Godot's ambient term is darker than the original game's interior fill.
+		_interior_environment.ambient_light_color = _interior_environment.ambient_light_color.lerp(Color(0.24, 0.24, 0.24), 0.35)
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
 	key_light.visible = is_exterior
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
@@ -2229,6 +2231,44 @@ func _load_cell_geometry(
 		var reference_distance := reference_transform.origin.distance_to(player.global_position)
 		if (min_distance > 0.0 and reference_distance <= min_distance) or reference_distance > max_distance:
 			continue
+		var light_radius := float(reference.get("light_radius", 0.0))
+		var light_flags := int(reference.get("light_flags", 0))
+		if light_radius > 0.0 and (light_flags & 0x24) == 0 and not _actor_reference_disabled(reference) \
+				and (not is_exterior or reference_distance <= EXTERIOR_REFERENCE_RENDER_DISTANCE):
+			var light := OmniLight3D.new()
+			light.name = "Light_%08X" % int(reference.get("form_id", 0))
+			light.position = reference_transform.origin
+			light.light_color = reference.get("light_color", Color.WHITE)
+			light.omni_range = light_radius * game_units_to_meters
+			light.set_meta("reference_id", int(reference.get("form_id", 0)))
+			cell_visual_root.add_child(light)
+			if str(reference.get("base_editor_id", "")).to_lower() == "prisonlamp190":
+				var fire_path := "Fire/FireTorchSmall.nif"
+				await assets.meshes_for_model(fire_path)
+				if generation != _cell_load_generation:
+					return false
+				var flame_transform := reference_transform
+				for torch_reference_value: Variant in cell.get("references", []):
+					var torch_reference: Dictionary = torch_reference_value
+					if str(torch_reference.get("base_editor_id", "")).to_lower() != "prisoncelltorch01":
+						continue
+					var torch_path := str(torch_reference.get("model_path", ""))
+					if torch_path.is_empty():
+						continue
+					await assets.meshes_for_model(torch_path)
+					if generation != _cell_load_generation:
+						return false
+					var torch_transform := _reference_transform(torch_reference)
+					var torch_metadata: Dictionary = assets.nif_metadata_cache.get(torch_path.to_lower().replace("\\", "/"), {})
+					for node_value: Variant in torch_metadata.get("nodes", []):
+						var node: Dictionary = node_value
+						if str(node.get("name", "")) != "FlameNode2":
+							continue
+						var flame_position: Vector3 = node.get("global_translation", Vector3.ZERO)
+						flame_transform = Transform3D(torch_transform.basis, torch_transform * flame_position)
+						break
+					break
+				_add_nif_particles(assets.nif_metadata_cache.get(fire_path.to_lower(), {}), flame_transform)
 		if is_exterior and bool(reference.get("is_tree", false)):
 			var tree_distance := reference_transform.origin.distance_to(player.global_position)
 			if tree_distance > EXTERIOR_TREE_RENDER_DISTANCE:
@@ -2357,6 +2397,9 @@ func _load_cell_geometry(
 		for mesh_index in range(meshes.size()):
 			var mesh_entry: Dictionary = meshes[mesh_index]
 			if bool(mesh_entry.get("editor_marker", false)):
+				continue
+			# Particle NIFs may contain untextured emitter volumes or invisible helper geometry.
+			if not (physics_metadata.get("particle_emitters", []) as Array).is_empty() and str(mesh_entry.get("diffuse_texture_path", "")).is_empty():
 				continue
 			var model_key := model_path.to_lower().replace("\\", "/")
 			var can_batch := (
@@ -7682,33 +7725,49 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		if texture == null:
 			continue
 		var particles := GPUParticles3D.new()
-		particles.transform = reference_transform.translated_local(emitter.get("position", Vector3.ZERO))
+		# Particle shaders operate in Godot units; node scale is not reliably applied to
+		# world-space particles. Convert emitter dimensions and speed explicitly.
+		var unit_scale := reference_transform.basis.get_scale().x
+		var emitter_position: Vector3 = emitter.get("position", Vector3.ZERO)
+		particles.transform = Transform3D(reference_transform.basis.orthonormalized(), reference_transform * emitter_position)
 		particles.amount = clampi(ceili(max_rate * lifetime), 1, 4096)
 		particles.lifetime = lifetime
 		var capacity_rate := float(particles.amount) / lifetime
 		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
 		particles.local_coords = not bool(emitter.get("world_space", false))
 		var process := ParticleProcessMaterial.new()
-		var volume: Vector3 = emitter.get("volume_size", Vector3.ZERO)
-		match str(emitter.get("volume_shape", "")):
-			"box":
-				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-				process.emission_box_extents = Vector3(absf(volume.x), absf(volume.z), absf(volume.y)) * 0.5
-			"sphere":
-				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
-				process.emission_sphere_radius = absf(volume.x)
-			"cylinder":
-				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
-				process.emission_ring_axis = Vector3.UP
-				process.emission_ring_radius = absf(volume.x)
-				process.emission_ring_inner_radius = 0.0
-				process.emission_ring_height = absf(volume.y)
+		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
+		var mesh_points: PackedVector3Array = emitter.get("mesh_emission_points", PackedVector3Array())
+		if not mesh_points.is_empty():
+			var side := ceili(sqrt(float(mesh_points.size())))
+			var point_image := Image.create(side, side, false, Image.FORMAT_RGBF)
+			for point_index in mesh_points.size():
+				var point := mesh_points[point_index] * unit_scale
+				point_image.set_pixel(point_index % side, point_index / side, Color(point.x, point.y, point.z, 1.0))
+			var point_texture := ImageTexture.create_from_image(point_image)
+			process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINTS
+			process.emission_point_texture = point_texture
+			process.emission_point_count = mesh_points.size()
+		else:
+			match str(emitter.get("volume_shape", "")):
+				"box":
+					process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+					process.emission_box_extents = Vector3(absf(volume.x), absf(volume.z), absf(volume.y)) * 0.5
+				"sphere":
+					process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+					process.emission_sphere_radius = absf(volume.x)
+				"cylinder":
+					process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+					process.emission_ring_axis = Vector3.UP
+					process.emission_ring_radius = absf(volume.x)
+					process.emission_ring_inner_radius = 0.0
+					process.emission_ring_height = absf(volume.y)
 		var angle := float(emitter.get("declination", 0.0))
 		var planar := float(emitter.get("planar_angle", 0.0))
 		process.direction = Vector3(sin(angle) * cos(planar), cos(angle), -sin(angle) * sin(planar))
 		process.spread = rad_to_deg(absf(float(emitter.get("declination_variation", 0.0))))
-		var speed := float(emitter.get("speed", 0.0))
-		var variation := absf(float(emitter.get("speed_variation", 0.0)))
+		var speed := float(emitter.get("speed", 0.0)) * unit_scale
+		var variation := absf(float(emitter.get("speed_variation", 0.0))) * unit_scale
 		process.initial_velocity_min = maxf(0.0, speed - variation)
 		process.initial_velocity_max = maxf(process.initial_velocity_min, speed + variation)
 		process.gravity = Vector3.ZERO
@@ -7734,7 +7793,7 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		material.albedo_color = emitter.get("color", Color.WHITE)
 		material.vertex_color_use_as_albedo = true
 		var quad := QuadMesh.new()
-		quad.size = Vector2.ONE * radius * 2.0
+		quad.size = Vector2.ONE * radius * 2.0 * unit_scale
 		quad.material = material
 		particles.draw_pass_1 = quad
 		cell_visual_root.add_child(particles)

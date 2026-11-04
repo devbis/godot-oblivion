@@ -27,6 +27,7 @@
 #include <Geometry.hpp>
 #include <NifFile.hpp>
 #include <Nodes.hpp>
+#include <Particles.hpp>
 
 namespace {
 
@@ -846,17 +847,45 @@ int main(int argc, char** argv) {
                 for (int asset_index = 3; asset_index < argc; ++asset_index) {
                     const std::string asset_path = argv[asset_index];
                     const auto source = data.read_asset(asset_path);
+                    nifly::NifFile file;
+                    oblivion::load_nif_file(source, file);
                     const auto meshes = oblivion::decode_nif_meshes(source);
                     const auto particle_asset = oblivion::decode_nif_asset(source);
                     for (const auto& emitter : particle_asset.particle_emitters)
                         std::cout << "  emitter " << emitter.name << " texture=" << emitter.texture_path
                                   << " rate=" << emitter.birth_rate << " life=" << emitter.lifetime
-                                  << " radius=" << emitter.radius << '\n';
+                                  << " radius=" << emitter.radius << " position=" << emitter.position[0] << ','
+                                  << emitter.position[1] << ',' << emitter.position[2] << " volume="
+                                  << emitter.volume_size[0] << ',' << emitter.volume_size[1] << ',' << emitter.volume_size[2] << '\n';
                     for (const auto& emitter : particle_asset.particle_emitters)
                         for (const auto& key : emitter.birth_rate_keys)
                             std::cout << "    rate key " << key[0] << ": " << key[1] << '\n';
-                    nifly::NifFile file;
-                    oblivion::load_nif_file(source, file);
+                    for (const auto& emitter : particle_asset.particle_emitters) {
+                        if (emitter.mesh_emission_points.empty()) continue;
+                        std::array<float, 3> minimum{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+                        std::array<float, 3> maximum{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+                        for (const auto& point : emitter.mesh_emission_points)
+                            for (std::size_t axis = 0; axis < 3; ++axis) {
+                                minimum[axis] = std::min(minimum[axis], point[axis]);
+                                maximum[axis] = std::max(maximum[axis], point[axis]);
+                            }
+                        std::cout << "    mesh emission points=" << emitter.mesh_emission_points.size() << " bounds=["
+                                  << minimum[0] << ',' << minimum[1] << ',' << minimum[2] << "]..["
+                                  << maximum[0] << ',' << maximum[1] << ',' << maximum[2] << "]\n";
+                    }
+                    for (uint32_t block = 0; block < file.GetHeader().GetNumBlocks(); ++block) {
+                        auto* emitter = file.GetHeader().GetBlock<nifly::NiPSysMeshEmitter>(block);
+                        if (!emitter) continue;
+                        std::cout << "    mesh emitter " << emitter->name.get() << " targets=" << emitter->meshRefs.GetSize() << '\n';
+                        for (uint32_t target_index = 0; target_index < emitter->meshRefs.GetSize(); ++target_index) {
+                            const auto target_ref = emitter->meshRefs.GetBlockRef(target_index);
+                            auto* target = file.GetHeader().GetBlock<nifly::NiAVObject>(target_ref);
+                            if (!target) continue;
+                            const auto transform = target->GetTransformToParent();
+                            std::cout << "      " << target->name.get() << " local=" << transform.translation.x << ','
+                                      << transform.translation.y << ',' << transform.translation.z << '\n';
+                        }
+                    }
                     std::size_t vertex_count = 0;
                     std::size_t triangle_count = 0;
                     std::array<float, 3> bounds_min{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
@@ -1005,7 +1034,7 @@ int main(int argc, char** argv) {
                       << "  " << (cell.editor_id.empty() ? "(no editor ID)" : cell.editor_id)
                       << "  " << cell.display_name << "  refs=" << cell.references.size() << '\n';
             for (const auto& reference : cell.references) {
-                if (reference.model_path.empty() && !reference.teleport_cell_id) continue;
+                if (reference.model_path.empty() && !reference.teleport_cell_id && !reference.light.radius) continue;
                 std::cout << "    ref " << std::hex << std::setw(8) << std::setfill('0')
                           << reference.form_id << " base=" << std::setw(8) << reference.base_form_id
                           << std::dec << " type=" << reference.record_type
