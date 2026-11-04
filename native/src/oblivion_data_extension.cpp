@@ -1241,6 +1241,8 @@ private:
         result["editor_id"] = as_string(cell.editor_id);
         result["display_name"] = as_string(cell.display_name);
         result["interior"] = cell.interior;
+        result["has_ambient_color"] = cell.has_ambient_color;
+        result["ambient_color"] = Color(cell.ambient_color[0] / 255.0f, cell.ambient_color[1] / 255.0f, cell.ambient_color[2] / 255.0f);
         result["exterior_grid_cell"] = cell.exterior_grid_cell;
         result["has_grid"] = cell.has_grid;
         result["has_water_level"] = cell.has_water_level;

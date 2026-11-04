@@ -282,6 +282,8 @@ struct CellRecord {
     std::string editor_id;
     std::string display_name;
     bool interior = true;
+    bool has_ambient_color = false;
+    std::array<std::uint8_t, 3> ambient_color{};
     bool exterior_grid_cell = false;
     bool has_grid = false;
     bool has_water_level = false;

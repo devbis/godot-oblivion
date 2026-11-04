@@ -778,6 +778,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             cell.grid_x = static_cast<std::int32_t>(u32(value));
             cell.grid_y = static_cast<std::int32_t>(u32(value + 4));
             cell.has_grid = true;
+        } else if (tag == "XCLL" && is_cell && subrecord_size >= 12) {
+            std::copy_n(value, 3, cell.ambient_color.begin());
+            cell.has_ambient_color = true;
         } else if (tag == "XCLW" && is_cell && subrecord_size >= 4) {
             cell.water_height = f32(value);
             cell.has_water_level = true;

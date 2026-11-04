@@ -476,6 +476,8 @@ func has_physics_group(reference_id: int) -> bool:
 
 func _set_cell_environment(cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
+	if not is_exterior:
+		_interior_environment.ambient_light_color = cell.get("ambient_color", Color(0.55, 0.62, 0.78)) if bool(cell.get("has_ambient_color", false)) else Color(0.55, 0.62, 0.78)
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
 	key_light.visible = is_exterior
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
@@ -678,7 +680,6 @@ func _load_game_data() -> void:
 	player.capture_mouse()
 	_start_deferred_cell_loading()
 	_log_runtime_spawn_positions()
-
 func _initialize_player_game_state() -> void:
 	var player_form_id := int(data_reader.find_form_id_by_editor_id("Player"))
 	if player_form_id <= 0:
