@@ -73,6 +73,7 @@ const FATIGUE_RETURN_BASE_SETTING := "fFatigueReturnBase"
 const FATIGUE_RETURN_MULT_SETTING := "fFatigueReturnMult"
 const FATIGUE_RUN_BASE_SETTING := "fFatigueRunBase"
 const ATTRIBUTE_STRENGTH := 0
+const ATTRIBUTE_AGILITY := 3
 const ATTRIBUTE_ENDURANCE := 5
 const SKILL_BLADE := 2
 const SKILL_BLOCK := 3
@@ -172,6 +173,9 @@ func update(delta: float) -> void:
 	for actor: Dictionary in host.get("_npc_actors"):
 		var root := actor.get("root") as Node3D
 		if not is_instance_valid(root) or bool(root.get("inactive")) or not root.visible or bool(actor.get("dead", false)):
+			continue
+		_advance_spell_damage(actor, delta)
+		if bool(actor.get("dead", false)):
 			continue
 		_advance_actor_fatigue(actor, root, delta)
 		if str(actor.get("knockdown_state", "")) in ["falling", "downed", "getting_up"]:
@@ -291,6 +295,11 @@ func _skill_value(actor: Dictionary, index: int) -> float:
 	var skills: PackedInt64Array = actor.get("skills", PackedInt64Array())
 	return minf(float(skills[index]) if skills.size() > index else 30.0, 100.0)
 
+## Luck affects combat effectiveness, but not the skill rank used to unlock perks.
+func _effective_combat_skill(actor: Dictionary, index: int) -> float:
+	return clampf(_skill_value(actor, index) + _setting_or("iActorLuckSkillBase", -20.0) \
+		+ _attribute_value(actor, ATTRIBUTE_LUCK) * _setting_or("fActorLuckSkillMult", 0.4), 0.0, 100.0)
+
 ## Select the skill-tier variant only when its matching Oblivion rank setting is reached.
 func _power_attack_animation(actor: Dictionary, prefix: String, suffix: String) -> String:
 	var variant: Dictionary = POWER_ATTACK_SKILL_VARIANTS.get(suffix, {})
@@ -324,11 +333,13 @@ func _hit_damage(actor: Dictionary, power: bool) -> float:
 		return float(actor.creature_attack_damage) * fatigue_modifier
 	if record.is_empty():
 		var hand_term := (_setting("fHandDamageStrengthBase") + _setting("fHandDamageStrengthMult") * strength * 0.01) \
-			* (_setting("fHandDamageSkillBase") + _setting("fHandDamageSkillMult") * _skill_value(actor, SKILL_HAND_TO_HAND) * 0.01) \
+			* (_setting("fHandDamageSkillBase") + _setting("fHandDamageSkillMult") * _effective_combat_skill(actor, SKILL_HAND_TO_HAND) * 0.01) \
 			* fatigue_modifier
 		var minimum := _setting("fHandHealthMin")
 		return minimum + minf(hand_term, 1.0) * (_setting("fHandHealthMax") - minimum)
-	var skill := _skill_value(actor, int(WEAPON_SKILLS.get(_weapon_type(actor), SKILL_BLADE)))
+	var skill := _effective_combat_skill(actor, int(WEAPON_SKILLS.get(_weapon_type(actor), SKILL_BLADE)))
+	if _weapon_type(actor) == 5:
+		strength = _attribute_value(actor, ATTRIBUTE_AGILITY)
 	var damage := float(record.get("damage", 0.0)) * _setting("fDamageWeaponMult")
 	damage *= _setting("fDamageWeaponConditionBase") + _setting("fDamageWeaponConditionMult")  # an undamaged weapon
 	damage *= _setting("fDamageSkillBase") + _setting("fDamageSkillMult") * skill * 0.01
@@ -446,6 +457,49 @@ func receive_player_hit(
 	_react_to_hit(actor, source_position, received_fatigue, fight_back_target, _player_base_form_id(), blocked)
 	_call_allies(actor, _player_attacker())
 	return blocked
+
+## Apply damage-over-time effects without treating each frame as a new physical hit.
+func add_player_spell_effects(reference_id: int, effects: Array, range_type: int) -> void:
+	var actor := _actor_by_id(reference_id)
+	if actor.is_empty() or bool(actor.get("dead", false)):
+		return
+	var active: Array = actor.get("spell_damage", [])
+	for value: Variant in effects:
+		var effect: Dictionary = value
+		if int(effect.get("range_type", -1)) != range_type:
+			continue
+		if str(effect.get("code", "")) not in ["FIDG", "FRDG", "SHDG", "DGHE"]:
+			continue
+		var magnitude := maxf(0.0, float(effect.get("magnitude", 0)))
+		var flags := int(effect.get("magic_effect_flags", 0))
+		var duration := 0.0 if (flags & (1 << 7)) != 0 else float(effect.get("duration", 0))
+		if duration <= 0.0:
+			_apply_spell_health_damage(actor, magnitude)
+		else:
+			active.push_back({"rate": magnitude, "remaining": duration})
+	actor["spell_damage"] = active
+
+func _advance_spell_damage(actor: Dictionary, delta: float) -> void:
+	var active: Array = actor.get("spell_damage", [])
+	for i in range(active.size() - 1, -1, -1):
+		var effect: Dictionary = active[i]
+		var elapsed := minf(delta, float(effect.remaining))
+		_apply_spell_health_damage(actor, float(effect.rate) * elapsed)
+		effect.remaining = float(effect.remaining) - elapsed
+		if float(effect.remaining) <= 0.0 or bool(actor.get("dead", false)):
+			active.remove_at(i)
+
+func _apply_spell_health_damage(actor: Dictionary, amount: float) -> void:
+	var health: Dictionary = actor.get("health", {})
+	if health.is_empty() or amount <= 0.0 or bool(actor.get("dead", false)):
+		return
+	var remaining := maxf(0.0, float(health.get("current", 0.0)) - amount)
+	if bool(actor.get("essential", false)):
+		remaining = maxf(remaining, 1.0)
+	health["current"] = remaining
+	actor["health"] = health
+	if remaining <= 0.0:
+		kill_actor(actor)
 
 ## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
 func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) -> void:

@@ -245,6 +245,8 @@ Bytes esm_fixture() {
 
     Bytes race_data;
     append(race_data, string_subrecord("EDID", "FixtureRace"));
+    Bytes race_stats = {14, 10, 16, 5, 0xff, 0, 0xff, 0, 0xff, 0, 0xff, 0, 0xff, 0};
+    subrecord(race_data, "DATA", race_stats);
     subrecord(race_data, "FNAM", {});
     append(race_data, float_subrecord("FGGS", {0.25f, -0.5f}));
     append(race_data, float_subrecord("FGGA", {0.75f}));
@@ -451,6 +453,8 @@ void test_esm4(const std::filesystem::path& directory) {
 
     const auto* fixture_race = database.find_race_face_gen(0x300);
     CHECK(fixture_race != nullptr);
+    CHECK(fixture_race->skill_bonuses[2] == 10 && fixture_race->skill_bonuses[4] == 5);
+    CHECK(fixture_race->skill_bonuses[0] == 0);
     CHECK(fixture_race->face_symmetric == std::vector<float>({0.25f, -0.5f}));
     CHECK(fixture_race->face_asymmetric == std::vector<float>({0.75f}));
     const auto* fixture_male = database.find_npc_base(0x301);

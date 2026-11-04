@@ -1011,6 +1011,13 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             if (subrecord_size >= 48) combat_style.block_skill_modifier_base = f32(value + 44);
             if (subrecord_size >= 52) combat_style.block_under_attack_mult = f32(value + 48);
             if (subrecord_size >= 56) combat_style.block_not_under_attack_mult = f32(value + 52);
+        } else if (tag == "DATA" && is_race && subrecord_size >= 14) {
+            // Race DATA stores seven signed actor-value/bonus byte pairs. Skills are actor values 12..32.
+            for (std::size_t i = 0; i < 7; ++i) {
+                const int skill = static_cast<std::int8_t>(value[i * 2]) - 12;
+                if (skill >= 0 && skill < static_cast<int>(race_face_gen.skill_bonuses.size()))
+                    race_face_gen.skill_bonuses[static_cast<std::size_t>(skill)] = static_cast<std::int8_t>(value[i * 2 + 1]);
+            }
         } else if (tag == "VNAM" && is_race && subrecord_size >= 8) {
             race_face_gen.voice_form_id_male = u32(value);
             race_face_gen.voice_form_id_female = u32(value + 4);

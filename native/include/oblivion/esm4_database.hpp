@@ -219,6 +219,7 @@ struct CreatureBaseRecord {
 
 struct RaceFaceGenRecord {
     std::uint32_t form_id = 0;
+    std::array<std::int8_t, 21> skill_bonuses{};
     std::string display_name;
     std::uint32_t voice_form_id_male = 0;
     std::uint32_t voice_form_id_female = 0;

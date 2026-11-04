@@ -533,6 +533,13 @@ public:
         for (int64_t i = 0; i < static_cast<int64_t>(npc->skills.size()); ++i)
             skills.set(i, npc->skills[static_cast<std::size_t>(i)]);
         result["skills"] = skills;
+        PackedInt64Array racial_skill_bonuses;
+        if (race) {
+            racial_skill_bonuses.resize(static_cast<int64_t>(race->skill_bonuses.size()));
+            for (int64_t i = 0; i < static_cast<int64_t>(race->skill_bonuses.size()); ++i)
+                racial_skill_bonuses.set(i, race->skill_bonuses[static_cast<std::size_t>(i)]);
+        }
+        result["racial_skill_bonuses"] = racial_skill_bonuses;
         result["female"] = (npc->flags & 0x000001) != 0;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
         result["combat_style_form_id"] = static_cast<int64_t>(npc->combat_style_form_id);

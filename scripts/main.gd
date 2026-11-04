@@ -689,6 +689,14 @@ func _initialize_player_game_state() -> void:
 	if _player_base_record.is_empty():
 		push_warning("Could not read actor values and inventory from the installed game's Player base record")
 		return
+	# During the prison tutorial the player has no chosen class. The NPC record stores
+	# the unmodified starting skills; race bonuses are applied once at initialization.
+	var starting_skills: PackedInt64Array = _player_base_record.get("skills", PackedInt64Array())
+	var race_bonuses: PackedInt64Array = _player_base_record.get("racial_skill_bonuses", PackedInt64Array())
+	if starting_skills.size() == race_bonuses.size():
+		for i in starting_skills.size():
+			starting_skills[i] = clampi(starting_skills[i] + race_bonuses[i], 0, 100)
+		_player_base_record["skills"] = starting_skills
 	_player_actor_values_ready = _player_actor_values.initialize_from_base(_player_base_record)
 	_player_game_settings.clear()
 	for setting_name: String in PLAYER_DYNAMIC_GAME_SETTINGS:
@@ -5381,7 +5389,7 @@ func _cast_selected_spell() -> void:
 	if effects.is_empty():
 		_show_interaction_toast("Spell has no effects")
 		return
-	# Touch and target spells are cast for their animation and projectile; only self-range restore effects have an effect yet.
+	# Self-range restore effects are applied here; targeted effects are applied on impact.
 	var cast_range := int((effects[0] as Dictionary).get("range_type", 0))
 	if cast_range == 0:
 		for effect_value: Variant in effects:
@@ -5812,15 +5820,17 @@ func _player_aim(muzzle_offset: Vector3) -> Dictionary:
 	var direction := target - origin
 	return {"origin": origin, "direction": forward if direction.length() < 0.5 else direction.normalized(), "hit": hit}
 
-func _launch_projectile(projectile: Node3D, aim: Dictionary) -> void:
+func _launch_projectile(projectile: Node3D, aim: Dictionary, spell_effects: Array = []) -> void:
 	var excluded: Array[RID] = [player.get_rid()]
 	projectile.excluded_bodies = excluded
 	var projectile_kind := int(projectile.get("kind"))
 	var is_spell := projectile_kind == CombatProjectile.Kind.SPELL
 	var hit_health_damage := _player_hit_health_damage() if projectile_kind == CombatProjectile.Kind.ARROW else 0.0
-	var hit_fatigue_damage := NpcCombat.FATIGUE_HIT_MIN if is_spell else _player_hit_fatigue_damage(hit_health_damage)
+	var hit_fatigue_damage := 0.0 if is_spell else _player_hit_fatigue_damage(hit_health_damage)
 	projectile.connect(&"impacted", func(hit_position: Vector3, collider: Object) -> void:
 		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell, hit_health_damage)
+		if is_spell:
+			_apply_player_spell_to_collider(collider, spell_effects, 2)
 		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
 			AudioManager.play_arrow_impact(hit_position)
 	)
@@ -6032,11 +6042,19 @@ func _provoke_actor(
 		fatigue_damage if fatigue_damage >= 0.0 else _player_hit_fatigue_damage(health_damage), allow_block, health_damage
 	)
 
+func _apply_player_spell_to_collider(collider: Object, effects: Array, range_type: int) -> void:
+	var node := collider as Node
+	if node == null or not node.has_meta("reference_id"):
+		return
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	_npc_combat.add_player_spell_effects(int(node.get_meta("reference_id")), effects, range_type)
+
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
 	if effects.is_empty():
 		return
 	var effect_code := str((effects[0] as Dictionary).get("code", ""))
-	var pending_cast := {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code)}
+	var pending_cast := {"range_type": cast_range, "color": CombatProjectile.color_for_effect(effect_code), "effects": effects.duplicate(true)}
 	if player.is_first_person:
 		if _arms == null or not _arms.built:
 			return
@@ -6068,10 +6086,19 @@ func _play_spell_cast(cast_range: int, effects: Array) -> void:
 func _release_pending_cast() -> void:
 	var cast := _pending_cast
 	_pending_cast = {}
-	if cast.is_empty() or int(cast.range_type) != 2:
+	if cast.is_empty():
+		return
+	if int(cast.range_type) == 1:
+		var touch_aim := _player_aim(Vector3(-0.16, -0.12, -0.5))
+		var hit: Dictionary = touch_aim.hit
+		if not hit.is_empty() and player.global_position.distance_to(hit.position) <= MELEE_BASE_REACH_M + 0.5:
+			_provoke_actor(hit.get("collider"), 0.0)
+			_apply_player_spell_to_collider(hit.get("collider"), cast.effects, 1)
+		return
+	if int(cast.range_type) != 2:
 		return
 	var aim := _player_aim(Vector3(-0.16, -0.12, -0.5))
-	_launch_projectile(CombatProjectile.new_spell_bolt(cast.color, (aim.direction as Vector3) * SPELL_BOLT_SPEED_MPS), aim)
+	_launch_projectile(CombatProjectile.new_spell_bolt(cast.color, (aim.direction as Vector3) * SPELL_BOLT_SPEED_MPS), aim, cast.effects)
 
 var _weapon_switch_busy := false
 
