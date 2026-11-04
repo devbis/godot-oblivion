@@ -738,8 +738,17 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                 output.speed_variation = emitter->speedVariation;
                 output.radius = emitter->radius;
                 output.lifetime = emitter->lifeSpan;
+                for (const auto& other_ref : system->modifierRefs) {
+                    auto* grow_fade = header.GetBlock<nifly::NiPSysGrowFadeModifier>(other_ref);
+                    if (grow_fade && grow_fade->isActive) {
+                        output.grow_time = grow_fade->growTime;
+                        output.fade_time = grow_fade->fadeTime;
+                    }
+                }
                 output.declination = emitter->declination;
                 output.declination_variation = emitter->declinationVariation;
+                output.planar_angle = emitter->planarAngle;
+                output.world_space = system->isWorldSpace;
                 auto controller_ref = system->controllerRef;
                 std::unordered_set<uint32_t> visited_controllers;
                 while (!controller_ref.IsEmpty() && visited_controllers.insert(controller_ref.index).second) {
@@ -747,10 +756,16 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                     if (!controller) break;
                     auto* emitter_controller = dynamic_cast<nifly::NiPSysEmitterCtlr*>(controller);
                     if (emitter_controller && emitter_controller->modifierName.get() == output.name) {
+                        output.rate_flags = emitter_controller->flags;
+                        output.rate_start = emitter_controller->startTime;
+                        output.rate_stop = emitter_controller->stopTime;
+                        output.rate_frequency = emitter_controller->frequency;
+                        output.rate_phase = emitter_controller->phase;
                         auto* data = header.GetBlock<nifly::NiPSysEmitterCtlrData>(emitter_controller->dataRef);
                         if (data && data->floatKeys.GetNumKeys() > 0)
                             output.birth_rate = data->floatKeys.GetKey(0).value;
                         if (data) for (uint32_t key_index = 0; key_index < data->floatKeys.GetNumKeys(); ++key_index) {
+                            output.rate_interpolation = data->floatKeys.GetInterpolationType();
                             const auto key = data->floatKeys.GetKey(key_index);
                             output.birth_rate_keys.push_back({key.time, key.value});
                         }
@@ -760,6 +775,7 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                             output.birth_rate = float_data && float_data->data.GetNumKeys() > 0
                                 ? float_data->data.GetKey(0).value : interpolator->floatValue;
                             if (float_data && float_data->data.GetNumKeys() > 0) {
+                                output.rate_interpolation = float_data->data.GetInterpolationType();
                                 output.birth_rate_keys.clear();
                                 for (uint32_t key_index = 0; key_index < float_data->data.GetNumKeys(); ++key_index) {
                                     const auto key = float_data->data.GetKey(key_index);

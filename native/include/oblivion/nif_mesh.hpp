@@ -115,10 +115,20 @@ struct NifParticleEmitterData {
     float speed_variation = 0.0f;
     float radius = 0.0f;
     float lifetime = 0.0f;
+    float grow_time = 0.0f;
+    float fade_time = 0.0f;
     float birth_rate = 0.0f;
     std::vector<std::array<float, 2>> birth_rate_keys;
+    std::uint32_t rate_interpolation = 1;
+    std::uint16_t rate_flags = 4;
+    float rate_start = 0.0f;
+    float rate_stop = 0.0f;
+    float rate_frequency = 1.0f;
+    float rate_phase = 0.0f;
     float declination = 0.0f;
     float declination_variation = 0.0f;
+    float planar_angle = 0.0f;
+    bool world_space = false;
 };
 
 struct NifAssetData {

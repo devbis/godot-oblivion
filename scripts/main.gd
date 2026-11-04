@@ -7670,18 +7670,24 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		var emitter: Dictionary = emitter_value
 		var lifetime := float(emitter.get("lifetime", 0.0))
 		var rate := float(emitter.get("birth_rate", 0.0))
+		var rate_keys: PackedFloat32Array = emitter.get("birth_rate_keys", PackedFloat32Array())
+		var max_rate := rate
+		for i in range(1, rate_keys.size(), 2):
+			max_rate = maxf(max_rate, rate_keys[i])
 		var radius := float(emitter.get("radius", 0.0))
 		var texture_path := str(emitter.get("texture_path", "")).replace("\\", "/")
-		if lifetime <= 0.0 or rate <= 0.0 or radius <= 0.0 or texture_path.is_empty():
+		if lifetime <= 0.0 or max_rate <= 0.0 or radius <= 0.0 or texture_path.is_empty():
 			continue
 		var texture := assets.texture_for_path(texture_path) as Texture2D
 		if texture == null:
 			continue
 		var particles := GPUParticles3D.new()
 		particles.transform = reference_transform.translated_local(emitter.get("position", Vector3.ZERO))
-		particles.amount = clampi(ceili(rate * lifetime), 1, 4096)
+		particles.amount = clampi(ceili(max_rate * lifetime), 1, 4096)
 		particles.lifetime = lifetime
-		particles.local_coords = false
+		var capacity_rate := float(particles.amount) / lifetime
+		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
+		particles.local_coords = not bool(emitter.get("world_space", false))
 		var process := ParticleProcessMaterial.new()
 		var volume: Vector3 = emitter.get("volume_size", Vector3.ZERO)
 		match str(emitter.get("volume_shape", "")):
@@ -7698,13 +7704,27 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 				process.emission_ring_inner_radius = 0.0
 				process.emission_ring_height = absf(volume.y)
 		var angle := float(emitter.get("declination", 0.0))
-		process.direction = Vector3(sin(angle), cos(angle), 0.0)
+		var planar := float(emitter.get("planar_angle", 0.0))
+		process.direction = Vector3(sin(angle) * cos(planar), cos(angle), -sin(angle) * sin(planar))
 		process.spread = rad_to_deg(absf(float(emitter.get("declination_variation", 0.0))))
 		var speed := float(emitter.get("speed", 0.0))
 		var variation := absf(float(emitter.get("speed_variation", 0.0)))
 		process.initial_velocity_min = maxf(0.0, speed - variation)
 		process.initial_velocity_max = maxf(process.initial_velocity_min, speed + variation)
 		process.gravity = Vector3.ZERO
+		var grow := clampf(float(emitter.get("grow_time", 0.0)) / lifetime, 0.0, 1.0)
+		var fade := clampf(float(emitter.get("fade_time", 0.0)) / lifetime, 0.0, 1.0)
+		if grow > 0.0 or fade > 0.0:
+			var size_curve := Curve.new()
+			size_curve.add_point(Vector2(0.0, 0.0 if grow > 0.0 else 1.0))
+			if grow > 0.0 and grow < 1.0:
+				size_curve.add_point(Vector2(grow, 1.0))
+			if fade > 0.0 and 1.0 - fade > grow:
+				size_curve.add_point(Vector2(1.0 - fade, 1.0))
+			size_curve.add_point(Vector2(1.0, 0.0 if fade > 0.0 else 1.0))
+			var curve_texture := CurveTexture.new()
+			curve_texture.curve = size_curve
+			process.scale_curve = curve_texture
 		particles.process_material = process
 		var material := StandardMaterial3D.new()
 		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -7718,6 +7738,34 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		quad.material = material
 		particles.draw_pass_1 = quad
 		cell_visual_root.add_child(particles)
+		if rate_keys.size() >= 4:
+			_install_particle_rate_animation(particles, emitter, rate_keys, capacity_rate)
+
+func _install_particle_rate_animation(particles: GPUParticles3D, emitter: Dictionary, keys: PackedFloat32Array, capacity_rate: float) -> void:
+	var start := float(emitter.get("rate_start", keys[0]))
+	var stop := float(emitter.get("rate_stop", keys[keys.size() - 2]))
+	if not is_finite(start) or not is_finite(stop) or stop <= start:
+		return
+	var clip := Animation.new()
+	clip.length = stop - start
+	match int(emitter.get("rate_flags", 4)) & 6:
+		0: clip.loop_mode = Animation.LOOP_LINEAR
+		2: clip.loop_mode = Animation.LOOP_PINGPONG
+	var track := clip.add_track(Animation.TYPE_VALUE)
+	clip.track_set_path(track, NodePath(".:amount_ratio"))
+	if int(emitter.get("rate_interpolation", 1)) == 5:
+		clip.track_set_interpolation_type(track, Animation.INTERPOLATION_NEAREST)
+	for i in range(0, keys.size() - 1, 2):
+		clip.track_insert_key(track, clampf(keys[i] - start, 0.0, clip.length), clampf(keys[i + 1] / capacity_rate, 0.0, 1.0))
+	var library := AnimationLibrary.new()
+	library.add_animation("rate", clip)
+	var animator := AnimationPlayer.new()
+	particles.add_child(animator)
+	animator.root_node = NodePath("..")
+	animator.add_animation_library("", library)
+	animator.speed_scale = float(emitter.get("rate_frequency", 1.0))
+	animator.play("rate")
+	animator.seek(clampf(float(emitter.get("rate_phase", 0.0)) - start, 0.0, clip.length), true)
 
 func _install_nif_animations(animated_root: Node3D, metadata: Dictionary, node_hosts: Dictionary) -> void:
 	var sequences: Array = metadata.get("animations", [])

@@ -949,9 +949,25 @@ public:
             item["speed_variation"] = emitter.speed_variation;
             item["radius"] = emitter.radius;
             item["lifetime"] = emitter.lifetime;
+            item["grow_time"] = emitter.grow_time;
+            item["fade_time"] = emitter.fade_time;
             item["birth_rate"] = emitter.birth_rate;
+            PackedFloat32Array rate_keys;
+            for (const auto& key : emitter.birth_rate_keys) {
+                rate_keys.push_back(key[0]);
+                rate_keys.push_back(key[1]);
+            }
+            item["birth_rate_keys"] = rate_keys;
+            item["rate_interpolation"] = emitter.rate_interpolation;
+            item["rate_flags"] = emitter.rate_flags;
+            item["rate_start"] = emitter.rate_start;
+            item["rate_stop"] = emitter.rate_stop;
+            item["rate_frequency"] = emitter.rate_frequency;
+            item["rate_phase"] = emitter.rate_phase;
             item["declination"] = emitter.declination;
             item["declination_variation"] = emitter.declination_variation;
+            item["planar_angle"] = emitter.planar_angle;
+            item["world_space"] = emitter.world_space;
             particle_emitters.push_back(item);
         }
         result["particle_emitters"] = particle_emitters;
