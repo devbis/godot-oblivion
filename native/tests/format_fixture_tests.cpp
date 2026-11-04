@@ -238,6 +238,10 @@ Bytes esm_fixture() {
     append(stat_data, string_subrecord("MODL", "Doors\\TestDoor.NIF"));
     Bytes records;
     append(records, record("DOOR", 0x100, stat_data));
+    Bytes light_data;
+    append(light_data, string_subrecord("EDID", "FixtureLight"));
+    append(light_data, string_subrecord("MODL", "Effects\\FixtureFire.NIF"));
+    append(records, record("LIGH", 0x105, light_data));
 
     Bytes race_data;
     append(race_data, string_subrecord("EDID", "FixtureRace"));
@@ -374,6 +378,7 @@ Bytes esm_fixture() {
     Bytes second_cell_refs;
     append(second_cell_refs, reference_record(0x202, 0x100, 0x101));
     append(second_cell_refs, reference_record(0x203, 0x100, 0));
+    append(second_cell_refs, reference_record(0x205, 0x105, 0));
     append(second_children, group(0x20, 6, second_cell_refs));
     append(second_children, cell_record(0x20, "NextCell", "Fixture Next"));
     append(records, group(0, 3, second_children));
@@ -408,7 +413,8 @@ void test_esm4(const std::filesystem::path& directory) {
 
     const auto* next = database.find_cell("NEXTCELL");
     CHECK(next != nullptr);
-    CHECK(next->references.size() == 2);
+    CHECK(next->references.size() == 3);
+    CHECK(next->references[2].model_path == "Effects\\FixtureFire.NIF");
     CHECK(database.find_cell(0x20) == next);
     CHECK(database.unplaced_reference_count() == 1);
 

@@ -103,10 +103,29 @@ struct NifAnimationData {
     std::vector<NifAnimationTrackData> tracks;
 };
 
+// Parameters stored in a Gamebryo particle emitter, in NIF scene units.
+struct NifParticleEmitterData {
+    std::string name;
+    std::string texture_path;
+    std::array<float, 3> position{};
+    std::array<float, 4> color{};
+    std::string volume_shape;
+    std::array<float, 3> volume_size{};
+    float speed = 0.0f;
+    float speed_variation = 0.0f;
+    float radius = 0.0f;
+    float lifetime = 0.0f;
+    float birth_rate = 0.0f;
+    std::vector<std::array<float, 2>> birth_rate_keys;
+    float declination = 0.0f;
+    float declination_variation = 0.0f;
+};
+
 struct NifAssetData {
     std::vector<NifMeshData> meshes;
     std::vector<NifNodeData> nodes;
     std::vector<NifAnimationData> animations;
+    std::vector<NifParticleEmitterData> particle_emitters;
     std::vector<NifPhysicsBodyData> physics_bodies;
     std::vector<NifPhysicsConstraintData> physics_constraints;
     bool collision_enabled = false;

@@ -2293,6 +2293,7 @@ func _load_cell_geometry(
 			director.register_door_reference(reference, meshes, _reference_transform(reference))
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
+		_add_nif_particles(physics_metadata, reference_transform)
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
 		var animate_reference := is_door or has_nif_animations
@@ -7637,6 +7638,60 @@ func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
+func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) -> void:
+	for emitter_value: Variant in metadata.get("particle_emitters", []):
+		var emitter: Dictionary = emitter_value
+		var lifetime := float(emitter.get("lifetime", 0.0))
+		var rate := float(emitter.get("birth_rate", 0.0))
+		var radius := float(emitter.get("radius", 0.0))
+		var texture_path := str(emitter.get("texture_path", "")).replace("\\", "/")
+		if lifetime <= 0.0 or rate <= 0.0 or radius <= 0.0 or texture_path.is_empty():
+			continue
+		var texture := assets.texture_for_path(texture_path) as Texture2D
+		if texture == null:
+			continue
+		var particles := GPUParticles3D.new()
+		particles.transform = reference_transform.translated_local(emitter.get("position", Vector3.ZERO))
+		particles.amount = clampi(ceili(rate * lifetime), 1, 4096)
+		particles.lifetime = lifetime
+		particles.local_coords = false
+		var process := ParticleProcessMaterial.new()
+		var volume: Vector3 = emitter.get("volume_size", Vector3.ZERO)
+		match str(emitter.get("volume_shape", "")):
+			"box":
+				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+				process.emission_box_extents = Vector3(absf(volume.x), absf(volume.z), absf(volume.y)) * 0.5
+			"sphere":
+				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+				process.emission_sphere_radius = absf(volume.x)
+			"cylinder":
+				process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+				process.emission_ring_axis = Vector3.UP
+				process.emission_ring_radius = absf(volume.x)
+				process.emission_ring_inner_radius = 0.0
+				process.emission_ring_height = absf(volume.y)
+		var angle := float(emitter.get("declination", 0.0))
+		process.direction = Vector3(sin(angle), cos(angle), 0.0)
+		process.spread = rad_to_deg(absf(float(emitter.get("declination_variation", 0.0))))
+		var speed := float(emitter.get("speed", 0.0))
+		var variation := absf(float(emitter.get("speed_variation", 0.0)))
+		process.initial_velocity_min = maxf(0.0, speed - variation)
+		process.initial_velocity_max = maxf(process.initial_velocity_min, speed + variation)
+		process.gravity = Vector3.ZERO
+		particles.process_material = process
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		material.albedo_texture = texture
+		material.albedo_color = emitter.get("color", Color.WHITE)
+		material.vertex_color_use_as_albedo = true
+		var quad := QuadMesh.new()
+		quad.size = Vector2.ONE * radius * 2.0
+		quad.material = material
+		particles.draw_pass_1 = quad
+		cell_visual_root.add_child(particles)
+
 func _install_nif_animations(animated_root: Node3D, metadata: Dictionary, node_hosts: Dictionary) -> void:
 	var sequences: Array = metadata.get("animations", [])
 	var nodes: Array = metadata.get("nodes", [])

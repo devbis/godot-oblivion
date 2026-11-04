@@ -847,6 +847,14 @@ int main(int argc, char** argv) {
                     const std::string asset_path = argv[asset_index];
                     const auto source = data.read_asset(asset_path);
                     const auto meshes = oblivion::decode_nif_meshes(source);
+                    const auto particle_asset = oblivion::decode_nif_asset(source);
+                    for (const auto& emitter : particle_asset.particle_emitters)
+                        std::cout << "  emitter " << emitter.name << " texture=" << emitter.texture_path
+                                  << " rate=" << emitter.birth_rate << " life=" << emitter.lifetime
+                                  << " radius=" << emitter.radius << '\n';
+                    for (const auto& emitter : particle_asset.particle_emitters)
+                        for (const auto& key : emitter.birth_rate_keys)
+                            std::cout << "    rate key " << key[0] << ": " << key[1] << '\n';
                     nifly::NifFile file;
                     oblivion::load_nif_file(source, file);
                     std::size_t vertex_count = 0;

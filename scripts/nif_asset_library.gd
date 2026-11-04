@@ -3,12 +3,6 @@ extends RefCounted
 ## textures and collision shapes. The native reader holds one asset at a time, so callers queue in meshes_for_model.
 
 const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
-const UNSUPPORTED_PARTICLE_MODEL_FILENAMES := [
-	"fxdustcloudfaint01.nif",
-	"fxdustcloud01.nif",
-	"dustcloudhorizontal01.nif",
-	"fxlightbeamdust01.nif",
-]
 const TEXTURE_FALLBACKS := {
 	"textures/characters/imperial/male/earmale.dds": "textures/characters/imperial/earshuman.dds",
 	"textures/characters/imperial/female/ear.dds": "textures/characters/imperial/earshuman.dds",
@@ -53,10 +47,6 @@ func meshes_for_model(model_path: String) -> Array:
 	var key := model_path.to_lower().replace("\\", "/")
 	if model_cache.has(key):
 		return model_cache[key]
-	# These original particle effect NIFs are not static meshes and the reader cannot decode them.
-	if key.get_file() in UNSUPPORTED_PARTICLE_MODEL_FILENAMES:
-		model_cache[key] = []
-		return []
 	if data_reader == null or key.is_empty():
 		return []
 	# The native reader holds one asset at a time. Callers queue here, in order of arrival, so no request is dropped and
@@ -81,6 +71,7 @@ func meshes_for_model(model_path: String) -> Array:
 	var source_bytes: PackedByteArray = result.get("source_bytes", PackedByteArray())
 	var physics_bodies: Array = result.get("physics_bodies", [])
 	var metadata := {
+		"particle_emitters": result.get("particle_emitters", []),
 		"nodes": result.get("nodes", []),
 		"animations": result.get("animations", []),
 		"collision_enabled": bool(result.get("collision_enabled", false)),

@@ -48,6 +48,20 @@ file(MAKE_DIRECTORY "${_nifly_patched_source_dir}")
 set(_nifly_patched_animation_source "${_nifly_patched_source_dir}/Animation.cpp")
 file(WRITE "${_nifly_patched_animation_source}" "${_nifly_animation_contents}")
 
+# Oblivion's 10.1 particle emitters predate the radius-variation field.
+set(_nifly_particles_source "${NIFLY_PATH}/src/Particles.cpp")
+file(READ "${_nifly_particles_source}" _nifly_particles_contents)
+set(_nifly_emitter_before "\tstream.Sync(radius);\n\tstream.Sync(radiusVariation);\n\tstream.Sync(lifeSpan);")
+set(_nifly_emitter_after "\tstream.Sync(radius);\n\tif (stream.GetVersion().File() >= V10_4_0_1)\n\t\tstream.Sync(radiusVariation);\n\tstream.Sync(lifeSpan);")
+string(FIND "${_nifly_particles_contents}" "${_nifly_emitter_before}" _nifly_emitter_position)
+if(_nifly_emitter_position GREATER_EQUAL 0)
+    string(REPLACE "${_nifly_emitter_before}" "${_nifly_emitter_after}" _nifly_particles_contents "${_nifly_particles_contents}")
+elseif(NOT _nifly_particles_contents MATCHES "NiPSysEmitter::Sync[^{]*\\{[^}]*V10_4_0_1")
+    message(FATAL_ERROR "Unsupported nifly Particles.cpp: legacy emitter fields are not handled")
+endif()
+set(_nifly_patched_particles_source "${_nifly_patched_source_dir}/Particles.cpp")
+file(WRITE "${_nifly_patched_particles_source}" "${_nifly_particles_contents}")
+
 # nifly is built as a static library that ends up inside a shared module, so it needs PIC,
 # and an unconfigured CMAKE_BUILD_TYPE would build it (and NIF parsing) without optimization.
 # Both must be set before add_subdirectory so nifly picks them up.
@@ -68,6 +82,8 @@ foreach(_nifly_source IN LISTS _nifly_source_files)
     get_filename_component(_nifly_source_absolute "${_nifly_source}" ABSOLUTE BASE_DIR "${NIFLY_PATH}/src")
     if(_nifly_source_absolute STREQUAL _nifly_animation_source)
         list(APPEND _nifly_fixed_source_files "${_nifly_patched_animation_source}")
+    elseif(_nifly_source_absolute STREQUAL _nifly_particles_source)
+        list(APPEND _nifly_fixed_source_files "${_nifly_patched_particles_source}")
     else()
         list(APPEND _nifly_fixed_source_files "${_nifly_source_absolute}")
     endif()

@@ -146,7 +146,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"), std::string_view("CREA"),
         std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
-        std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"),
+        std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
         std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
         std::string_view("MGEF"), std::string_view("CSTY"),
@@ -741,7 +741,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
+            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -834,7 +834,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if ((tag == "BTXT" || tag == "ATXT") && is_land && subrecord_size >= 4) {
             const auto texture_id = u32(value);
             if (texture_id != 0) ++land_texture_usage[texture_id];
-        } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "FURN" || type == "ACTI" || type == "MSTT" || is_container)) {
+        } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || is_container)) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
         } else if (tag == "MODL" && is_creature) {

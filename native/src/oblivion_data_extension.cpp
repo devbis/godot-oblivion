@@ -929,6 +929,25 @@ public:
         for (int64_t i = 0; i < static_cast<int64_t>(source_bytes.size()); ++i)
             packed_source.set(i, source_bytes[static_cast<std::size_t>(i)]);
         result["source_bytes"] = packed_source;
+        Array particle_emitters;
+        for (const auto& emitter : asset_data.particle_emitters) {
+            Dictionary item;
+            item["name"] = as_string(emitter.name);
+            item["texture_path"] = as_string(emitter.texture_path);
+            item["position"] = Vector3(emitter.position[0], emitter.position[1], emitter.position[2]);
+            item["color"] = Color(emitter.color[0], emitter.color[1], emitter.color[2], emitter.color[3]);
+            item["volume_shape"] = as_string(emitter.volume_shape);
+            item["volume_size"] = Vector3(emitter.volume_size[0], emitter.volume_size[1], emitter.volume_size[2]);
+            item["speed"] = emitter.speed;
+            item["speed_variation"] = emitter.speed_variation;
+            item["radius"] = emitter.radius;
+            item["lifetime"] = emitter.lifetime;
+            item["birth_rate"] = emitter.birth_rate;
+            item["declination"] = emitter.declination;
+            item["declination_variation"] = emitter.declination_variation;
+            particle_emitters.push_back(item);
+        }
+        result["particle_emitters"] = particle_emitters;
         Array mesh_array;
         for (const auto& mesh : asset_data.meshes) {
             Dictionary item;

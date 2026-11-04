@@ -17,9 +17,12 @@
 #include <Geometry.hpp>
 #include <Animation.hpp>
 #include <ExtraData.hpp>
+#include <Factory.hpp>
 #include <bhk.hpp>
 #include <ExtraData.hpp>
 #include <Nodes.hpp>
+#include <Particles.hpp>
+#include <Shaders.hpp>
 #include <Skin.hpp>
 
 namespace oblivion {
@@ -698,6 +701,79 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
     result.collision_enabled = file.GetHeader().GetVersion().File() < nifly::NiFileVersion::V10_0_1_0
         || root_has_havok_flag(file, *root);
     visit_scene(file, root, root_has_editor_marker_flag(file, *root), result.meshes);
+    if (!geometry_only) {
+        auto& header = file.GetHeader();
+        for (uint32_t index = 0; index < header.GetNumBlocks(); ++index) {
+            auto* system = header.GetBlock<nifly::NiParticleSystem>(index);
+            if (!system) continue;
+            std::string texture;
+            for (const auto& property_ref : system->propertyRefs) {
+                auto* property = header.GetBlock<nifly::NiTexturingProperty>(property_ref);
+                if (!property || !property->hasBaseTex) continue;
+                auto* source = header.GetBlock<nifly::NiSourceTexture>(property->baseTex.sourceRef);
+                if (source) texture = source->fileName.get();
+            }
+            for (const auto& modifier_ref : system->modifierRefs) {
+                auto* emitter = header.GetBlock<nifly::NiPSysEmitter>(modifier_ref);
+                if (!emitter || !emitter->isActive) continue;
+                NifParticleEmitterData output;
+                output.name = emitter->name.get();
+                output.texture_path = texture;
+                auto* volume = dynamic_cast<nifly::NiPSysVolumeEmitter*>(emitter);
+                auto* node = volume ? header.GetBlock<nifly::NiNode>(volume->emitterNodeRef) : nullptr;
+                const auto transform = global_transform(parents, node ? static_cast<nifly::NiAVObject*>(node) : system, global_transforms);
+                output.position = to_godot(transform.translation);
+                if (auto* box = dynamic_cast<nifly::NiPSysBoxEmitter*>(emitter)) {
+                    output.volume_shape = "box";
+                    output.volume_size = {box->width, box->height, box->depth};
+                } else if (auto* sphere = dynamic_cast<nifly::NiPSysSphereEmitter*>(emitter)) {
+                    output.volume_shape = "sphere";
+                    output.volume_size = {sphere->radius, 0.0f, 0.0f};
+                } else if (auto* cylinder = dynamic_cast<nifly::NiPSysCylinderEmitter*>(emitter)) {
+                    output.volume_shape = "cylinder";
+                    output.volume_size = {cylinder->radius, cylinder->height, 0.0f};
+                }
+                output.color = {emitter->color.r, emitter->color.g, emitter->color.b, emitter->color.a};
+                output.speed = emitter->speed;
+                output.speed_variation = emitter->speedVariation;
+                output.radius = emitter->radius;
+                output.lifetime = emitter->lifeSpan;
+                output.declination = emitter->declination;
+                output.declination_variation = emitter->declinationVariation;
+                auto controller_ref = system->controllerRef;
+                std::unordered_set<uint32_t> visited_controllers;
+                while (!controller_ref.IsEmpty() && visited_controllers.insert(controller_ref.index).second) {
+                    auto* controller = header.GetBlock<nifly::NiTimeController>(controller_ref);
+                    if (!controller) break;
+                    auto* emitter_controller = dynamic_cast<nifly::NiPSysEmitterCtlr*>(controller);
+                    if (emitter_controller && emitter_controller->modifierName.get() == output.name) {
+                        auto* data = header.GetBlock<nifly::NiPSysEmitterCtlrData>(emitter_controller->dataRef);
+                        if (data && data->floatKeys.GetNumKeys() > 0)
+                            output.birth_rate = data->floatKeys.GetKey(0).value;
+                        if (data) for (uint32_t key_index = 0; key_index < data->floatKeys.GetNumKeys(); ++key_index) {
+                            const auto key = data->floatKeys.GetKey(key_index);
+                            output.birth_rate_keys.push_back({key.time, key.value});
+                        }
+                        auto* interpolator = header.GetBlock<nifly::NiFloatInterpolator>(emitter_controller->interpolatorRef);
+                        if (interpolator) {
+                            auto* float_data = header.GetBlock<nifly::NiFloatData>(interpolator->dataRef);
+                            output.birth_rate = float_data && float_data->data.GetNumKeys() > 0
+                                ? float_data->data.GetKey(0).value : interpolator->floatValue;
+                            if (float_data && float_data->data.GetNumKeys() > 0) {
+                                output.birth_rate_keys.clear();
+                                for (uint32_t key_index = 0; key_index < float_data->data.GetNumKeys(); ++key_index) {
+                                    const auto key = float_data->data.GetKey(key_index);
+                                    output.birth_rate_keys.push_back({key.time, key.value});
+                                }
+                            }
+                        }
+                    }
+                    controller_ref = controller->nextControllerRef;
+                }
+                result.particle_emitters.push_back(std::move(output));
+            }
+        }
+    }
     if (!geometry_only) append_physics(file, result, parents, global_transforms);
     return result;
 }
@@ -708,7 +784,30 @@ void load_nif_file(const std::vector<std::uint8_t>& bytes, nifly::NifFile& file)
     if (bytes.empty()) throw std::runtime_error("NIF asset is empty");
     MemoryStreambuf buffer(bytes.data(), bytes.size());
     std::istream input(&buffer);
-    const int load_status = file.Load(input);
+    int load_status = 0;
+    try {
+        load_status = file.Load(input);
+    } catch (const std::exception& error) {
+        // Identify the failing block without changing nifly's parser or masking its error.
+        MemoryStreambuf diagnostic_buffer(bytes.data(), bytes.size());
+        std::istream diagnostic_input(&diagnostic_buffer);
+        nifly::NiHeader header;
+        nifly::NiIStream stream(&diagnostic_input, &header);
+        try {
+            header.Get(stream);
+            for (uint32_t i = 0; i < header.GetNumBlocks(); ++i) {
+                const auto type = header.HasInlineBlockTypes() ? header.ReadBlockType(stream) : header.GetBlockTypeStringById(i);
+                auto* factory = nifly::NiFactoryRegister::Get().GetFactoryByName(type);
+                if (!factory) break;
+                try { factory->Load(stream); }
+                catch (const std::exception&) {
+                    throw std::runtime_error("NIF block " + std::to_string(i) + " (" + type + "): " + error.what());
+                }
+            }
+        } catch (const std::runtime_error&) { throw; }
+        catch (const std::exception&) {}
+        throw;
+    }
     if (load_status != 0 || !file.IsValid())
         throw std::runtime_error("nifly could not load the NIF (status " + std::to_string(load_status) + ")");
 }
