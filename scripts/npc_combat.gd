@@ -433,15 +433,18 @@ func receive_player_hit(
 			actor["health"] = health
 			if remaining <= 0.0:
 				_run_actor_events(actor, "OnHit", "player")
+				_call_allies(actor, _player_attacker())
 				kill_actor(actor)
 				return blocked
 			_run_actor_events(actor, "OnHit", "")
 			_run_actor_events(actor, "OnHit", "player")
 			if bool(actor.get("dead", false)):
+				_call_allies(actor, _player_attacker())
 				return blocked
 	var received_fatigue := fatigue_damage * BLOCKED_DAMAGE_SHARE if blocked else fatigue_damage
 	var fight_back_target := 0 if not _calmed.has(reference_id) else -1
 	_react_to_hit(actor, source_position, received_fatigue, fight_back_target, _player_base_form_id(), blocked)
+	_call_allies(actor, _player_attacker())
 	return blocked
 
 ## Another actor's blow: health, the flinch, and the victim (and its allies) turn on the attacker.
@@ -462,11 +465,13 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 		victim["health"] = health
 		if remaining <= 0.0:
 			_run_actor_events(victim, "OnHit", str(attacker.get("reference_name", "")))
+			_call_allies(victim, attacker)
 			kill_actor(victim)
 			return
 	_run_actor_events(victim, "OnHit", "")
 	_run_actor_events(victim, "OnHit", str(attacker.get("reference_name", "")))
 	if bool(victim.get("dead", false)):
+		_call_allies(victim, attacker)
 		return
 	var fight_back := _aggression(victim) >= AGGRESSION_DEFENDS and not _calmed.has(int(victim.get("reference_id", 0)))
 	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
@@ -524,6 +529,9 @@ func _actor_blocks_hit(actor: Dictionary, source_position: Vector3) -> bool:
 	forward.y = 0.0
 	return toward_source.length_squared() > 0.0001 and forward.length_squared() > 0.0001 \
 		and forward.normalized().dot(toward_source.normalized()) > 0.3
+
+func _player_attacker() -> Dictionary:
+	return {"reference_id": 0, "reference_name": "Player", "faction_form_ids": PackedInt64Array()}
 
 ## Actors that share a faction with the victim come to its help against the attacker.
 func _call_allies(victim: Dictionary, attacker: Dictionary) -> void:
