@@ -294,7 +294,14 @@ static func build_head_mesh(
 	var morphed_vertices := base_vertices.duplicate()
 	_apply_modes(morphed_vertices, symmetric_modes, symmetric_coefficients, basis_transform)
 	_apply_modes(morphed_vertices, asymmetric_modes, asymmetric_coefficients, basis_transform)
-	var base_normals := _compute_normals(morphed_vertices, indices)
+	# Preserve the NIF's authored smooth normals. Rebuilding them from triangles splits
+	# lighting at duplicated face vertices (for example, across UV seams), which shows
+	# up as a hard half-face boundary once the mouth morphs move the geometry.
+	var base_normals: PackedVector3Array
+	if arrays[Mesh.ARRAY_NORMAL] is PackedVector3Array and (arrays[Mesh.ARRAY_NORMAL] as PackedVector3Array).size() == vertex_count:
+		base_normals = (arrays[Mesh.ARRAY_NORMAL] as PackedVector3Array).duplicate()
+	else:
+		base_normals = _compute_normals(morphed_vertices, indices)
 	arrays[Mesh.ARRAY_VERTEX] = morphed_vertices
 	if arrays[Mesh.ARRAY_NORMAL] != null:
 		arrays[Mesh.ARRAY_NORMAL] = base_normals
@@ -476,8 +483,7 @@ static func _compute_normals(vertices: PackedVector3Array, indices: PackedInt32A
 		normals[b] += normal
 		normals[c] += normal
 	for vertex_index in range(normals.size()):
-		# Match the reversed shading-normal convention used by the NIF converter;
-		# FaceGen rebuilds these normals after applying each facial morph.
+		# Match the reversed shading-normal convention used by the NIF converter.
 		normals[vertex_index] = -normals[vertex_index].normalized() if normals[vertex_index].length_squared() > 0.000001 else Vector3.DOWN
 	return normals
 
