@@ -3901,8 +3901,6 @@ func _load_player_avatar() -> void:
 		"dialogue_face_previous": "",
 		"dialogue_face_previous_weight": 0.0,
 		"expression_cycle": _available_face_expression_cycle(_player_face_meshes),
-		"blink_cooldown": randf_range(2.5, 5.5),
-		"blink_remaining": 0.0,
 	}
 	_apply_face_expression(_player_face_state)
 	_refresh_player_face_profile_hint()
@@ -6588,8 +6586,6 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"dialogue_face_previous": "",
 			"dialogue_face_previous_weight": 0.0,
 			"expression_cycle": expression_cycle,
-			"blink_cooldown": randf_range(2.5, 5.5),
-			"blink_remaining": 0.0,
 			"animations": animations,
 			"attributes": npc.get("attributes", PackedInt64Array()),
 			"skills": npc.get("skills", PackedInt64Array()),
@@ -6990,21 +6986,6 @@ func _set_actor_face_shape(actor: Dictionary, shape_name: String, weight: float)
 		if shape_index >= 0:
 			instance.set_blend_shape_value(shape_index, weight)
 
-func _update_face_blink(actor: Dictionary, delta: float) -> void:
-	var remaining := maxf(0.0, float(actor.get("blink_remaining", 0.0)) - delta)
-	var cooldown := float(actor.get("blink_cooldown", 3.0)) - delta
-	if cooldown <= 0.0 and remaining <= 0.0:
-		remaining = 0.18
-		cooldown = randf_range(2.5, 5.5)
-	actor["blink_remaining"] = remaining
-	actor["blink_cooldown"] = cooldown
-	var blink_weight := 0.0
-	if remaining > 0.0:
-		blink_weight = sin((1.0 - remaining / 0.18) * PI)
-	_set_actor_face_shape(actor, "BlinkLeft", blink_weight)
-	_set_actor_face_shape(actor, "BlinkRight", blink_weight)
-
-
 func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> void:
 	if is_instance_valid(audio_manager) and audio_manager.has_method("get_dialogue_visemes"):
 		var visemes_value: Variant = audio_manager.call("get_dialogue_visemes", int(actor.get("reference_id", 0)))
@@ -7013,6 +6994,7 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 			for phoneme_index in range(FaceGenData.LIP_PHONEME_NAMES.size()):
 				_set_actor_face_shape(actor, str(FaceGenData.LIP_PHONEME_NAMES[phoneme_index]), visemes[phoneme_index])
 			actor["face_talk_weight"] = 0.0
+			_refresh_actor_facegen_normals(actor)
 			return
 	for phoneme_name: StringName in FaceGenData.LIP_PHONEME_NAMES:
 		_set_actor_face_shape(actor, str(phoneme_name), 0.0)
@@ -7025,6 +7007,13 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 		talk_weight = 0.0
 	actor["face_talk_weight"] = talk_weight
 	_set_actor_face_shape(actor, "BigAah", talk_weight)
+	_refresh_actor_facegen_normals(actor)
+
+func _refresh_actor_facegen_normals(actor: Dictionary) -> void:
+	for instance_value: Variant in actor.get("face_meshes", []):
+		var instance := instance_value as MeshInstance3D
+		if is_instance_valid(instance):
+			FaceGenData.refresh_blended_normals(instance)
 
 ## A gesture that plays once holds its final pose at least this long, and while the actor is still speaking up to the
 ## maximum: the original special idles (pointing, halting) raise the arm in under a second and hold it, then ease back.
@@ -7339,7 +7328,6 @@ func _update_npc_actors(delta: float) -> void:
 		):
 			continue
 		var look_target_active := _npc_look_target_is_active(actor)
-		_update_face_blink(actor, delta)
 		_update_face_expression(actor, delta)
 		_update_face_talk(actor, delta, audio_manager)
 		var walking := bool(actor_root.get("is_walking"))

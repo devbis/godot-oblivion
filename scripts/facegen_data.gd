@@ -469,6 +469,105 @@ static func _relative_shape_arrays(
 	shape_arrays[Mesh.ARRAY_NORMAL] = normal_deltas
 	return shape_arrays
 
+
+## Rebuilds the shading normals from the complete blend-shape mix on one face instance.
+## FaceFX visemes overlap, so adding normals computed for each isolated morph does
+## not describe the combined face and can make its lighting flip during speech.
+static func refresh_blended_normals(instance: MeshInstance3D) -> void:
+	if not is_instance_valid(instance):
+		return
+	var source_value: Variant = instance.get_meta("facegen_normal_source_mesh", null)
+	var source_mesh := source_value as ArrayMesh
+	if source_mesh == null:
+		source_mesh = instance.mesh as ArrayMesh
+		if (
+			source_mesh == null
+			or source_mesh.get_blend_shape_count() == 0
+			or source_mesh.get_surface_count() != 1
+		):
+			return
+		instance.set_meta("facegen_normal_source_mesh", source_mesh)
+	var shape_count := source_mesh.get_blend_shape_count()
+	var weights := PackedFloat32Array()
+	weights.resize(shape_count)
+	var has_active_shapes := false
+	for shape_index in range(shape_count):
+		var weight := instance.get_blend_shape_value(shape_index)
+		weights[shape_index] = weight
+		if absf(weight) > 0.0001:
+			has_active_shapes = true
+	var previous_weights_value: Variant = instance.get_meta("facegen_normal_weights", PackedFloat32Array())
+	if previous_weights_value is PackedFloat32Array:
+		var previous_weights: PackedFloat32Array = previous_weights_value
+		if previous_weights.size() == weights.size():
+			var changed := false
+			for shape_index in range(shape_count):
+				if absf(previous_weights[shape_index] - weights[shape_index]) > 0.0001:
+					changed = true
+					break
+			if not changed:
+				return
+	if not has_active_shapes:
+		if instance.mesh != source_mesh:
+			instance.mesh = source_mesh
+		for shape_index in range(shape_count):
+			instance.set_blend_shape_value(shape_index, 0.0)
+		instance.set_meta("facegen_normal_weights", weights)
+		return
+	var source_arrays := source_mesh.surface_get_arrays(0)
+	var base_vertices: PackedVector3Array = source_arrays[Mesh.ARRAY_VERTEX]
+	var indices: PackedInt32Array = source_arrays[Mesh.ARRAY_INDEX]
+	var shape_arrays: Array = source_mesh.surface_get_blend_shape_arrays(0)
+	if base_vertices.is_empty() or indices.is_empty() or shape_arrays.size() != shape_count:
+		return
+	var blended_vertices := base_vertices.duplicate()
+	var total_weight := 0.0
+	for shape_index in range(shape_count):
+		var weight := weights[shape_index]
+		if absf(weight) <= 0.0001:
+			continue
+		var shape_arrays_value: Variant = shape_arrays[shape_index]
+		if not shape_arrays_value is Array:
+			continue
+		var shape: Array = shape_arrays_value
+		var shape_vertices_value: Variant = shape[Mesh.ARRAY_VERTEX]
+		if not shape_vertices_value is PackedVector3Array:
+			continue
+		var deltas: PackedVector3Array = shape_vertices_value
+		if deltas.size() != blended_vertices.size():
+			continue
+		total_weight += absf(weight)
+		for vertex_index in range(blended_vertices.size()):
+			blended_vertices[vertex_index] += deltas[vertex_index] * weight
+	var blended_normals := _compute_normals(blended_vertices, indices)
+	var source_normals_value: Variant = source_arrays[Mesh.ARRAY_NORMAL]
+	if source_normals_value is PackedVector3Array:
+		var source_normals: PackedVector3Array = source_normals_value
+		if source_normals.size() == blended_normals.size():
+			var normal_blend := clampf(total_weight, 0.0, 1.0)
+			for vertex_index in range(blended_normals.size()):
+				blended_normals[vertex_index] = source_normals[vertex_index].lerp(
+					blended_normals[vertex_index], normal_blend
+				).normalized()
+	var updated_arrays := source_arrays.duplicate()
+	updated_arrays[Mesh.ARRAY_NORMAL] = blended_normals
+	var updated_mesh := ArrayMesh.new()
+	updated_mesh.blend_shape_mode = source_mesh.blend_shape_mode
+	for shape_index in range(shape_count):
+		updated_mesh.add_blend_shape(source_mesh.get_blend_shape_name(shape_index))
+	updated_mesh.add_surface_from_arrays(
+		source_mesh.surface_get_primitive_type(0), updated_arrays, shape_arrays
+	)
+	updated_mesh.custom_aabb = source_mesh.custom_aabb
+	var surface_material := source_mesh.surface_get_material(0)
+	if surface_material != null:
+		updated_mesh.surface_set_material(0, surface_material)
+	instance.mesh = updated_mesh
+	for shape_index in range(shape_count):
+		instance.set_blend_shape_value(shape_index, weights[shape_index])
+	instance.set_meta("facegen_normal_weights", weights)
+
+
 static func _compute_normals(vertices: PackedVector3Array, indices: PackedInt32Array) -> PackedVector3Array:
 	var normals := PackedVector3Array()
 	normals.resize(vertices.size())
@@ -482,9 +581,24 @@ static func _compute_normals(vertices: PackedVector3Array, indices: PackedInt32A
 		normals[a] += normal
 		normals[b] += normal
 		normals[c] += normal
+	# Merge coincident vertices before normalizing. FaceGen heads commonly duplicate
+	# vertices at UV seams, but those seams should not become hard lighting edges.
+	var smooth_groups: Dictionary = {}
+	for vertex_index in range(vertices.size()):
+		var vertex := vertices[vertex_index]
+		var key := Vector3i(
+			roundi(vertex.x * 10000.0), roundi(vertex.y * 10000.0), roundi(vertex.z * 10000.0)
+		)
+		var group_normal: Vector3 = smooth_groups.get(key, Vector3.ZERO)
+		smooth_groups[key] = group_normal + normals[vertex_index]
 	for vertex_index in range(normals.size()):
 		# Match the reversed shading-normal convention used by the NIF converter.
-		normals[vertex_index] = -normals[vertex_index].normalized() if normals[vertex_index].length_squared() > 0.000001 else Vector3.DOWN
+		var vertex := vertices[vertex_index]
+		var key := Vector3i(
+			roundi(vertex.x * 10000.0), roundi(vertex.y * 10000.0), roundi(vertex.z * 10000.0)
+		)
+		var normal: Vector3 = smooth_groups[key]
+		normals[vertex_index] = -normal.normalized() if normal.length_squared() > 0.000001 else Vector3.DOWN
 	return normals
 
 static func _has_bytes(bytes: PackedByteArray, offset: int, count: int) -> bool:
