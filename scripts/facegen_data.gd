@@ -476,8 +476,9 @@ static func _relative_shape_arrays(
 static func refresh_blended_normals(instance: MeshInstance3D) -> void:
 	if not is_instance_valid(instance):
 		return
-	var source_value: Variant = instance.get_meta("facegen_normal_source_mesh", null)
-	var source_mesh := source_value as ArrayMesh
+	var source_mesh: ArrayMesh
+	if instance.has_meta("facegen_normal_source_mesh"):
+		source_mesh = instance.get_meta("facegen_normal_source_mesh") as ArrayMesh
 	if source_mesh == null:
 		source_mesh = instance.mesh as ArrayMesh
 		if (
@@ -496,7 +497,9 @@ static func refresh_blended_normals(instance: MeshInstance3D) -> void:
 		weights[shape_index] = weight
 		if absf(weight) > 0.0001:
 			has_active_shapes = true
-	var previous_weights_value: Variant = instance.get_meta("facegen_normal_weights", PackedFloat32Array())
+	var previous_weights_value: Variant = PackedFloat32Array()
+	if instance.has_meta("facegen_normal_weights"):
+		previous_weights_value = instance.get_meta("facegen_normal_weights")
 	if previous_weights_value is PackedFloat32Array:
 		var previous_weights: PackedFloat32Array = previous_weights_value
 		if previous_weights.size() == weights.size():
