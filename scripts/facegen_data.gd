@@ -315,7 +315,7 @@ static func build_head_mesh(
 			deltas[vertex_index] = basis_transform * source_deltas[vertex_index]
 			target_vertices[vertex_index] += deltas[vertex_index]
 			morph_bounds = morph_bounds.expand(target_vertices[vertex_index])
-		var shape_arrays: Array = _relative_shape_arrays(deltas, target_vertices, base_normals, indices)
+		var shape_arrays: Array = _relative_shape_arrays(deltas, base_normals)
 		blend_shape_names.push_back(str(morph.get("name", "")))
 		blend_shape_arrays.push_back(shape_arrays)
 	var target_vertex_count := int(tri.get("total_vertex_count", 0))
@@ -343,7 +343,7 @@ static func build_head_mesh(
 			var vertex_index := affected[affected_offset]
 			target_vertices[vertex_index] += deltas[vertex_index]
 			morph_bounds = morph_bounds.expand(target_vertices[vertex_index])
-		var shape_arrays: Array = _relative_shape_arrays(deltas, target_vertices, base_normals, indices)
+		var shape_arrays: Array = _relative_shape_arrays(deltas, base_normals)
 		blend_shape_names.push_back(str(morph.get("name", "")))
 		blend_shape_arrays.push_back(shape_arrays)
 	var result := ArrayMesh.new()
@@ -447,18 +447,18 @@ static func _morph_delta_at(modes: Array, coefficients: PackedFloat32Array, vert
 
 static func _relative_shape_arrays(
 	deltas: PackedVector3Array,
-	target_vertices: PackedVector3Array,
-	base_normals: PackedVector3Array,
-	indices: PackedInt32Array
+	base_normals: PackedVector3Array
 ) -> Array:
 	var shape_arrays: Array = []
 	shape_arrays.resize(Mesh.ARRAY_MAX)
 	shape_arrays[Mesh.ARRAY_VERTEX] = deltas
-	var target_normals := _compute_normals(target_vertices, indices)
+	# TRI morphs provide positions only. Recomputing a normal delta for each isolated
+	# shape and summing those deltas is unstable when several LIP visemes overlap:
+	# the relative blend can cancel or reverse the base normal and make face shading
+	# flash or appear inverted. Keep the FaceGen-profile normals fixed while the
+	# morph positions animate.
 	var normal_deltas := PackedVector3Array()
 	normal_deltas.resize(base_normals.size())
-	for vertex_index in range(base_normals.size()):
-		normal_deltas[vertex_index] = target_normals[vertex_index] - base_normals[vertex_index]
 	shape_arrays[Mesh.ARRAY_NORMAL] = normal_deltas
 	return shape_arrays
 
