@@ -11,7 +11,6 @@ const LIP_PHONEME_NAMES: Array[StringName] = [
 const FACE_EXPRESSION_MORPH_NAMES: Array[StringName] = [
 	&"Happy", &"Anger", &"Surprise", &"Sad", &"Fear",
 ]
-const EXPRESSION_NORMAL_MORPH_STRENGTH := 0.5
 const LIP_MAX_FRAME_COUNT := 18000
 const LIP_MAX_DECODED_BYTES := 18000 * LIP_CURVES_PER_FRAME * 4
 
@@ -486,19 +485,9 @@ static func _relative_shape_arrays(
 		var target_geometry_normals := _compute_normals(target_vertices, indices, weld_vertices)
 		if target_geometry_normals.size() == normal_deltas.size():
 			for vertex_index in range(normal_deltas.size()):
-				var base_geometry_normal := base_geometry_normals[vertex_index].normalized()
-				var target_geometry_normal := target_geometry_normals[vertex_index].normalized()
-				if base_geometry_normal.dot(target_geometry_normal) < 0.0:
-					target_geometry_normal = -target_geometry_normal
-				# Rotate the authored NIF normal by the local geometry change. Adding
-				# raw triangle-normal deltas replaces its smooth shading with facets.
-				var geometry_rotation := Quaternion(base_geometry_normal, target_geometry_normal)
-				var normal_rotation := Quaternion.IDENTITY.slerp(
-					geometry_rotation, EXPRESSION_NORMAL_MORPH_STRENGTH
+				normal_deltas[vertex_index] = (
+					target_geometry_normals[vertex_index] - base_geometry_normals[vertex_index]
 				)
-				var authored_normal := base_normals[vertex_index].normalized()
-				var morphed_normal := (normal_rotation * authored_normal).normalized()
-				normal_deltas[vertex_index] = morphed_normal - authored_normal
 	shape_arrays[Mesh.ARRAY_NORMAL] = normal_deltas
 	return shape_arrays
 
