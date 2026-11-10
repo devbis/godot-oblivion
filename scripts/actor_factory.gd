@@ -639,6 +639,9 @@ func add_actor_model(
 		instance.material_override = material
 		if is_actor_head:
 			instance.custom_aabb = source_mesh.get_aabb().grow(PLAYER_HEAD_CULL_MARGIN)
+			# Face morphs deform every frame; self-shadowing on the moving head creates
+			# unstable dark patches. It still receives shadows from the scene and hair.
+			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		attachment.add_child(instance)
 		var bone_names: Array = mesh_entry.get("bone_names", [])
 		if not bone_names.is_empty() and attach_bone.is_empty():

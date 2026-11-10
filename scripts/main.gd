@@ -3877,6 +3877,8 @@ func _load_player_avatar() -> void:
 				# bound prevents the renderer from dropping it during close, low-angle
 				# face inspection, when only a small part of the head bounds is on screen.
 				instance.custom_aabb = source_mesh.get_aabb().grow(PLAYER_HEAD_CULL_MARGIN)
+				# Keep the animated face from casting unstable self-shadows during speech.
+				instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			attachment.add_child(instance)
 			var bone_names: Array = mesh_entry.get("bone_names", [])
 			if _player_skeleton != null and not bone_names.is_empty():
@@ -6994,7 +6996,6 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 			for phoneme_index in range(FaceGenData.LIP_PHONEME_NAMES.size()):
 				_set_actor_face_shape(actor, str(FaceGenData.LIP_PHONEME_NAMES[phoneme_index]), visemes[phoneme_index])
 			actor["face_talk_weight"] = 0.0
-			_refresh_actor_facegen_normals(actor)
 			return
 	for phoneme_name: StringName in FaceGenData.LIP_PHONEME_NAMES:
 		_set_actor_face_shape(actor, str(phoneme_name), 0.0)
@@ -7007,13 +7008,6 @@ func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> 
 		talk_weight = 0.0
 	actor["face_talk_weight"] = talk_weight
 	_set_actor_face_shape(actor, "BigAah", talk_weight)
-	_refresh_actor_facegen_normals(actor)
-
-func _refresh_actor_facegen_normals(actor: Dictionary) -> void:
-	for instance_value: Variant in actor.get("face_meshes", []):
-		var instance := instance_value as MeshInstance3D
-		if is_instance_valid(instance):
-			FaceGenData.refresh_blended_normals(instance)
 
 ## A gesture that plays once holds its final pose at least this long, and while the actor is still speaking up to the
 ## maximum: the original special idles (pointing, halting) raise the arm in under a second and hold it, then ease back.
