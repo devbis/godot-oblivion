@@ -8,9 +8,6 @@ const LIP_PHONEME_NAMES: Array[StringName] = [
 	&"Aah", &"BigAah", &"BMP", &"ChJSh", &"DST", &"Eee", &"Eh", &"FV",
 	&"I", &"K", &"N", &"Oh", &"OohQ", &"R", &"Th", &"W",
 ]
-const FACE_EXPRESSION_MORPH_NAMES: Array[StringName] = [
-	&"Happy", &"Anger", &"Surprise", &"Sad", &"Fear",
-]
 const LIP_MAX_FRAME_COUNT := 18000
 const LIP_MAX_DECODED_BYTES := 18000 * LIP_CURVES_PER_FRAME * 4
 
@@ -311,12 +308,10 @@ static func build_head_mesh(
 	var blend_shape_names: Array[String] = []
 	var blend_shape_arrays: Array[Array] = []
 	var morph_bounds := AABB(morphed_vertices[0], Vector3.ZERO)
-	var base_geometry_normals := _compute_normals(morphed_vertices, indices, morphed_vertices)
 	for vertex in morphed_vertices:
 		morph_bounds = morph_bounds.expand(vertex)
 	for morph_value: Variant in tri.get("difference_morphs", []):
 		var morph: Dictionary = morph_value
-		var morph_name := StringName(str(morph.get("name", "")))
 		var source_deltas: PackedVector3Array = morph.get("deltas", PackedVector3Array())
 		if source_deltas.size() != vertex_count:
 			return null
@@ -327,18 +322,14 @@ static func build_head_mesh(
 			deltas[vertex_index] = basis_transform * source_deltas[vertex_index]
 			target_vertices[vertex_index] += deltas[vertex_index]
 			morph_bounds = morph_bounds.expand(target_vertices[vertex_index])
-		var shape_arrays: Array = _relative_shape_arrays(
-			deltas, base_normals, base_geometry_normals, target_vertices, morphed_vertices, indices,
-			FACE_EXPRESSION_MORPH_NAMES.has(morph_name)
-		)
-		blend_shape_names.push_back(str(morph_name))
+		var shape_arrays: Array = _relative_shape_arrays(deltas, base_normals)
+		blend_shape_names.push_back(str(morph.get("name", "")))
 		blend_shape_arrays.push_back(shape_arrays)
 	var target_vertex_count := int(tri.get("total_vertex_count", 0))
 	if tri_vertices.size() != target_vertex_count:
 		return null
 	for morph_value: Variant in tri.get("static_morphs", []):
 		var morph: Dictionary = morph_value
-		var morph_name := StringName(str(morph.get("name", "")))
 		var affected: PackedInt32Array = morph.get("indices", PackedInt32Array())
 		var target_start := int(morph.get("target_start", -1))
 		if target_start < vertex_count or target_start + affected.size() > target_vertex_count:
@@ -359,11 +350,8 @@ static func build_head_mesh(
 			var vertex_index := affected[affected_offset]
 			target_vertices[vertex_index] += deltas[vertex_index]
 			morph_bounds = morph_bounds.expand(target_vertices[vertex_index])
-		var shape_arrays: Array = _relative_shape_arrays(
-			deltas, base_normals, base_geometry_normals, target_vertices, morphed_vertices, indices,
-			FACE_EXPRESSION_MORPH_NAMES.has(morph_name)
-		)
-		blend_shape_names.push_back(str(morph_name))
+		var shape_arrays: Array = _relative_shape_arrays(deltas, base_normals)
+		blend_shape_names.push_back(str(morph.get("name", "")))
 		blend_shape_arrays.push_back(shape_arrays)
 	var result := ArrayMesh.new()
 	result.blend_shape_mode = Mesh.BLEND_SHAPE_MODE_RELATIVE
@@ -466,37 +454,23 @@ static func _morph_delta_at(modes: Array, coefficients: PackedFloat32Array, vert
 
 static func _relative_shape_arrays(
 	deltas: PackedVector3Array,
-	base_normals: PackedVector3Array,
-	base_geometry_normals: PackedVector3Array,
-	target_vertices: PackedVector3Array,
-	weld_vertices: PackedVector3Array,
-	indices: PackedInt32Array,
-	compute_morph_normal_delta: bool
+	base_normals: PackedVector3Array
 ) -> Array:
 	var shape_arrays: Array = []
 	shape_arrays.resize(Mesh.ARRAY_MAX)
 	shape_arrays[Mesh.ARRAY_VERTEX] = deltas
+	# TRI morphs provide positions only. Recomputing a normal delta for each isolated
+	# shape and summing those deltas is unstable when several LIP visemes overlap:
+	# the relative blend can cancel or reverse the base normal and make face shading
+	# flash or appear inverted. Keep the FaceGen-profile normals fixed while the
+	# morph positions animate.
 	var normal_deltas := PackedVector3Array()
 	normal_deltas.resize(base_normals.size())
-	# Emotion shapes are applied one at a time and need normals that follow their
-	# deformed geometry. Keep phoneme deltas at zero: overlapping LIP visemes have
-	# independent weights and their isolated normal deltas can reverse one another.
-	if compute_morph_normal_delta and base_geometry_normals.size() == base_normals.size():
-		var target_geometry_normals := _compute_normals(target_vertices, indices, weld_vertices)
-		if target_geometry_normals.size() == normal_deltas.size():
-			for vertex_index in range(normal_deltas.size()):
-				normal_deltas[vertex_index] = (
-					target_geometry_normals[vertex_index] - base_geometry_normals[vertex_index]
-				)
 	shape_arrays[Mesh.ARRAY_NORMAL] = normal_deltas
 	return shape_arrays
 
 
-static func _compute_normals(
-	vertices: PackedVector3Array,
-	indices: PackedInt32Array,
-	weld_positions: PackedVector3Array = PackedVector3Array()
-) -> PackedVector3Array:
+static func _compute_normals(vertices: PackedVector3Array, indices: PackedInt32Array) -> PackedVector3Array:
 	var normals := PackedVector3Array()
 	normals.resize(vertices.size())
 	for triangle_offset in range(0, indices.size() - 2, 3):
@@ -511,12 +485,9 @@ static func _compute_normals(
 		normals[c] += normal
 	# Merge coincident vertices before normalizing. FaceGen heads commonly duplicate
 	# vertices at UV seams, but those seams should not become hard lighting edges.
-	# When calculating a morph, weld by the undeformed positions so the seam stays
-	# smooth even if its duplicate vertices move by slightly different amounts.
-	var weld_vertices := weld_positions if weld_positions.size() == vertices.size() else vertices
 	var smooth_groups: Dictionary = {}
 	for vertex_index in range(vertices.size()):
-		var vertex := weld_vertices[vertex_index]
+		var vertex := vertices[vertex_index]
 		var key := Vector3i(
 			roundi(vertex.x * 10000.0), roundi(vertex.y * 10000.0), roundi(vertex.z * 10000.0)
 		)
@@ -524,7 +495,7 @@ static func _compute_normals(
 		smooth_groups[key] = group_normal + normals[vertex_index]
 	for vertex_index in range(normals.size()):
 		# Match the reversed shading-normal convention used by the NIF converter.
-		var vertex := weld_vertices[vertex_index]
+		var vertex := vertices[vertex_index]
 		var key := Vector3i(
 			roundi(vertex.x * 10000.0), roundi(vertex.y * 10000.0), roundi(vertex.z * 10000.0)
 		)
