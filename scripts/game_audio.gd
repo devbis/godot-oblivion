@@ -23,6 +23,7 @@ var _weapon_state_initialized := false
 var _last_weapon_form_id := 0
 var _observed_animations: Dictionary = {}
 var _dialogue_players: Dictionary = {}
+var _npc_female_cache: Dictionary = {}
 var _missing_voice_warnings: Dictionary = {}
 var _invalid_lip_warnings: Dictionary = {}
 var _reported_lip_files: Dictionary = {}
@@ -76,6 +77,16 @@ func play_footstep(actor: Node3D, running := false) -> void:
 	if not _play_asset_at(asset_path, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6):
 		var fallback := "sound\\fx\\fst\\stone\\fst_stone_%02d.wav" % variant
 		_play_asset_at(fallback, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6)
+
+
+## Randomized, nonverbal combat effort avoids playing faction- or quest-specific dialogue out of context.
+func play_combat_effort(actor: Node3D, female := false) -> void:
+	if not is_instance_valid(actor) or not _reader_is_ready():
+		return
+	var sex := "female" if female else "male"
+	var variant := _combat_audio_rng.randi_range(1, 4)
+	var asset_path := "sound\\fx\\npc\\human\\gasp\\%s\\voc_gasp_%s_%02d.wav" % [sex, sex, variant]
+	_play_asset_at(asset_path, actor.global_position + Vector3.UP * 1.1, actor, -2.0, 32.0, 2.0)
 
 
 ## Plays the actor's authored Hit/Attack voice response, if the running quests have
@@ -730,10 +741,11 @@ func _watch_combat_animations() -> void:
 		var actor_id := str(actor_state.get("reference_id", actor.get_instance_id()))
 		var animation := str(actor_state.get("active_animation", ""))
 		var animation_time := float(actor_state.get("animation_time", 0.0))
+		var base_form_id := int(actor_state.get("base_form_id", 0))
 		var weapon_record: Dictionary = actor_state.get("weapon_record", {})
 		_watch_animation(
 			"npc_" + actor_id, animation, animation_time, actor,
-			int(weapon_record.get("weapon_type", -1)), true
+			int(weapon_record.get("weapon_type", -1)), true, true, _npc_is_female(base_form_id)
 		)
 
 
@@ -763,9 +775,20 @@ func _watch_world_feedback() -> void:
 	_last_interaction_toast = toast
 
 
+func _npc_is_female(base_form_id: int) -> bool:
+	if _npc_female_cache.has(base_form_id):
+		return bool(_npc_female_cache[base_form_id])
+	if base_form_id <= 0 or not _reader_is_ready():
+		return false
+	var npc: Dictionary = _data_reader.call("find_npc_base", base_form_id)
+	var female := bool(npc.get("female", false))
+	_npc_female_cache[base_form_id] = female
+	return female
+
+
 func _watch_animation(
 	key: String, animation: String, animation_time: float, actor: Node3D,
-	weapon_type := -1, swing_sound := false
+	weapon_type := -1, swing_sound := false, effort_sound := false, female := false
 ) -> void:
 	var previous: Dictionary = _observed_animations.get(key, {})
 	var started := animation != str(previous.get("name", "")) or animation_time + 0.02 < float(previous.get("time", 0.0))
@@ -774,10 +797,20 @@ func _watch_animation(
 		return
 	if swing_sound and _is_attack_animation(animation):
 		play_weapon_swing(actor, weapon_type)
+	if effort_sound and _is_combat_effort_animation(animation):
+		play_combat_effort(actor, female)
 
 
 func _is_attack_animation(animation: String) -> bool:
 	return animation.to_lower().contains("attack")
+
+
+func _is_combat_effort_animation(animation: String) -> bool:
+	var normalized := animation.to_lower()
+	for word: String in ["attack", "block", "hit", "stagger", "combat"]:
+		if normalized.contains(word):
+			return true
+	return false
 
 
 func _next_combat_variant(group: String, count: int) -> int:
