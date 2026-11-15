@@ -241,6 +241,15 @@ Bytes esm_fixture() {
     Bytes light_data;
     append(light_data, string_subrecord("EDID", "FixtureLight"));
     append(light_data, string_subrecord("MODL", "Effects\\FixtureFire.NIF"));
+    Bytes light_properties;
+    u32(light_properties, 0);
+    u32(light_properties, 320);
+    u8(light_properties, 255);
+    u8(light_properties, 128);
+    u8(light_properties, 64);
+    u8(light_properties, 0);
+    u32(light_properties, 8);
+    subrecord(light_data, "DATA", light_properties);
     append(records, record("LIGH", 0x105, light_data));
 
     Bytes race_data;
@@ -417,6 +426,9 @@ void test_esm4(const std::filesystem::path& directory) {
     CHECK(next != nullptr);
     CHECK(next->references.size() == 3);
     CHECK(next->references[2].model_path == "Effects\\FixtureFire.NIF");
+    CHECK(next->references[2].light.radius == 320);
+    CHECK(next->references[2].light.color == (std::array<std::uint8_t, 3>{255, 128, 64}));
+    CHECK(next->references[2].light.flags == 8);
     CHECK(database.find_cell(0x20) == next);
     CHECK(database.unplaced_reference_count() == 1);
 

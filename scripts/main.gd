@@ -260,6 +260,7 @@ var _reported_unanswered: Dictionary = {}
 ## Action lines of the quest bridge already reported, so a command asked on every tick is printed once.
 var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
+var _flickering_lights: Array[OmniLight3D] = []
 var _cell_load_generation := 0
 var _deferred_world_generation := 0
 var _npc_stream_generation := 0
@@ -488,6 +489,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
+	_update_flickering_lights(_delta)
 	if not _inventory_open:
 		_update_player_attack_hold(_delta)
 		_update_skinned_physics_rigs()
@@ -544,7 +546,6 @@ func _process(_delta: float) -> void:
 		_update_exterior_terrain_collision_streaming()
 		_update_npc_streaming()
 		if not _player_face_state.is_empty():
-			_update_face_blink(_player_face_state, _delta)
 			_update_face_expression(_player_face_state, _delta)
 		if player.face_preview_enabled:
 			player.update_face_preview_anchor(_player_face_camera_anchor())
@@ -2260,6 +2261,7 @@ func _load_cell_geometry(
 		if has_node("TestFloor/MeshInstance3D"):
 			$TestFloor/MeshInstance3D.visible = true
 			$TestFloor/CollisionShape3D.disabled = false
+		_flickering_lights.clear()
 		for child in cell_visual_root.get_children():
 			child.queue_free()
 		await get_tree().process_frame
@@ -2317,7 +2319,20 @@ func _load_cell_geometry(
 			light.omni_range = light_radius * game_units_to_meters
 			light.set_meta("reference_id", int(reference.get("form_id", 0)))
 			cell_visual_root.add_child(light)
-			if str(reference.get("base_editor_id", "")).to_lower() == "prisonlamp190":
+			var light_editor_id := str(reference.get("base_editor_id", "")).to_lower()
+			var uses_fire_flicker := light_editor_id == "prisonlamp190" or (light_flags & 0x48) != 0
+			if uses_fire_flicker:
+				light.light_energy = 1.55 if light_editor_id == "prisonlamp190" else 1.0
+				light.set_meta("flicker_base_energy", light.light_energy)
+				light.set_meta("flicker_base_range", light.omni_range)
+				light.set_meta("flicker_phase", randf_range(0.0, TAU))
+				light.set_meta("flicker_rate", 3.2 if (light_flags & 0x40) != 0 else 7.0)
+				_flickering_lights.push_back(light)
+			if not is_exterior and light_editor_id.begins_with("dodaylight"):
+				await _add_window_light_beam(reference, reference_transform, generation)
+				if generation != _cell_load_generation:
+					return false
+			if light_editor_id == "prisonlamp190":
 				var fire_path := "Fire/FireTorchSmall.nif"
 				await assets.meshes_for_model(fire_path)
 				if generation != _cell_load_generation:
@@ -7070,6 +7085,7 @@ func _apply_face_expression(actor: Dictionary) -> void:
 	var previous_name := str(actor.get("face_expression_previous", ""))
 	if not previous_name.is_empty():
 		_set_actor_face_shape(actor, previous_name, float(actor.get("face_expression_previous_weight", 0.0)))
+	_configure_actor_face_diffuse_mode(actor)
 
 func _update_face_expression(actor: Dictionary, delta: float) -> void:
 	var transition_duration := 0.25
@@ -7100,6 +7116,29 @@ func _set_actor_face_shape(actor: Dictionary, shape_name: String, weight: float)
 		var shape_index := _blend_shape_index(instance.mesh, StringName(shape_name))
 		if shape_index >= 0:
 			instance.set_blend_shape_value(shape_index, weight)
+
+func _configure_actor_face_diffuse_mode(actor: Dictionary) -> void:
+	for instance_value: Variant in actor.get("face_meshes", []):
+		var instance := instance_value as MeshInstance3D
+		if not is_instance_valid(instance) or instance.mesh == null:
+			continue
+		# Moving eyes, teeth, and mouth pieces cast tiny shadows onto the morphed head.
+		# Keep the head lit by the scene, but prevent these animated face parts from
+		# drawing their own unstable shadow patches across it.
+		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if instance.has_meta("face_diffuse_mode_configured"):
+			continue
+		var source_material := instance.get_active_material(0) as StandardMaterial3D
+		if source_material == null:
+			continue
+		var unique_material := source_material.duplicate() as StandardMaterial3D
+		if unique_material == null:
+			continue
+		# Keep the same wrapped diffuse response on Neutral and animated expressions.
+		# Switching lighting models with the morph made the face visibly pop on each H press.
+		unique_material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
+		unique_material.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+		instance.material_override = unique_material
 
 func _update_face_talk(actor: Dictionary, delta: float, audio_manager: Node) -> void:
 	if is_instance_valid(audio_manager) and audio_manager.has_method("get_dialogue_visemes"):
@@ -7887,8 +7926,14 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		material.albedo_texture = texture
 		material.albedo_color = emitter.get("color", Color.WHITE)
 		material.vertex_color_use_as_albedo = true
+		var flame_particle := texture_path.to_lower().contains("fireflameparticle")
+		if flame_particle:
+			material.emission_enabled = true
+			material.emission = Color(1.0, 0.52, 0.18)
+			material.emission_texture = texture
+			material.emission_energy_multiplier = 1.4
 		var quad := QuadMesh.new()
-		quad.size = Vector2.ONE * radius * 2.0 * unit_scale
+		quad.size = Vector2.ONE * radius * 2.0 * unit_scale * (1.75 if flame_particle else 1.0)
 		quad.material = material
 		particles.draw_pass_1 = quad
 		cell_visual_root.add_child(particles)
@@ -8606,6 +8651,73 @@ func _sample_quaternion_keys(keys: PackedFloat32Array, time: float) -> Quaternio
 
 func _sample_scalar_keys(keys: PackedFloat32Array, time: float) -> float:
 	return AnimationSampling.scalar(keys, time)
+
+func _update_flickering_lights(delta: float) -> void:
+	for index in range(_flickering_lights.size() - 1, -1, -1):
+		var light := _flickering_lights[index]
+		if not is_instance_valid(light):
+			_flickering_lights.remove_at(index)
+			continue
+		var phase := float(light.get_meta("flicker_phase", 0.0)) + delta * float(light.get_meta("flicker_rate", 7.0))
+		light.set_meta("flicker_phase", phase)
+		var energy_factor := 0.88 + 0.09 * sin(phase) + 0.06 * sin(phase * 2.37 + 1.7)
+		var range_factor := 0.97 + 0.035 * sin(phase * 0.71 + 0.6)
+		light.light_energy = float(light.get_meta("flicker_base_energy", 1.0)) * energy_factor
+		light.omni_range = float(light.get_meta("flicker_base_range", light.omni_range)) * range_factor
+
+func _add_window_light_beam(reference: Dictionary, reference_transform: Transform3D, generation: int) -> void:
+	const BEAM_MODEL := "Dungeons/Misc/FX/FXLightBeamLong01.NIF"
+	var meshes: Array = await assets.meshes_for_model(BEAM_MODEL)
+	if generation != _cell_load_generation:
+		return
+	if meshes.is_empty():
+		return
+	# Aim the authored beam mesh from the window light toward the room's start position.
+	# The LIGH rotation describes the source and its shaft points out through the wall here.
+	var beam_direction := (player.global_position - reference_transform.origin).normalized()
+	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
+	var plane_normal := (camera.global_position - reference_transform.origin) if camera != null else Vector3.UP
+	plane_normal -= beam_direction * plane_normal.dot(beam_direction)
+	if plane_normal.length_squared() < 0.0001:
+		var fallback_axis := Vector3.UP if absf(beam_direction.dot(Vector3.UP)) < 0.95 else Vector3.RIGHT
+		plane_normal = fallback_axis - beam_direction * fallback_axis.dot(beam_direction)
+	plane_normal = plane_normal.normalized()
+	var beam_right := plane_normal.cross(beam_direction).normalized()
+	var beam_root := Node3D.new()
+	beam_root.name = "WindowLightBeam_%08X" % int(reference.get("form_id", 0))
+	var beam_scale_in_game_units := reference_transform.basis.get_scale().x
+	var beam_basis := Basis(beam_right, plane_normal, beam_direction).scaled(Vector3.ONE * beam_scale_in_game_units)
+	beam_root.transform = Transform3D(beam_basis, reference_transform.origin)
+	cell_visual_root.add_child(beam_root)
+	var beam_scale := clampf(float(reference.get("light_radius", 600.0)) / 600.0, 0.5, 1.25)
+	var tint: Color = reference.get("light_color", Color(0.78, 0.87, 1.0))
+	for mesh_value: Variant in meshes:
+		var mesh_entry: Dictionary = mesh_value
+		var mesh := mesh_entry.get("mesh") as ArrayMesh
+		var texture_path := str(mesh_entry.get("diffuse_texture_path", ""))
+		if mesh == null or texture_path.is_empty():
+			continue
+		var source_material := await assets.material_for_texture(texture_path, true)
+		if generation != _cell_load_generation:
+			beam_root.queue_free()
+			return
+		var beam_material := source_material.duplicate() as StandardMaterial3D
+		beam_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		beam_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		beam_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		beam_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+		beam_material.albedo_color = Color(tint.r, tint.g, tint.b, 0.22)
+		beam_material.emission_enabled = true
+		beam_material.emission = Color(tint.r, tint.g, tint.b)
+		beam_material.emission_texture = beam_material.albedo_texture
+		beam_material.emission_energy_multiplier = 0.65
+		var instance := MeshInstance3D.new()
+		instance.name = str(mesh_entry.get("mesh_name", "LightBeam"))
+		instance.mesh = mesh
+		instance.material_override = beam_material
+		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		instance.scale = Vector3.ONE * beam_scale
+		beam_root.add_child(instance)
 
 func _reference_transform(reference: Dictionary) -> Transform3D:
 	var position: PackedFloat32Array = reference.get("position", PackedFloat32Array())
