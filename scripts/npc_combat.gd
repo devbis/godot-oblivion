@@ -10,10 +10,12 @@ const CombatProjectile := preload("res://scripts/combat_projectile.gd")
 const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
 
 const AGGRESSION_ATTACKS_ON_SIGHT := 50
-const DETECT_RADIUS_M := 22.0
-const DETECT_RADIUS_FRENZIED_M := 32.0
+## Provisional sight ranges keep a visible hostile from aggroing across an entire dungeon cell.
+const DETECT_RADIUS_M := 10.0
+const DETECT_RADIUS_FRENZIED_M := 14.0
 const LOSE_INTEREST_M := 60.0
 const SIGHT_EYE_HEIGHT_M := 1.5
+const SIGHT_COLLISION_MASK := 1 | 2 | 16
 const START_CHECK_S := 0.3
 const REPATH_S := 0.5
 const RUN_SPEED_MPS := 3.4
@@ -245,7 +247,9 @@ func _sees_player(root: Node3D, player: CollisionObject3D) -> bool:
 	var camera: Camera3D = player.get("camera")
 	var to := camera.global_position if camera != null else player.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
 	var from := root.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
-	var query := PhysicsRayQueryParameters3D.create(from, to, 1 | 2, [player.get_rid(), (root as CollisionObject3D).get_rid()])
+	var query := PhysicsRayQueryParameters3D.create(
+		from, to, SIGHT_COLLISION_MASK, [player.get_rid(), (root as CollisionObject3D).get_rid()]
+	)
 	return root.get_world_3d().direct_space_state.intersect_ray(query).is_empty()
 
 func _weapon_type(actor: Dictionary) -> int:
