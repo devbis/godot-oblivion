@@ -1447,6 +1447,10 @@ func _navigation_waypoints(path: PackedVector3Array, speed_mps: float) -> Array[
 		waypoints.push_back(waypoint)
 	return waypoints
 
+func _clear_actor_route(root: Node) -> void:
+	var empty_route: Array[Dictionary] = []
+	root.call("configure_route", empty_route, false, 0.0, 0.08)
+
 func _refresh_actor_route(actor: Dictionary) -> void:
 	var root: Node = actor.get("root")
 	if not is_instance_valid(root) or bool(root.get("inactive")):
@@ -1458,22 +1462,40 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	var npc_id := str(actor.get("npc_editor_id", ""))
 	if quest_world != null and not route_quest_editor_id.is_empty() and not npc_id.is_empty():
 		package = quest_world.select_package(route_quest_editor_id, npc_id)
+	var wait_for_baurus := _intro_emperor_waits_for_baurus(actor, package)
 	# The same package keeps its route: starting it again would finish at once and run its OnPackageDone again.
 	var previous: Dictionary = actor.get("package", {})
 	if not package.is_empty() and str(package.get("editor_id", "")) == str(previous.get("editor_id", "")):
-		var current_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
-		var current_index := int(root.get("waypoint_index"))
-		var remaining_path: Array[Vector3] = []
-		for index in range(current_index, current_route.size()):
-			remaining_path.push_back(current_route[index])
-		print("OpenOB AI route: %s keeps package=%s from=%s destination=%s remaining_path=%s" % [
-			str(actor.get("reference_name", actor.get("name", "NPC"))),
-			str(package.get("editor_id", "")),
-			str((root as Node3D).global_position),
-			_package_location_label(_package_destination_form_id(package)),
-			str(remaining_path),
-		])
-		return
+		if bool(actor.get("route_waiting_for_baurus", false)):
+			if wait_for_baurus or _npc_conversation_active:
+				var held_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+				if not held_route.is_empty():
+					_clear_actor_route(root)
+				return
+			actor.erase("route_waiting_for_baurus")
+		elif wait_for_baurus:
+			actor["route_waiting_for_baurus"] = true
+			actor.erase("route_target")
+			_clear_actor_route(root)
+			print("OpenOB AI route: %s waits at %s until Baurus reaches him" % [
+				str(actor.get("reference_name", actor.get("name", "NPC"))),
+				str((root as Node3D).global_position),
+			])
+			return
+		else:
+			var current_route: Array = root.get("waypoints") if root.get("waypoints") is Array else []
+			var current_index := int(root.get("waypoint_index"))
+			var remaining_path: Array[Vector3] = []
+			for index in range(current_index, current_route.size()):
+				remaining_path.push_back(current_route[index])
+			print("OpenOB AI route: %s keeps package=%s from=%s destination=%s remaining_path=%s" % [
+				str(actor.get("reference_name", actor.get("name", "NPC"))),
+				str(package.get("editor_id", "")),
+				str((root as Node3D).global_position),
+				_package_location_label(_package_destination_form_id(package)),
+				str(remaining_path),
+			])
+			return
 	# A new package starts a new activation: its OnPackageDone may run once when its route ends.
 	if str(package.get("editor_id", "")) != str(previous.get("editor_id", "")):
 		actor["package_done"] = false
@@ -1481,6 +1503,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 		actor.erase("cross_cell")
 		actor.erase("package_arrival_distance")
 		actor.erase("follow_hold_target_form_id")
+		actor.erase("route_waiting_for_baurus")
 	if int(package.get("form_id", 0)) != int(previous.get("form_id", 0)):
 		actor.erase("npc_greet_attempted_package_id")
 		actor.erase("npc_greet_last_attempt_msec")
@@ -1492,6 +1515,15 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 	actor["package"] = package
 	if quest_world != null:
 		quest_world.set_actor_package(str(actor.get("reference_name", "")), int(package.get("form_id", 0)))
+	if wait_for_baurus:
+		actor["route_waiting_for_baurus"] = true
+		actor.erase("route_target")
+		_clear_actor_route(root)
+		print("OpenOB AI route: %s waits at %s until Baurus reaches him" % [
+			str(actor.get("reference_name", actor.get("name", "NPC"))),
+			str((root as Node3D).global_position),
+		])
+		return
 	var waypoints: Array[Dictionary] = []
 	var route_path := PackedVector3Array()
 	var route_uses_pathgrid := false
@@ -1853,6 +1885,13 @@ func _begin_npc_greeting(speaker: Dictionary, listener: Dictionary) -> void:
 		print("OpenOB npc conversation: the data has no HELLO topic")
 		return
 	_npc_conversation_active = true
+	var paused_roots: Array[Node3D] = []
+	for participant: Dictionary in [speaker, listener]:
+		var participant_root := participant.get("root") as Node3D
+		if is_instance_valid(participant_root) and participant_root.has_method("set_dialogue_paused") \
+				and not paused_roots.has(participant_root):
+			participant_root.call("set_dialogue_paused", true)
+			paused_roots.push_back(participant_root)
 	set_npc_look_target(speaker_name, listener_name)
 	set_npc_look_target(listener_name, speaker_name)
 	var topic_ids: Array = [hello_id]
@@ -1879,6 +1918,12 @@ func _begin_npc_greeting(speaker: Dictionary, listener: Dictionary) -> void:
 		if ends or topic_ids.is_empty() or not is_instance_valid(first.get("root")) or not is_instance_valid(second.get("root")):
 			break
 	_npc_conversation_active = false
+	for participant_root: Node3D in paused_roots:
+		if is_instance_valid(participant_root) and participant_root.has_method("set_dialogue_paused"):
+			participant_root.call("set_dialogue_paused", false)
+	# Find packages end at their actor target. Re-evaluate both actors after the greeting so a stage-dependent next
+	# package (including a route through the next door) starts once the exchange is over.
+	_refresh_npc_routes()
 
 ## The first of the topics that has an eligible response for this speaker and listener, with its result applied; {} if none.
 func _select_npc_conversation_line(topic_ids: Array, speaker: Dictionary, listener: Dictionary) -> Dictionary:
@@ -2077,6 +2122,34 @@ func _is_dynamic_follow_package(package: Dictionary) -> bool:
 	return int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_FOLLOW \
 		and int(package.get("location_form_id", 0)) == 0 \
 		and int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE
+
+
+## In the CharacterGen ambush, the Emperor's marker package is already selected while Baurus is still finding him.
+## Keep Uriel at his authored spot until the guard reaches him and their scripted exchange has finished.
+func _intro_emperor_waits_for_baurus(actor: Dictionary, package: Dictionary) -> bool:
+	if route_quest_editor_id.to_lower() != "charactergen" \
+			or str(actor.get("npc_editor_id", "")).to_lower() != "urielseptim" \
+			or str(package.get("editor_id", "")).to_lower() != "cgemperortomarkerc2" \
+			or quest_world == null:
+		return false
+	var emperor_reference_id := int(actor.get("reference_id", 0))
+	for candidate: Dictionary in _npc_actors:
+		if int(candidate.get("reference_id", 0)) == emperor_reference_id or bool(candidate.get("dead", false)):
+			continue
+		var candidate_npc_id := str(candidate.get("npc_editor_id", ""))
+		if candidate_npc_id.to_lower() != "baurus":
+			continue
+		var candidate_package: Dictionary = quest_world.select_package(route_quest_editor_id, candidate_npc_id)
+		if str(candidate_package.get("editor_id", "")).to_lower() != "cgbaurustoemperor" \
+				or int(candidate_package.get("target_form_id", 0)) != emperor_reference_id:
+			continue
+		var current_package: Dictionary = candidate.get("package", {})
+		var package_is_already_done := bool(candidate.get("package_done", false)) \
+			and int(current_package.get("form_id", 0)) == int(candidate_package.get("form_id", 0))
+		if package_is_already_done and not _npc_conversation_active:
+			continue
+		return true
+	return false
 
 
 ## A Find package whose target is an actor goes to wherever that actor is (CGBaurusToEmperor), not to the spot it was
