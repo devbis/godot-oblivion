@@ -355,6 +355,7 @@ var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
 var targeting := InteractionTargeting.new()
 var physics_grabber := PhysicsObjectGrabber.new()
 var _container_reference_cache: Dictionary = {}
+var _activator_reference_cache: Dictionary = {}
 var _interaction_toast_text := ""
 var _interaction_toast_remaining := 0.0
 var _dialogue_active := false
@@ -2252,6 +2253,7 @@ func _load_cell_geometry(
 		_exterior_terrain_collision_attempted_ids.clear()
 		_placed_items.clear()
 		_container_reference_cache.clear()
+		_activator_reference_cache.clear()
 		director.clear_door_references()
 		# Doors are rebuilt closed, so the open marks of the previous cell go.
 		quest_bridge.reset_cell_state(self)
@@ -4479,6 +4481,7 @@ func _setup_targeting() -> void:
 	targeting.player = player
 	targeting.world_host = self
 	targeting.item_lookup = func(reference_id: int) -> Dictionary: return _placed_items.get(reference_id, {})
+	targeting.activator_lookup = _scripted_activator_reference_by_id
 	targeting.door_lookup = _door_reference_by_id
 	targeting.container_lookup = _container_reference_by_id
 	targeting.corpse_lookup = _corpse_under_ray
@@ -4504,6 +4507,27 @@ func _container_reference_by_id(reference_id: int) -> Dictionary:
 			result = {"reference": reference, "display_name": name if not name.is_empty() else "Container"}
 		break
 	_container_reference_cache[reference_id] = result
+	return result
+
+func _scripted_activator_reference_by_id(reference_id: int) -> Dictionary:
+	if data_reader == null or current_cell.is_empty():
+		return {}
+	if _activator_reference_cache.has(reference_id):
+		return _activator_reference_cache[reference_id]
+	var result := {}
+	for reference_value: Variant in current_cell.get("references", []):
+		var reference: Dictionary = reference_value
+		if int(reference.get("form_id", 0)) != reference_id:
+			continue
+		var base_form_id := int(reference.get("base_form_id", 0))
+		if str(data_reader.find_record_type(base_form_id)) == "ACTI" \
+				and int(reference.get("script_form_id", 0)) > 0:
+			var display_name := _record_display_name(base_form_id)
+			if display_name.is_empty():
+				display_name = str(reference.get("reference_name", "Object"))
+			result = {"reference": reference, "display_name": display_name}
+		break
+	_activator_reference_cache[reference_id] = result
 	return result
 
 func _door_reference_by_id(reference_id: int) -> Dictionary:
@@ -5116,6 +5140,22 @@ func _activate_target(target: Dictionary) -> void:
 			_open_loot_menu(target)
 		"talk":
 			_begin_dialogue(target.get("actor", {}))
+		"activate":
+			var reference: Dictionary = target.get("reference", {})
+			var script_form_id := int(reference.get("script_form_id", 0))
+			if script_form_id <= 0 or quest_world == null:
+				return
+			var target_name := str(reference.get("reference_name", "")).strip_edges()
+			if target_name.is_empty():
+				target_name = "0x%08X" % int(target.get("reference_id", 0))
+			print("OpenOB activator: player activates %s" % target_name)
+			var result: Dictionary = quest_world.run_object_event(
+				script_form_id, "OnActivate", "", Callable(self, "_quest_distance"), target_name, "player"
+			)
+			for line: String in _apply_driver_result(result):
+				print("OpenOB activation: " + line)
+			if _needs_route_refresh(result):
+				_refresh_npc_routes()
 		"open":
 			_use_key_if_locked(target)
 			var door_reference: Dictionary = target.get("reference", {})

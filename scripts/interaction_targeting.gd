@@ -2,25 +2,27 @@ extends RefCounted
 ## Acquires the object under the screen center and classifies it into one target snapshot. The HUD draws the snapshot and
 ## the interact key acts on it, so the displayed target and the activated target are the same object.
 ##
-## Snapshot fields: kind (none|item|container|door|npc), reference_id (-1 when absent), display_name,
-## action (none|take|enter|locked|talk|attack|open|loot), reticle_icon (0 = default crosshair), crime, locked,
+## Snapshot fields: kind (none|item|activator|container|door|npc), reference_id (-1 when absent), display_name,
+## action (none|take|activate|enter|locked|talk|attack|open|loot), reticle_icon (0 = default crosshair), crime, locked,
 ## lock_level (-1 when unavailable), enemy_health_ratio (negative when unavailable), plus the source record
-## (`reference`/`item`) for the executor.
+## (`reference`, `item`, or `actor`) for the executor.
 
-## Items, containers and doors keep prototype ranges. An actor is activated (talked to) within the original pick length:
+## Items, containers and doors keep prototype ranges. Scripted activators and actors use the original pick length:
 ## `iActivatePickLength` is 150 game units in Oblivion.exe (the default registered at 0x009EDFA0), 1.5 m.
 var item_range_m := 1.8
+var activator_range_m := 1.5
 var actor_range_m := 1.5
 var door_range_m := 2.5
 var container_range_m := 1.8
 var reach_origin_height_m := 0.9
-## Layers: 2 world references, 4 NPCs, 8 pickup areas, 16 doors/extra.
+## Layers: 2 world references, 4 NPCs, 8 pickup areas, 16 dynamic objects/extra.
 var collision_mask := 2 | 4 | 8 | 16
 
 ## Activation atlas cell per kind/action. Provisional visual inferences (see docs/hud-and-interactions-plan.md); the only
 ## place that maps a target to an icon. 0 is the default crosshair.
 const RETICLE_ICONS := {
 	"item": 1,
+	"activator": 1,
 	"container": 2,
 	"corpse": 2,
 	"door": 8,
@@ -34,6 +36,7 @@ var player: CharacterBody3D
 var world_host: Node3D
 ## Callables supplied by the owner: (reference_id: int) -> Dictionary; empty dictionary when the id is not that kind.
 var item_lookup := Callable()
+var activator_lookup := Callable()
 var door_lookup := Callable()
 var container_lookup := Callable()
 ## (collider: Node) -> Dictionary of the NPC actor owning that collider, or {}.
@@ -97,7 +100,9 @@ func acquire() -> Dictionary:
 	# The ray starts at the camera, but reach is the player's: the ranges are measured from the player's body, and the ray is
 	# long enough to cover the camera's distance behind (or in front of) the player.
 	var reach_origin := player.global_position + Vector3.UP * reach_origin_height_m
-	var max_reach := maxf(maxf(item_range_m, container_range_m), maxf(door_range_m, actor_range_m))
+	var max_reach := maxf(
+		maxf(item_range_m, container_range_m), maxf(door_range_m, maxf(actor_range_m, activator_range_m))
+	)
 	var query := PhysicsRayQueryParameters3D.create(
 		ray_origin,
 		ray_origin + ray_direction * (max_reach + ray_origin.distance_to(reach_origin)),
@@ -138,6 +143,15 @@ func acquire() -> Dictionary:
 			# Ownership/crime data is not parsed yet, so crime stays false.
 			return _snapshot("item", "take", reference_id,
 				str(item.get("display_name", item.get("editor_id", "item"))), {"item": item})
+	if activator_lookup.is_valid():
+		var activator: Dictionary = activator_lookup.call(reference_id)
+		if not activator.is_empty():
+			if hit_distance > activator_range_m:
+				return empty_snapshot()
+			return _snapshot("activator", "activate", reference_id,
+				str(activator.get("display_name", activator.get("editor_id", "Object"))), {
+					"reference": activator.get("reference", {}),
+				})
 	if actor_lookup.is_valid():
 		var actor: Dictionary = actor_lookup.call(collider)
 		if not actor.is_empty():
