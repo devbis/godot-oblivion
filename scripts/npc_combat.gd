@@ -18,8 +18,6 @@ const SIGHT_EYE_HEIGHT_M := 1.5
 const SIGHT_COLLISION_MASK := 1 | 2 | 16
 const START_CHECK_S := 0.3
 const REPATH_S := 0.5
-const RUN_SPEED_MPS := 3.4
-const RUNNING_ANIMATION_SPEED_MPS := 2.2
 const NPC_ATTACK_RECOVERY_MIN_S := 0.9
 const NPC_ATTACK_RECOVERY_MAX_S := 1.3
 const BLOCK_HOLD_DURATION_S := 0.45
@@ -670,7 +668,7 @@ func _advance_actor_fatigue(actor: Dictionary, root: Node3D, delta: float) -> vo
 	var settings: Dictionary = host.get("_player_game_settings")
 	var recovery := float(settings.get(FATIGUE_RETURN_BASE_SETTING, 1.0)) \
 		+ endurance * float(settings.get(FATIGUE_RETURN_MULT_SETTING, 0.0))
-	if bool(root.get("is_walking")) and Vector2(root.velocity.x, root.velocity.z).length() > RUNNING_ANIMATION_SPEED_MPS:
+	if bool(root.get("is_walking")) and Vector2(root.velocity.x, root.velocity.z).length() > _running_threshold_mps(root):
 		recovery -= float(settings.get(FATIGUE_RUN_BASE_SETTING, 0.0))
 	fatigue["current"] = clampf(current + recovery * delta, 0.0, maximum)
 	actor["fatigue"] = fatigue
@@ -987,7 +985,7 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		combat.repath = REPATH_S
 		_chase(actor, root, target, archer)
 	var speed := Vector2(root.velocity.x, root.velocity.z).length()
-	actor["combat_anim"] = prefix + ("fastforward" if speed > RUNNING_ANIMATION_SPEED_MPS else "forward")
+	actor["combat_anim"] = prefix + ("fastforward" if speed > _running_threshold_mps(root) else "forward")
 
 func _player_attack_state() -> Dictionary:
 	if str(host.get("_player_combat_action_kind")) == "attack":
@@ -1253,15 +1251,16 @@ func _update_dodge(actor: Dictionary, root: Node3D, flat: Vector2, combat: Dicti
 		actor["combat_anim"] = _prefix(actor) + "idle"
 
 func _chase(actor: Dictionary, root: Node3D, player: Node3D, archer: bool) -> void:
+	var run_speed := float(root.get("run_speed_mps"))
 	var arrival := (ARCHER_RANGE_M * 0.7) if archer else _reach_m(actor) * 0.6
 	var path: PackedVector3Array = host.get("director").call(
 		"navigation_path", root.global_position, player.global_position, host.call("_actor_collision_radius", root), false, arrival
 	)
 	var waypoints: Array[Dictionary] = []
 	if path.is_empty():
-		waypoints.push_back({"position": player.global_position, "speed_mps": RUN_SPEED_MPS})
+		waypoints.push_back({"position": player.global_position, "speed_mps": run_speed})
 	else:
-		waypoints = host.call("_navigation_waypoints", path, RUN_SPEED_MPS)
+		waypoints = host.call("_navigation_waypoints", path, run_speed)
 		# The navigation ends at the edge of what it can reach (a ledge above the target): the actor hops down to the floor
 		# beside the target. A target that is far or not lower is waited for at the edge.
 		var end := path[path.size() - 1]
@@ -1270,6 +1269,9 @@ func _chase(actor: Dictionary, root: Node3D, player: Node3D, archer: bool) -> vo
 			var away := Vector3(end.x - player.global_position.x, 0.0, end.z - player.global_position.z).normalized()
 			host.call("hop_down_waypoint", waypoints, player.global_position + away * CHASE_HOP_LANDING_OFFSET_M, CHASE_HOP_MAX_M)
 	root.call("configure_route", waypoints, false, 0.0, arrival, false)
+
+func _running_threshold_mps(root: Node3D) -> float:
+	return maxf(0.08, float(root.get("walk_speed_mps")) * 1.5)
 
 func _face(root: Node3D, flat: Vector2, delta: float) -> void:
 	if flat.length() < 0.05:

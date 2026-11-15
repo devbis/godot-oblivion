@@ -67,6 +67,15 @@ const NPC_COMBAT_SETTINGS := {
 	"iSkillExpertMin": 75.0,
 	"iSkillMasterMin": 100.0,
 }
+## Oblivion.exe FUN_00547c00 / FUN_00547d00: actor Speed sets base pace and Athletics raises the run multiplier.
+const NPC_MOVEMENT_SETTINGS := {
+	"fMoveCharWalkMin": 90.0, "fMoveCharWalkMax": 130.0,
+	"fMoveCreatureWalkMin": 5.0, "fMoveCreatureWalkMax": 300.0,
+	"fMoveWeightMin": 0.0, "fMoveWeightMax": 150.0,
+	"fMoveEncumEffect": 0.4, "fMoveEncumEffectNoWea": 0.3,
+	"fMoveNoWeaponMult": 1.1, "fMoveSneakMult": 0.6,
+	"fMoveRunMult": 3.0, "fMoveRunAthleticsMult": 1.0,
+}
 const PLAYER_SKELETON := "Characters/_male/skeleton.nif"
 const PLAYER_IDLE_KF := "Characters/_male/idleanims/dynamicidle_facegen.kf"
 const PLAYER_IDLE_SEQUENCE := "DynamicIdle_Facegen"
@@ -713,6 +722,10 @@ func _initialize_player_game_state() -> void:
 			_player_game_settings[setting_name] = data_reader.get_int_game_setting(setting_name, int(default_value))
 		else:
 			_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, default_value)
+	for setting_name: String in NPC_MOVEMENT_SETTINGS:
+		_player_game_settings[setting_name] = data_reader.get_float_game_setting(
+			setting_name, float(NPC_MOVEMENT_SETTINGS[setting_name])
+		)
 	_player_actor_values.configure_game_settings(_player_game_settings)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
@@ -1058,8 +1071,6 @@ func _speech_seconds(speaker: int, quest: String, topic: String, reply: int, lin
 var _player_route_timer := 0.0
 const DYNAMIC_ROUTE_REPLAN_DISTANCE_M := 2.5
 const DYNAMIC_ROUTE_RENEW_REMAINING_M := 1.2
-const WALK_SPEED_MPS := 1.3
-const RUN_SPEED_MPS := 3.4
 ## A follower runs once it is this far beyond its authored distance from the leader, and walks again when it is within the
 ## second one (the gap between the two keeps it from changing pace at every step).
 const FOLLOW_RUN_START_GAP_M := 3.0
@@ -1068,14 +1079,52 @@ const FOLLOW_RUN_STOP_GAP_M := 1.2
 ## The pace of a follower: a run while it is far behind its leader (or its package says always run), a walk otherwise.
 func _follow_speed(actor: Dictionary, distance: float, arrival_distance: float, package_flags: int) -> float:
 	if (package_flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0:
-		return RUN_SPEED_MPS
+		return _npc_movement_speed(actor, true)
 	var running := bool(actor.get("follow_running", false))
 	if running:
 		running = distance > arrival_distance + FOLLOW_RUN_STOP_GAP_M
 	else:
 		running = distance > arrival_distance + FOLLOW_RUN_START_GAP_M
 	actor["follow_running"] = running
-	return RUN_SPEED_MPS if running else WALK_SPEED_MPS
+	return _npc_movement_speed(actor, running)
+
+## Oblivion.exe FUN_00547c00: Speed interpolates between the char/creature walk bounds, then load and movement-state
+## modifiers apply. FUN_00547d00 multiplies that pace by fMoveRunMult plus Athletics * fMoveRunAthleticsMult / 100.
+func _npc_movement_speed(actor: Dictionary, running: bool) -> float:
+	var attributes: PackedInt64Array = actor.get("attributes", PackedInt64Array())
+	var skills: PackedInt64Array = actor.get("skills", PackedInt64Array())
+	var creature := bool(actor.get("creature", false))
+	var speed_attribute := float(attributes[4]) if attributes.size() > 4 else 50.0
+	var speed_ratio := clampf(speed_attribute / 100.0, 0.0, 1.0)
+	var minimum_setting := "fMoveCreatureWalkMin" if creature else "fMoveCharWalkMin"
+	var maximum_setting := "fMoveCreatureWalkMax" if creature else "fMoveCharWalkMax"
+	var movement_speed := lerpf(
+		float(_player_game_settings.get(minimum_setting, NPC_MOVEMENT_SETTINGS[minimum_setting])),
+		float(_player_game_settings.get(maximum_setting, NPC_MOVEMENT_SETTINGS[maximum_setting])),
+		speed_ratio
+	)
+	var minimum_weight := float(_player_game_settings.get("fMoveWeightMin", NPC_MOVEMENT_SETTINGS["fMoveWeightMin"]))
+	var maximum_weight := float(_player_game_settings.get("fMoveWeightMax", NPC_MOVEMENT_SETTINGS["fMoveWeightMax"]))
+	var encumbrance := float(actor.get("encumbrance", 0.0))
+	var load_ratio := clampf((encumbrance - minimum_weight) / maxf(1.0, maximum_weight - minimum_weight), 0.0, 1.0)
+	var unarmed := not creature and (actor.get("weapon_record", {}) as Dictionary).is_empty()
+	var encumbrance_effect_setting := "fMoveEncumEffectNoWea" if unarmed else "fMoveEncumEffect"
+	var encumbrance_effect := float(_player_game_settings.get(
+		encumbrance_effect_setting, NPC_MOVEMENT_SETTINGS[encumbrance_effect_setting]
+	))
+	movement_speed *= 1.0 - load_ratio * encumbrance_effect
+	if unarmed:
+		movement_speed *= float(_player_game_settings.get("fMoveNoWeaponMult", NPC_MOVEMENT_SETTINGS["fMoveNoWeaponMult"]))
+	if bool(actor.get("sneaking", false)):
+		movement_speed *= float(_player_game_settings.get("fMoveSneakMult", NPC_MOVEMENT_SETTINGS["fMoveSneakMult"]))
+	if running:
+		var athletics := float(skills[1]) if not creature and skills.size() > 1 else 0.0
+		var run_multiplier := float(_player_game_settings.get("fMoveRunMult", NPC_MOVEMENT_SETTINGS["fMoveRunMult"])) \
+			+ athletics * float(_player_game_settings.get(
+				"fMoveRunAthleticsMult", NPC_MOVEMENT_SETTINGS["fMoveRunAthleticsMult"]
+			)) / 100.0
+		movement_speed *= run_multiplier
+	return maxf(0.0, movement_speed * game_units_to_meters)
 
 ## How far an actor still has to walk along its route, from where it stands.
 func _remaining_route_length(root: Node3D, route: Array, route_index: int) -> float:
@@ -1141,7 +1190,7 @@ func _update_dynamic_target_routes() -> void:
 		var route_is_active := route_index >= 0 and route_index < active_route.size()
 		var flags := int(package.get("flags", 0))
 		var speed := _follow_speed(actor, destination_distance, arrival_distance, flags) \
-			if (follows_player or follows_actor) else (RUN_SPEED_MPS if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else WALK_SPEED_MPS)
+			if (follows_player or follows_actor) else _npc_movement_speed(actor, (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0)
 		# A follower that has fallen behind runs and drops back to a walk as it closes up: the route keeps its path, only
 		# its pace changes.
 		if route_is_active and root.has_method("set_route_speed"):
@@ -1549,7 +1598,9 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 				)
 				route_uses_pathgrid = bool(director.get("last_navigation_path_uses_pathgrid"))
 				var door_flags := int(package.get("flags", 0))
-				waypoints = _navigation_waypoints(route_path, 3.4 if (door_flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3)
+				waypoints = _navigation_waypoints(
+					route_path, _npc_movement_speed(actor, (door_flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0)
+				)
 				print("OpenOB package %s for %s: target %s is in another cell; it walks to door 0x%08X and goes through" % [
 					str(package.get("editor_id", "")), str(actor.get("name", "")),
 					_package_location_label(destination_form_id), int(door.get("form_id", 0))
@@ -1563,7 +1614,7 @@ func _refresh_actor_route(actor: Dictionary) -> void:
 			else:
 				actor.erase("route_target")
 			var flags := int(package.get("flags", 0))
-			var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
+			var speed := _npc_movement_speed(actor, (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0)
 			route_path = director.navigation_path(
 				(root as Node3D).global_position, destination, _actor_collision_radius(root as Node3D), true,
 				final_arrival_distance
@@ -1682,7 +1733,7 @@ func _on_actor_route_finished(actor_reference_id: int) -> void:
 					var retry_distance := Vector2(root.global_position.x - retry_end.x, root.global_position.z - retry_end.z).length()
 					if retry_distance > actor_arrival_distance:
 						var flags := int(package.get("flags", 0))
-						var speed := 3.4 if (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0 else 1.3
+						var speed := _npc_movement_speed(actor, (flags & AI_PACKAGE_FLAG_ALWAYS_RUN) != 0)
 						var waypoints: Array[Dictionary] = []
 						if int(package.get("package_type", -1)) == AI_PACKAGE_TYPE_USE_ITEM_AT:
 							var endpoint: Vector3 = retry_path[retry_path.size() - 1]
@@ -6549,6 +6600,15 @@ func _initial_actor_fatigue(npc: Dictionary) -> Dictionary:
 	maximum = maxf(maximum, 1.0)
 	return {"current": maximum, "max": maximum}
 
+func _npc_base_encumbrance(npc: Dictionary) -> float:
+	var inventory := {}
+	for entry_value: Variant in npc.get("inventory", []):
+		var entry: Dictionary = entry_value
+		var form_id := int(entry.get("form_id", 0))
+		if form_id > 0:
+			inventory[form_id] = int(inventory.get(form_id, 0)) + int(entry.get("count", 0))
+	return LootInventory.total_weight(inventory, data_reader)
+
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
 	if clear_existing:
 		_clear_cell_actors()
@@ -6577,6 +6637,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			else data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
 		if npc.is_empty():
 			continue
+		npc["encumbrance"] = _npc_base_encumbrance(npc)
 		# An actor a script killed or disabled stays that way when its cell is loaded again.
 		if quest_bridge.is_actor_removed(reference_id):
 			_npc_loaded_reference_ids[reference_id] = true
@@ -6728,6 +6789,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"animations": animations,
 			"attributes": npc.get("attributes", PackedInt64Array()),
 			"skills": npc.get("skills", PackedInt64Array()),
+			"encumbrance": float(npc.get("encumbrance", 0.0)),
 			"combat_style": npc.get("combat_style", {}),
 			"fatigue": _initial_actor_fatigue(npc),
 			"knockdown_state": "",
@@ -6752,6 +6814,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"air_animation_phase": "",
 			"turn_animation": "",
 		}
+		actor_root.set("walk_speed_mps", _npc_movement_speed(actor_state, false))
+		actor_root.set("run_speed_mps", _npc_movement_speed(actor_state, true))
 		_npc_actors.push_back(actor_state)
 		_register_quest_actor(actor_state)
 		if is_creature:
@@ -7325,7 +7389,7 @@ func _npc_locomotion_animation(actor: Dictionary, root: Node3D, horizontal_speed
 	elif local_velocity.z > 0.0:
 		direction = "Backward"
 	var sneaking := bool(actor.get("sneaking", false))
-	var fast := horizontal_speed > 2.2 and not sneaking
+	var fast := horizontal_speed > maxf(0.08, float(root.get("walk_speed_mps")) * 1.5) and not sneaking
 	var in_combat := actor.has("combat")
 	var stance_prefix := _npc_stance_prefix(actor)
 	if bool(root.get("is_swimming")):

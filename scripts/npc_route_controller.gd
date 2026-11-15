@@ -4,7 +4,6 @@ extends CharacterBody3D
 ## route plane in cells where no walkable floor collider can be found.
 
 const HIT_IMPULSE_CAP_MPS := 0.4
-const HOP_RUN_SPEED_MPS := 3.4
 const HOP_ARRIVAL_M := 0.6
 const HOP_VOID_DEPTH_M := 3.0
 const HOP_TIMEOUT_S := 5.0
@@ -16,6 +15,7 @@ const SWIM_BUOYANCY_RESPONSE := 2.8
 const SWIM_VERTICAL_SPEED_MPS := 1.8
 
 @export var walk_speed_mps := 1.3
+@export var run_speed_mps := 3.4
 @export var gravity_mps2 := 9.8
 @export var arrival_distance := 0.08
 ## Pause at each waypoint. The ESM does not give one, so the default is none.
@@ -313,8 +313,8 @@ func _update_hop(delta: float) -> void:
 	var direction := to_landing / flat_distance if flat_distance > 0.05 else Vector3.ZERO
 	if flat_distance > 0.05:
 		_face_route_direction(direction, delta)
-	velocity.x = direction.x * HOP_RUN_SPEED_MPS
-	velocity.z = direction.z * HOP_RUN_SPEED_MPS
+	velocity.x = direction.x * run_speed_mps
+	velocity.z = direction.z * run_speed_mps
 	velocity.y = 0.0 if is_on_floor() else velocity.y - gravity_mps2 * delta
 	is_walking = true
 	move_and_slide()
