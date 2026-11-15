@@ -5865,8 +5865,13 @@ func _player_attack(power_attack := false, power_suffix := "") -> bool:
 		if _player_weapon_form_id <= 0:
 			side = "left" if _next_attack_left else "right"
 			_next_attack_left = not _next_attack_left
-		elif Input.is_action_pressed("move_left") and not Input.is_action_pressed("move_right"):
-			side = "left"
+		else:
+			var moving_left := Input.is_action_pressed("move_left")
+			var moving_right := Input.is_action_pressed("move_right")
+			if moving_left != moving_right:
+				side = "left" if moving_left else "right"
+			else:
+				side = "left" if _next_attack_left else "right"
 		if _player_weapon_type() < 0:
 			unarmed_variant = "jab" if _player_unarmed_attack_index % 2 == 0 else "hook"
 			_player_unarmed_attack_index += 1
@@ -5878,6 +5883,8 @@ func _player_attack(power_attack := false, power_suffix := "") -> bool:
 			side, arms_power_suffix if power_attack else unarmed_variant, power_suffix
 		)
 		if arms_attack_started:
+			if not power_attack and _player_weapon_form_id > 0 and _player_weapon_type() != WEAPON_TYPE_BOW:
+				_next_attack_left = side == "right"
 			AudioManager.play_weapon_swing(player, _player_weapon_type())
 			_spend_player_attack_fatigue(power_attack)
 		return arms_attack_started
@@ -5886,6 +5893,8 @@ func _player_attack(power_attack := false, power_suffix := "") -> bool:
 	var attack_animation := power_clip_name if power_attack else _player_attack_animation(side, unarmed_variant)
 	if attack_animation.is_empty():
 		return false
+	if not power_attack and _player_weapon_form_id > 0 and _player_weapon_type() != WEAPON_TYPE_BOW:
+		_next_attack_left = side == "right"
 	_player_combat_action = attack_animation
 	_player_combat_action_kind = "attack"
 	_player_combat_action_sound_pending = true
