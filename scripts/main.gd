@@ -22,6 +22,11 @@ const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
 const AnimationSampling := preload("res://scripts/animation_sampling.gd")
 const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
 const NpcCombat := preload("res://scripts/npc_combat.gd")
+const ACTOR_COLLISION_LAYER := 4
+const MOVABLE_COLLISION_LAYER := 16
+const CRUSHING_LOG_MODEL := "dungeons/caves/traps/ctraplogs01.nif"
+const CRUSHING_LOG_MIN_IMPACT_SPEED_MPS := 0.75
+const CRUSHING_LOG_DAMAGE_PER_KG_MPS := 0.75
 const ActorRagdoll := preload("res://scripts/actor_ragdoll.gd")
 const PhysicsCollapse := preload("res://scripts/physics_collapse.gd")
 const CombatProjectile := preload("res://scripts/combat_projectile.gd")
@@ -336,6 +341,7 @@ var _player_combat_stances_loaded: Dictionary = {}
 var _player_combat_available_clips: Dictionary = {}
 var _arms: FirstPersonArms
 var _npc_combat: NpcCombat
+var _crushing_log_bodies: Array[RigidBody3D] = []
 ## Physics objects held in place until a script plays their NIF animation (the crumbling wall by the prison gate).
 var _physics_collapse := PhysicsCollapse.new()
 var _next_attack_left := false
@@ -871,6 +877,9 @@ func _log_runtime_spawn_positions() -> void:
 	])
 
 func _physics_process(delta: float) -> void:
+	for log_body: RigidBody3D in _crushing_log_bodies:
+		if is_instance_valid(log_body) and not log_body.freeze:
+			log_body.set_meta("preimpact_velocity", log_body.linear_velocity)
 	if _inventory_open:
 		_aimed_target = InteractionTargeting.empty_snapshot()
 		return
@@ -2292,6 +2301,7 @@ func _load_cell_geometry(
 	var generation := _cell_load_generation
 	_set_cell_environment(cell)
 	if clear_existing:
+		_crushing_log_bodies.clear()
 		physics_grabber.release_without_throw()
 		_exterior_collision_stream_enabled = false
 		_exterior_collision_stream_busy = false
@@ -3206,6 +3216,7 @@ func _instantiate_imported_nif_physics(
 	var body_count := 0
 	var dynamic_count := 0
 	var articulated := not constraints.is_empty()
+	var crushing_log_trap := model_path.to_lower().replace("\\", "/").ends_with(CRUSHING_LOG_MODEL)
 	for body_value: Variant in bodies:
 		var body_data: Dictionary = body_value
 		var node_name := str(body_data.get("node_name", ""))
@@ -3223,9 +3234,14 @@ func _instantiate_imported_nif_physics(
 			rigid_body.linear_damp = float(body_data.get("linear_damping", 0.0))
 			rigid_body.angular_damp = float(body_data.get("angular_damping", 0.0))
 			# Layer 16 marks movable bodies for grabbing. Standalone props collide
-			# with one another; articulated chains retain their tuned world/player mask.
-			rigid_body.collision_layer = 16
-			rigid_body.collision_mask = 3 if articulated else 19
+			# with one another and actors; articulated chains retain their tuned world/player mask.
+			rigid_body.collision_layer = MOVABLE_COLLISION_LAYER
+			rigid_body.collision_mask = 3 if articulated else (19 | ACTOR_COLLISION_LAYER)
+			if crushing_log_trap:
+				rigid_body.contact_monitor = true
+				rigid_body.max_contacts_reported = 8
+				rigid_body.body_entered.connect(_on_crushing_log_body_entered.bind(rigid_body, reference_id))
+				_crushing_log_bodies.push_back(rigid_body)
 			var physics_material := PhysicsMaterial.new()
 			physics_material.friction = float(body_data.get("friction", 0.3))
 			physics_material.bounce = float(body_data.get("restitution", 0.0))
@@ -5739,6 +5755,25 @@ func _update_npc_combat(delta: float) -> void:
 		_npc_combat = NpcCombat.new(self)
 	_npc_combat.update(delta)
 
+func _on_crushing_log_body_entered(body: Node3D, log_body: RigidBody3D, trap_reference_id: int) -> void:
+	if not is_instance_valid(body) or not is_instance_valid(log_body) \
+			or not body is CharacterBody3D or not body.has_meta("reference_id"):
+		return
+	var preimpact_velocity: Vector3 = log_body.get_meta("preimpact_velocity", Vector3.ZERO)
+	var impact_speed := maxf(log_body.linear_velocity.length(), preimpact_velocity.length())
+	if impact_speed < CRUSHING_LOG_MIN_IMPACT_SPEED_MPS:
+		return
+	var victim_reference_id := int(body.get_meta("reference_id", 0))
+	var damage := log_body.mass * impact_speed * CRUSHING_LOG_DAMAGE_PER_KG_MPS
+	if _npc_combat == null:
+		_npc_combat = NpcCombat.new(self)
+	if _npc_combat.receive_environmental_hit(
+		victim_reference_id, log_body.global_position, damage, trap_reference_id
+	):
+		print("OpenOB trap impact: logs 0x%08X hit %s at %.2fm/s for %.1f damage" % [
+			trap_reference_id, str(body.get_meta("reference_name", body.name)), impact_speed, damage
+		])
+
 ## A reference with an enable parent (XESP) follows that reference's state; one without is disabled only by its flag.
 func _actor_reference_disabled(reference: Dictionary, depth: int = 0) -> bool:
 	var relocated: Dictionary = _relocated_actors.get(int(reference.get("form_id", 0)), {})
@@ -6672,7 +6707,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		actor_root.set_meta("reference_id", reference_id)
 		actor_root.set_meta("reference_name", actor_reference_name)
 		actor_root.collision_layer = 4
-		actor_root.collision_mask = 7
+		actor_root.collision_mask = 7 | MOVABLE_COLLISION_LAYER
 		actor_root.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 		actor_root.transform = _actor_reference_transform(reference)
 		actor_root.process_mode = Node.PROCESS_MODE_PAUSABLE

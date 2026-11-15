@@ -460,6 +460,36 @@ func receive_player_hit(
 	_call_allies(actor, _player_attacker())
 	return blocked
 
+## Damage an actor struck by a moving trap. The trap is not attributed to the player, but actor hit/death scripts still run.
+func receive_environmental_hit(
+	reference_id: int, source_position: Vector3, health_damage: float, source_reference_id: int
+) -> bool:
+	var actor := _actor_by_id(reference_id)
+	if actor.is_empty() or bool(actor.get("dead", false)) or health_damage <= 0.0:
+		return false
+	var health: Dictionary = actor.get("health", {})
+	if health.is_empty():
+		return false
+	var now_msec := Time.get_ticks_msec()
+	var impact_times: Dictionary = actor.get("environmental_impact_times", {})
+	var source_key := str(source_reference_id)
+	if now_msec - int(impact_times.get(source_key, 0)) < 750:
+		return false
+	impact_times[source_key] = now_msec
+	actor["environmental_impact_times"] = impact_times
+	var remaining := maxf(0.0, float(health.get("current", 0.0)) - health_damage)
+	if bool(actor.get("essential", false)):
+		remaining = maxf(remaining, 1.0)
+	health["current"] = remaining
+	actor["health"] = health
+	_run_actor_events(actor, "OnHit", "")
+	if remaining <= 0.0:
+		kill_actor(actor)
+		return true
+	if not bool(actor.get("dead", false)):
+		_react_to_hit(actor, source_position, 0.0, -1, 0)
+	return true
+
 ## Apply damage-over-time effects without treating each frame as a new physical hit.
 func add_player_spell_effects(reference_id: int, effects: Array, range_type: int) -> void:
 	var actor := _actor_by_id(reference_id)
