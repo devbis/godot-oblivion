@@ -278,6 +278,7 @@ var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
 var _flickering_lights: Array[OmniLight3D] = []
 var _cell_load_generation := 0
+var _cell_geometry_partition_origin := Vector3.ZERO
 var _deferred_world_generation := 0
 var _npc_stream_generation := 0
 var _npc_stream_enabled := false
@@ -2304,6 +2305,9 @@ func _load_cell_geometry(
 ) -> bool:
 	_cell_load_generation += 1
 	var generation := _cell_load_generation
+	if clear_existing:
+		_cell_geometry_partition_origin = player.global_position
+	var partition_origin := _cell_geometry_partition_origin
 	_set_cell_environment(cell)
 	if clear_existing:
 		_crushing_log_bodies.clear()
@@ -2355,7 +2359,7 @@ func _load_cell_geometry(
 			0.0,
 			-(float(land.get("grid_y", 0)) + 0.5) * EXTERIOR_CELL_SIZE
 		) * game_units_to_meters
-		var land_distance := land_position.distance_to(player.global_position)
+		var land_distance := land_position.distance_to(partition_origin)
 		if (min_distance > 0.0 and land_distance <= min_distance) or land_distance > max_distance:
 			continue
 		var land_result: Dictionary = await _add_land_cell(land, generation)
@@ -2371,13 +2375,14 @@ func _load_cell_geometry(
 		if generation != _cell_load_generation:
 			return false
 		var reference_transform := _reference_transform(reference)
-		var reference_distance := reference_transform.origin.distance_to(player.global_position)
+		var reference_distance := reference_transform.origin.distance_to(partition_origin)
 		if (min_distance > 0.0 and reference_distance <= min_distance) or reference_distance > max_distance:
 			continue
+		var player_distance := reference_transform.origin.distance_to(player.global_position)
 		var light_radius := float(reference.get("light_radius", 0.0))
 		var light_flags := int(reference.get("light_flags", 0))
 		if light_radius > 0.0 and (light_flags & 0x24) == 0 and not _actor_reference_disabled(reference) \
-				and (not is_exterior or reference_distance <= EXTERIOR_REFERENCE_RENDER_DISTANCE):
+				and (not is_exterior or player_distance <= EXTERIOR_REFERENCE_RENDER_DISTANCE):
 			var light := OmniLight3D.new()
 			light.name = "Light_%08X" % int(reference.get("form_id", 0))
 			light.position = reference_transform.origin
