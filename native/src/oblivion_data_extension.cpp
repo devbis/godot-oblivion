@@ -951,6 +951,10 @@ public:
             for (const auto& point : emitter.mesh_emission_points)
                 mesh_emission_points.push_back(Vector3(point[0], point[1], point[2]));
             item["mesh_emission_points"] = mesh_emission_points;
+            PackedFloat32Array color_keys;
+            for (const auto& key : emitter.color_keys)
+                for (const auto value : key) color_keys.push_back(value);
+            item["color_keys"] = color_keys;
             item["speed"] = emitter.speed;
             item["speed_variation"] = emitter.speed_variation;
             item["radius"] = emitter.radius;

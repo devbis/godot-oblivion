@@ -757,6 +757,16 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                         output.grow_time = grow_fade->growTime;
                         output.fade_time = grow_fade->fadeTime;
                     }
+                    auto* color_modifier = header.GetBlock<nifly::NiPSysColorModifier>(other_ref);
+                    auto* color_data = color_modifier ? header.GetBlock<nifly::NiColorData>(color_modifier->dataRef) : nullptr;
+                    if (color_data) {
+                        for (uint32_t key_index = 0; key_index < color_data->data.GetNumKeys(); ++key_index) {
+                            const auto key = color_data->data.GetKey(static_cast<int>(key_index));
+                            output.color_keys.push_back({
+                                key.time, key.value.r, key.value.g, key.value.b, key.value.a
+                            });
+                        }
+                    }
                 }
                 output.declination = emitter->declination;
                 output.declination_variation = emitter->declinationVariation;

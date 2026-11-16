@@ -2429,7 +2429,7 @@ func _load_cell_geometry(
 						flame_transform = Transform3D(torch_transform.basis, torch_transform * flame_position)
 						break
 					break
-				_add_nif_particles(assets.nif_metadata_cache.get(fire_path.to_lower(), {}), flame_transform)
+				_add_nif_particles(assets.nif_metadata_cache.get(fire_path.to_lower(), {}), flame_transform, fire_path)
 		if is_exterior and bool(reference.get("is_tree", false)):
 			var tree_distance := reference_transform.origin.distance_to(player.global_position)
 			if tree_distance > EXTERIOR_TREE_RENDER_DISTANCE:
@@ -2502,7 +2502,7 @@ func _load_cell_geometry(
 			director.register_door_reference(reference, meshes, _reference_transform(reference))
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
-		_add_nif_particles(physics_metadata, reference_transform)
+		_add_nif_particles(physics_metadata, reference_transform, model_path)
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
 		var animate_reference := is_door or has_nif_animations
@@ -7958,7 +7958,8 @@ func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
-func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) -> void:
+func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, model_path := "") -> void:
+	var is_light_beam_dust := model_path.to_lower().replace("\\", "/").ends_with("/fxlightbeamdust01.nif")
 	for emitter_value: Variant in metadata.get("particle_emitters", []):
 		var emitter: Dictionary = emitter_value
 		var lifetime := float(emitter.get("lifetime", 0.0))
@@ -7979,14 +7980,19 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		# world-space particles. Convert emitter dimensions and speed explicitly.
 		var unit_scale := reference_transform.basis.get_scale().x
 		var emitter_position: Vector3 = emitter.get("position", Vector3.ZERO)
-		particles.transform = Transform3D(reference_transform.basis.orthonormalized(), reference_transform * emitter_position)
+		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
+		var particle_basis := reference_transform.basis.orthonormalized()
+		var particle_origin := reference_transform * emitter_position
+		if is_light_beam_dust and str(emitter.get("volume_shape", "")) == "box":
+			# FXLightBeamDust01's editor marker runs from its origin upward, while Godot's box emitter is centered.
+			particle_origin += particle_basis * Vector3.UP * absf(volume.z) * 0.5
+		particles.transform = Transform3D(particle_basis, particle_origin)
 		particles.amount = clampi(ceili(max_rate * lifetime), 1, 4096)
 		particles.lifetime = lifetime
 		var capacity_rate := float(particles.amount) / lifetime
 		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
 		particles.local_coords = not bool(emitter.get("world_space", false))
 		var process := ParticleProcessMaterial.new()
-		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
 		var mesh_points: PackedVector3Array = emitter.get("mesh_emission_points", PackedVector3Array())
 		if not mesh_points.is_empty():
 			var side := ceili(sqrt(float(mesh_points.size())))
@@ -8015,12 +8021,42 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D) 
 		var angle := float(emitter.get("declination", 0.0))
 		var planar := float(emitter.get("planar_angle", 0.0))
 		process.direction = Vector3(sin(angle) * cos(planar), cos(angle), -sin(angle) * sin(planar))
-		process.spread = rad_to_deg(absf(float(emitter.get("declination_variation", 0.0))))
+		# NIF variation is the full angle interval; Godot's spread is the +/- half-angle around direction.
+		process.spread = rad_to_deg(absf(float(emitter.get("declination_variation", 0.0))) * 0.5)
 		var speed := float(emitter.get("speed", 0.0)) * unit_scale
 		var variation := absf(float(emitter.get("speed_variation", 0.0))) * unit_scale
 		process.initial_velocity_min = maxf(0.0, speed - variation)
 		process.initial_velocity_max = maxf(process.initial_velocity_min, speed + variation)
 		process.gravity = Vector3.ZERO
+		# NiPSysColorModifier animates each particle's color and alpha over its life. Its color keys
+		# are independent of the emitter's constant color and the texture's own transparency.
+		var color_keys: PackedFloat32Array = emitter.get("color_keys", PackedFloat32Array())
+		if color_keys.size() >= 10 and color_keys.size() % 5 == 0:
+			var color_gradient := Gradient.new()
+			var color_key_count: int = color_keys.size() / 5
+			var first_color := Color(
+				color_keys[1], color_keys[2], color_keys[3], color_keys[4]
+			)
+			color_gradient.set_offset(0, clampf(color_keys[0], 0.0, 1.0))
+			color_gradient.set_color(0, first_color)
+			for key_index in range(1, color_key_count - 1):
+				var key_offset := clampf(color_keys[key_index * 5], 0.0, 1.0)
+				var key_color := Color(
+					color_keys[key_index * 5 + 1], color_keys[key_index * 5 + 2],
+					color_keys[key_index * 5 + 3], color_keys[key_index * 5 + 4]
+				)
+				color_gradient.add_point(key_offset, key_color)
+			var last_key_offset := clampf(color_keys[(color_key_count - 1) * 5], 0.0, 1.0)
+			var last_color := Color(
+				color_keys[(color_key_count - 1) * 5 + 1], color_keys[(color_key_count - 1) * 5 + 2],
+				color_keys[(color_key_count - 1) * 5 + 3], color_keys[(color_key_count - 1) * 5 + 4]
+			)
+			var last_point := color_gradient.get_point_count() - 1
+			color_gradient.set_offset(last_point, last_key_offset)
+			color_gradient.set_color(last_point, last_color)
+			var color_ramp := GradientTexture1D.new()
+			color_ramp.gradient = color_gradient
+			process.color_ramp = color_ramp
 		var grow := clampf(float(emitter.get("grow_time", 0.0)) / lifetime, 0.0, 1.0)
 		var fade := clampf(float(emitter.get("fade_time", 0.0)) / lifetime, 0.0, 1.0)
 		if grow > 0.0 or fade > 0.0:
@@ -8822,7 +8858,7 @@ func _add_window_light_beam(reference: Dictionary, reference_transform: Transfor
 		beam_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		beam_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 		beam_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
-		beam_material.albedo_color = Color(tint.r, tint.g, tint.b, 0.22)
+		beam_material.albedo_color = Color(tint.r, tint.g, tint.b, 1.0)
 		beam_material.emission_enabled = true
 		beam_material.emission = Color(tint.r, tint.g, tint.b)
 		beam_material.emission_texture = beam_material.albedo_texture
