@@ -30,6 +30,7 @@ var _reported_lip_files: Dictionary = {}
 var _combat_audio_rng := RandomNumberGenerator.new()
 var _last_combat_variant: Dictionary = {}
 var _combat_voice_candidates: Dictionary = {}
+var _creature_combat_sound_candidates: Dictionary = {}
 var _last_world_loading := false
 var _last_interaction_toast := ""
 
@@ -79,14 +80,51 @@ func play_footstep(actor: Node3D, running := false) -> void:
 		_play_asset_at(fallback, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6)
 
 
-## Randomized, nonverbal combat effort avoids playing faction- or quest-specific dialogue out of context.
-func play_combat_effort(actor: Node3D, female := false) -> void:
+## Randomized combat effort avoids playing faction- or quest-specific dialogue out of context.
+func play_combat_effort(
+	actor: Node3D, female := false, creature := false, creature_sound_group := "", animation := ""
+) -> void:
 	if not is_instance_valid(actor) or not _reader_is_ready():
+		return
+	if creature:
+		if creature_sound_group.is_empty():
+			return
+		var category := "attack" if animation.to_lower().contains("attack") else "injured"
+		var candidates := _creature_combat_sounds(creature_sound_group, category)
+		if candidates.is_empty():
+			return
+		var creature_variant := _next_combat_variant(
+			"creature_%s_%s" % [creature_sound_group, category], candidates.size()
+		)
+		var creature_stream := _stream_for_asset(candidates[creature_variant - 1])
+		if creature_stream != null:
+			_play_stream(creature_stream, actor.global_position + Vector3.UP * 0.4, actor, -2.0, 32.0, 2.0)
 		return
 	var sex := "female" if female else "male"
 	var variant := _combat_audio_rng.randi_range(1, 4)
 	var asset_path := "sound\\fx\\npc\\human\\gasp\\%s\\voc_gasp_%s_%02d.wav" % [sex, sex, variant]
 	_play_asset_at(asset_path, actor.global_position + Vector3.UP * 1.1, actor, -2.0, 32.0, 2.0)
+
+
+func _creature_combat_sounds(group: String, category: String) -> Array[String]:
+	var cache_key := "%s:%s" % [group, category]
+	if _creature_combat_sound_candidates.has(cache_key):
+		var cached_candidates: Array[String] = _creature_combat_sound_candidates[cache_key]
+		return cached_candidates
+	var prefix := "sound\\fx\\npc\\%s\\%s\\" % [group, category]
+	var candidates: Array[String] = []
+	for path: String in _data_reader.call("list_assets", prefix):
+		if path.get_extension().to_lower() == "wav":
+			candidates.push_back(path)
+	_creature_combat_sound_candidates[cache_key] = candidates
+	return candidates
+
+
+func _creature_sound_group(model_path: String) -> String:
+	var normalized := model_path.replace("\\", "/").strip_edges().trim_suffix("/")
+	if normalized.is_empty():
+		return ""
+	return normalized.get_base_dir().get_file().to_lower()
 
 
 ## Plays the actor's authored Hit/Attack voice response, if the running quests have
@@ -742,10 +780,13 @@ func _watch_combat_animations() -> void:
 		var animation := str(actor_state.get("active_animation", ""))
 		var animation_time := float(actor_state.get("animation_time", 0.0))
 		var base_form_id := int(actor_state.get("base_form_id", 0))
+		var creature := bool(actor_state.get("creature", false))
+		var creature_sound_group := _creature_sound_group(str(actor_state.get("skeleton_model_path", ""))) if creature else ""
+		var female := _npc_is_female(base_form_id) if not creature else false
 		var weapon_record: Dictionary = actor_state.get("weapon_record", {})
 		_watch_animation(
 			"npc_" + actor_id, animation, animation_time, actor,
-			int(weapon_record.get("weapon_type", -1)), true, true, _npc_is_female(base_form_id)
+			int(weapon_record.get("weapon_type", -1)), true, true, female, creature, creature_sound_group
 		)
 
 
@@ -788,7 +829,8 @@ func _npc_is_female(base_form_id: int) -> bool:
 
 func _watch_animation(
 	key: String, animation: String, animation_time: float, actor: Node3D,
-	weapon_type := -1, swing_sound := false, effort_sound := false, female := false
+	weapon_type := -1, swing_sound := false, effort_sound := false, female := false,
+	creature := false, creature_sound_group := ""
 ) -> void:
 	var previous: Dictionary = _observed_animations.get(key, {})
 	var started := animation != str(previous.get("name", "")) or animation_time + 0.02 < float(previous.get("time", 0.0))
@@ -798,7 +840,7 @@ func _watch_animation(
 	if swing_sound and _is_attack_animation(animation):
 		play_weapon_swing(actor, weapon_type)
 	if effort_sound and _is_combat_effort_animation(animation):
-		play_combat_effort(actor, female)
+		play_combat_effort(actor, female, creature, creature_sound_group, animation)
 
 
 func _is_attack_animation(animation: String) -> bool:
