@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -1026,6 +1027,13 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 const int skill = static_cast<std::int8_t>(value[i * 2]) - 12;
                 if (skill >= 0 && skill < static_cast<int>(race_face_gen.skill_bonuses.size()))
                     race_face_gen.skill_bonuses[static_cast<std::size_t>(skill)] = static_cast<std::int8_t>(value[i * 2 + 1]);
+            }
+            // The full 36-byte Oblivion RACE DATA also stores male/female height at offsets 16/20.
+            if (subrecord_size >= 24) {
+                const float male_height = f32(value + 16);
+                const float female_height = f32(value + 20);
+                if (std::isfinite(male_height) && male_height > 0.0f) race_face_gen.male_height = male_height;
+                if (std::isfinite(female_height) && female_height > 0.0f) race_face_gen.female_height = female_height;
             }
         } else if (tag == "VNAM" && is_race && subrecord_size >= 8) {
             race_face_gen.voice_form_id_male = u32(value);

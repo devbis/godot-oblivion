@@ -540,8 +540,10 @@ public:
                 racial_skill_bonuses.set(i, race->skill_bonuses[static_cast<std::size_t>(i)]);
         }
         result["racial_skill_bonuses"] = racial_skill_bonuses;
-        result["female"] = (npc->flags & 0x000001) != 0;
+        const bool female = (npc->flags & 0x000001) != 0;
+        result["female"] = female;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
+        result["race_height_scale"] = race ? (female ? race->female_height : race->male_height) : 1.0f;
         result["combat_style_form_id"] = static_cast<int64_t>(npc->combat_style_form_id);
         Dictionary combat_style;
         if (const auto* style = data_->find_combat_style(npc->combat_style_form_id)) {

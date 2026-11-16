@@ -48,18 +48,21 @@ var _target_camera_distance := 2.0
 var _current_camera_distance := 2.0
 var _camera_collision_shape: SphereShape3D
 var _third_person := true
-var _normal_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
-var _first_person_eye_anchor := Vector3(0.0, 1.5, 0.0)
+var _normal_camera_pivot_position := Vector3(0.0, 1.3, 0.0)
+var _first_person_eye_anchor := Vector3(0.0, 1.3, 0.0)
 var face_preview_enabled := false
 var controls_suspended := false
 var knocked_down := false
 var _saved_camera_pitch := -0.28
 var _saved_camera_distance := 2.0
-var _saved_camera_pivot_position := Vector3(0.0, 1.5, 0.0)
+var _saved_camera_pivot_position := Vector3(0.0, 1.3, 0.0)
 const FACE_PREVIEW_MIN_DISTANCE := 0.002
 const CAMERA_COLLISION_MASK := 2
 const CAMERA_COLLISION_MARGIN := 0.08
 const CHAIN_COLLISION_LAYER := 16
+const BASE_STANDING_CAPSULE_HEIGHT_M := 1.3
+const BASE_STANDING_CAPSULE_RADIUS_M := 0.22
+const BASE_CAMERA_HEIGHT_M := 1.3
 var _capture_mouse_on_focus := false
 var _stepper := CharacterStepper.new()
 var is_flying := false
@@ -72,7 +75,8 @@ var is_crouching := false
 var is_swimming := false
 var _water_surface_y := -INF
 var _crouch_blend := 0.0
-var _standing_capsule_height := 1.6
+var _standing_capsule_height := BASE_STANDING_CAPSULE_HEIGHT_M
+var _race_height_scale := 1.0
 @onready var _collision_shape: CollisionShape3D = $CollisionShape3D
 
 var is_first_person: bool:
@@ -111,6 +115,27 @@ func set_first_person_eye_anchor(anchor: Vector3) -> void:
 	if is_first_person:
 		camera_pivot.position = _first_person_eye_anchor - Vector3.UP * _knockdown_camera_drop
 		camera.position = Vector3.ZERO
+
+func set_race_height_scale(height_scale: float) -> void:
+	_race_height_scale = maxf(height_scale, 0.1)
+	_standing_capsule_height = BASE_STANDING_CAPSULE_HEIGHT_M * _race_height_scale
+	var capsule := _collision_shape.shape as CapsuleShape3D
+	if capsule != null:
+		capsule.radius = BASE_STANDING_CAPSULE_RADIUS_M * _race_height_scale
+		capsule.height = _standing_capsule_height
+		capsule.margin = 0.01
+		_collision_shape.position.y = _standing_capsule_height * 0.5
+	var body_proxy := get_node_or_null("BodyProxy") as MeshInstance3D
+	if body_proxy != null:
+		var proxy_mesh := body_proxy.mesh as CapsuleMesh
+		if proxy_mesh != null:
+			proxy_mesh.radius = BASE_STANDING_CAPSULE_RADIUS_M * _race_height_scale
+			proxy_mesh.height = _standing_capsule_height
+		body_proxy.position.y = _standing_capsule_height * 0.5
+	_normal_camera_pivot_position = Vector3(0.0, BASE_CAMERA_HEIGHT_M * _race_height_scale, 0.0)
+	_first_person_eye_anchor = _normal_camera_pivot_position
+	_saved_camera_pivot_position = _normal_camera_pivot_position
+	camera_pivot.position = _crouched_camera_pivot_position() - Vector3.UP * _knockdown_camera_drop
 
 func capture_mouse() -> void:
 	_capture_mouse_on_focus = true
@@ -383,7 +408,7 @@ func _update_crouch(delta: float) -> void:
 	elif not wants_crouch and is_crouching and _can_stand_up():
 		is_crouching = false
 	if capsule != null:
-		var height := crouch_capsule_height_m if is_crouching else _standing_capsule_height
+		var height := crouch_capsule_height_m * _race_height_scale if is_crouching else _standing_capsule_height
 		capsule.height = height
 		_collision_shape.position.y = height * 0.5
 	_crouch_blend = move_toward(_crouch_blend, 1.0 if is_crouching else 0.0, crouch_blend_speed * delta)
@@ -392,12 +417,12 @@ func _update_crouch(delta: float) -> void:
 
 func _crouched_camera_pivot_position() -> Vector3:
 	var base := _first_person_eye_anchor if is_first_person else _normal_camera_pivot_position
-	return base - Vector3(0.0, crouch_camera_drop_m * _crouch_blend, 0.0)
+	return base - Vector3(0.0, crouch_camera_drop_m * _race_height_scale * _crouch_blend, 0.0)
 
 func _can_stand_up() -> bool:
 	var standing := CapsuleShape3D.new()
 	var capsule := _collision_shape.shape as CapsuleShape3D
-	standing.radius = capsule.radius if capsule != null else 0.32
+	standing.radius = capsule.radius if capsule != null else 0.22
 	standing.height = _standing_capsule_height
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = standing

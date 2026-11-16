@@ -24,6 +24,8 @@ const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
 const NpcCombat := preload("res://scripts/npc_combat.gd")
 const ACTOR_COLLISION_LAYER := 4
 const MOVABLE_COLLISION_LAYER := 16
+const HUMANOID_ACTOR_CAPSULE_HEIGHT_M := 1.3
+const HUMANOID_ACTOR_CAPSULE_RADIUS_M := 0.18
 const CRUSHING_LOG_MODEL := "dungeons/caves/traps/ctraplogs01.nif"
 const CRUSHING_LOG_MIN_IMPACT_SPEED_MPS := 0.75
 const CRUSHING_LOG_DAMAGE_PER_KG_MPS := 0.75
@@ -348,6 +350,7 @@ var _next_attack_left := false
 var _arrow_source_meshes: Array = []
 var _pending_cast: Dictionary = {}
 var _player_base_record: Dictionary = {}
+var _player_race_height_scale := 1.0
 var _player_spell_form_ids: Array[int] = []
 var _player_selected_spell_form_id := 0
 var _player_actor_values := PlayerActorValues.new()
@@ -708,6 +711,8 @@ func _initialize_player_game_state() -> void:
 	if _player_base_record.is_empty():
 		push_warning("Could not read actor values and inventory from the installed game's Player base record")
 		return
+	_player_race_height_scale = maxf(0.1, float(_player_base_record.get("race_height_scale", 1.0)))
+	player.set_race_height_scale(_player_race_height_scale)
 	# During the prison tutorial the player has no chosen class. The NPC record stores
 	# the unmodified starting skills; race bonuses are applied once at initialization.
 	var starting_skills: PackedInt64Array = _player_base_record.get("skills", PackedInt64Array())
@@ -3941,7 +3946,7 @@ func _load_player_avatar() -> void:
 	status_label.text = "Loading player appearance…"
 	var avatar := Node3D.new()
 	avatar.name = "OriginalImperialAvatar"
-	avatar.scale = Vector3.ONE * game_units_to_meters
+	avatar.scale = Vector3.ONE * game_units_to_meters * _player_race_height_scale
 	_player_avatar = avatar
 	player.add_child(avatar)
 	await assets.meshes_for_model(PLAYER_SKELETON)
@@ -6479,7 +6484,7 @@ func _snap_player_to_nearby_floor() -> void:
 
 func _player_first_person_camera_anchor() -> Vector3:
 	if _player_skeleton == null:
-		return Vector3(0.0, 1.5, 0.0)
+		return Vector3(0.0, 1.3, 0.0)
 	var camera_bone_index := _player_skeleton.find_bone("Camera01")
 	if camera_bone_index >= 0:
 		var camera_position := _player_skeleton.to_global(_player_skeleton.get_bone_global_pose(camera_bone_index).origin)
@@ -6497,10 +6502,10 @@ func _player_first_person_camera_anchor() -> Vector3:
 
 func _player_face_camera_anchor() -> Vector3:
 	if _player_skeleton == null:
-		return Vector3(0.0, 1.5, 0.0)
+		return Vector3(0.0, 1.3, 0.0)
 	var head_bone_index := _player_skeleton.find_bone("Bip01 Head")
 	if head_bone_index < 0:
-		return Vector3(0.0, 1.5, 0.0)
+		return Vector3(0.0, 1.3, 0.0)
 	var head_pose := _player_skeleton.get_bone_global_pose(head_bone_index)
 	var model_to_head := _player_head_model_to_head_transform()
 	var face_target_in_skeleton := head_pose * (model_to_head * Vector3(0.0, 4.0, -9.5))
@@ -6718,15 +6723,13 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_capsule := CapsuleShape3D.new()
 		# Keep the blocker close to the actor's actual occupied space. Spawn
 		# separation uses this radius only when two actors actually overlap.
-		actor_capsule.radius = 0.18
-		var player_collision := player.get_node_or_null("CollisionShape3D") as CollisionShape3D
-		var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
+		var actor_height_scale := maxf(0.1, float(npc.get("race_height_scale", 1.0))) if not is_creature else 1.0
+		actor_capsule.radius = HUMANOID_ACTOR_CAPSULE_RADIUS_M * actor_height_scale
+		actor_capsule.height = HUMANOID_ACTOR_CAPSULE_HEIGHT_M * actor_height_scale
 		if creature_skeleton != null:
 			var creature_size := _creature_capsule_size(creature_skeleton, float(npc.get("base_scale", 1.0)))
 			actor_capsule.radius = creature_size.x
 			actor_capsule.height = creature_size.y
-		elif player_capsule != null:
-			actor_capsule.height = player_capsule.height
 		actor_capsule.margin = 0.005
 		actor_collision.shape = actor_capsule
 		actor_collision.position.y = actor_capsule.height * 0.5
@@ -6740,7 +6743,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			grounded_actor_count += 1
 		var avatar := Node3D.new()
 		avatar.name = "OriginalActor"
-		avatar.scale = Vector3.ONE * game_units_to_meters
+		avatar.scale = Vector3.ONE * game_units_to_meters * actor_height_scale
 		actor_root.add_child(avatar)
 		var skeleton := creature_skeleton
 		if not is_creature:
