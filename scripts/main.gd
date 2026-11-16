@@ -2613,6 +2613,9 @@ func _load_cell_geometry(
 						node_host.name = "NifNode_%d" % animated_node_hosts.size()
 						node_host.set_meta("nif_node_name", parent_node_name)
 						node_host.set_meta("reference_id", int(reference.get("form_id", 0)))
+						var node_havok_material := int(physics_metadata.get("havok_material", -1))
+						if node_havok_material >= 0:
+							node_host.set_meta("havok_material", node_havok_material)
 						animated_reference_root.add_child(node_host)
 						animated_node_hosts[parent_node_name] = node_host
 					instance.transform = Transform3D.IDENTITY
@@ -2794,6 +2797,9 @@ func _add_terrain_cell_collider(land: Dictionary) -> bool:
 	body.name = "TerrainCollision_%d_%d" % [grid_x, grid_y]
 	body.collision_layer = 2
 	body.collision_mask = 0
+	var land_surface_layers: Array = land.get("surface_layers", [])
+	if not land_surface_layers.is_empty():
+		body.set_meta("land_surface_layers", land_surface_layers)
 	body.scale = Vector3.ONE * game_units_to_meters
 	body.position = Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
 	var collision_instance := CollisionShape3D.new()
@@ -3243,6 +3249,9 @@ func _instantiate_imported_nif_physics(
 			static_body.collision_mask = 0
 			physics_body = static_body
 		physics_body.set_meta("reference_id", reference_id)
+		var body_havok_material := int(body_data.get("havok_material", -1))
+		if body_havok_material >= 0:
+			physics_body.set_meta("havok_material", body_havok_material)
 		var node_transform := ActorFactory.godot_node_rest({
 			"translation": body_data.get("node_global_translation", Vector3.ZERO),
 			"rotation_rows": body_data.get("node_global_rotation_rows", PackedFloat32Array()),
@@ -3448,10 +3457,14 @@ func _add_reference_collider(reference_id: int, reference_transform: Transform3D
 	var collision_shape := assets.collision_shape_for_model(model_key)
 	if collision_shape == null:
 		return false
+	var nif_metadata: Dictionary = assets.nif_metadata_cache.get(model_key, {})
+	var havok_material := int(nif_metadata.get("havok_material", -1))
 	var static_body := StaticBody3D.new()
 	static_body.name = "GeneratedStaticMeshCollision"
 	static_body.set_meta("reference_id", reference_id)
 	static_body.set_meta("model_path", model_path)
+	if havok_material >= 0:
+		static_body.set_meta("havok_material", havok_material)
 	static_body.collision_layer = 2
 	static_body.collision_mask = 0
 	static_body.transform = reference_transform

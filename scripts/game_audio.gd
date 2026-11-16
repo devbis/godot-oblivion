@@ -16,6 +16,9 @@ const VOICE_GROUPS := ["argonian", "breton", "dark seducer", "dremora", "golden 
 var _scene_root: Node
 var _data_reader: Object
 var _stream_cache: Dictionary = {}
+var _footstep_candidates: Dictionary = {}
+var _last_footstep_asset: Dictionary = {}
+var _footstep_assets_loaded := false
 var _reader_poll_remaining := 0.0
 var _weapon_poll_remaining := 0.0
 var _animation_poll_remaining := 0.0
@@ -47,6 +50,9 @@ func _process(delta: float) -> void:
 		_stop_all_dialogue()
 		_scene_root = current_scene
 		_data_reader = null
+		_footstep_candidates.clear()
+		_last_footstep_asset.clear()
+		_footstep_assets_loaded = false
 		_weapon_state_initialized = false
 		_observed_animations.clear()
 	_prune_dialogue_players()
@@ -72,12 +78,59 @@ func play_footstep(actor: Node3D, running := false) -> void:
 	if not is_instance_valid(actor) or not _reader_is_ready():
 		return
 	var group := _surface_group(actor)
-	var variant := randi_range(1, 8)
-	var asset_path := "sound\\fx\\fst\\%s\\fst_%s_%02d.wav" % [group, group, variant]
+	var asset_path := _random_footstep_asset(group)
 	var playback_volume := footstep_volume_db + (1.5 if running else 0.0)
-	if not _play_asset_at(asset_path, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6):
-		var fallback := "sound\\fx\\fst\\stone\\fst_stone_%02d.wav" % variant
-		_play_asset_at(fallback, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6)
+	if asset_path.is_empty() or not _play_asset_at(
+		asset_path, actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6
+	):
+		var fallback_candidates := _footstep_assets("stone")
+		if not fallback_candidates.is_empty():
+			_play_asset_at(
+				fallback_candidates[randi_range(0, fallback_candidates.size() - 1)],
+				actor.global_position + Vector3.UP * 0.08, null, playback_volume, 24.0, 1.6
+			)
+
+
+func _random_footstep_asset(group: String) -> String:
+	var candidates := _footstep_assets(group)
+	if candidates.is_empty():
+		return ""
+	var index := randi_range(0, candidates.size() - 1)
+	var previous := str(_last_footstep_asset.get(group, ""))
+	if candidates.size() > 1 and candidates[index] == previous:
+		index = (index + randi_range(1, candidates.size() - 1)) % candidates.size()
+	var selected: String = candidates[index]
+	_last_footstep_asset[group] = selected
+	return selected
+
+
+func _footstep_assets(group: String) -> Array[String]:
+	if not _footstep_assets_loaded:
+		_load_footstep_assets()
+	if _footstep_candidates.has(group):
+		var cached_candidates: Array[String] = _footstep_candidates[group]
+		return cached_candidates
+	return []
+
+
+func _load_footstep_assets() -> void:
+	if not _reader_is_ready():
+		return
+	for group: String in FOOTSTEP_GROUPS:
+		var empty_candidates: Array[String] = []
+		_footstep_candidates[group] = empty_candidates
+	for path_value: Variant in _data_reader.call("list_assets", "sound/fx/fst/"):
+		var path := str(path_value)
+		var normalized := path.replace("\\", "/").to_lower()
+		var group := normalized.get_base_dir().get_file()
+		if not FOOTSTEP_GROUPS.has(group) or normalized.get_extension() != "wav":
+			continue
+		if not normalized.get_file().begins_with("fst_%s_" % group):
+			continue
+		var candidates: Array[String] = _footstep_candidates[group]
+		candidates.push_back(path)
+		_footstep_candidates[group] = candidates
+	_footstep_assets_loaded = true
 
 
 ## Randomized combat effort avoids playing faction- or quest-specific dialogue out of context.
@@ -649,37 +702,93 @@ func _surface_group(actor: Node3D) -> String:
 	if result.is_empty():
 		return group
 	var collider_value: Variant = result.get("collider")
-	if not collider_value is Node:
+	if not collider_value is Node3D:
 		return group
-	var collider := collider_value as Node
-	if collider.has_meta("footstep_surface"):
-		return _normalize_surface(str(collider.get_meta("footstep_surface")))
-	var description := collider.name.to_lower()
-	var reference_id := int(collider.get_meta("reference_id", 0))
-	if reference_id != 0 and is_instance_valid(_scene_root):
-		var cell: Variant = _scene_root.get("current_cell")
-		if cell is Dictionary:
-			for reference_value: Variant in (cell as Dictionary).get("references", []):
-				var reference: Dictionary = reference_value
-				if int(reference.get("form_id", 0)) == reference_id:
-					description += " " + str(reference.get("base_editor_id", ""))
-					description += " " + str(reference.get("model_path", ""))
-					break
-	return _surface_from_description(description, group)
+	var collider := collider_value as Node3D
+	var land_layers: Variant = collider.get_meta("land_surface_layers", [])
+	if land_layers is Array and not land_layers.is_empty():
+		var hit_position: Vector3 = result.get("position", actor.global_position)
+		var land_material := _land_havok_material_at(land_layers, collider.to_local(hit_position))
+		if land_material >= 0:
+			return _surface_group_from_havok_material(land_material, group)
+	if collider.has_meta("havok_material"):
+		return _surface_group_from_havok_material(int(collider.get_meta("havok_material")), group)
+	return group
 
 
-func _surface_from_description(description: String, fallback: String) -> String:
-	for group: String in ["snow", "water", "metal", "wood", "grass", "stone", "earth"]:
-		if description.contains(group):
-			return group
-	if description.contains("dirt") or description.contains("soil"):
-		return "earth"
-	return fallback
+func _land_havok_material_at(layers: Array, local_hit: Vector3) -> int:
+	# LAND cells are 4096 game units wide; VTXT alpha maps cover 17x17 vertices per quadrant.
+	var game_x := clampf(local_hit.x, 0.0, 4095.999)
+	var game_y := clampf(-local_hit.z, 0.0, 4095.999)
+	var quadrant_x := 1 if game_x >= 2048.0 else 0
+	var quadrant_y := 1 if game_y >= 2048.0 else 0
+	var quadrant := (2 if quadrant_y == 1 else 0) + quadrant_x
+	var sample_x := game_x / 128.0 - float(quadrant_x * 16)
+	var sample_y := game_y / 128.0 - float(quadrant_y * 16)
+	var base_material := -1
+	var alpha_layers: Array[Dictionary] = []
+	for layer_value: Variant in layers:
+		if not layer_value is Dictionary:
+			continue
+		var layer: Dictionary = layer_value
+		if int(layer.get("quadrant", -1)) != quadrant:
+			continue
+		if bool(layer.get("alpha_layer", false)):
+			alpha_layers.push_back(layer)
+		elif base_material < 0:
+			base_material = int(layer.get("havok_material", -1))
+	if base_material < 0:
+		return -1
+	alpha_layers.sort_custom(func(a, b):
+		return int(a.get("layer", 0)) < int(b.get("layer", 0))
+	)
+	var overlay_weights: Dictionary = {}
+	var total_overlay_alpha := 0.0
+	for layer: Dictionary in alpha_layers:
+		var alpha_values: PackedFloat32Array = layer.get("alpha", PackedFloat32Array())
+		var alpha := _sample_land_layer_alpha(alpha_values, sample_x, sample_y)
+		if alpha <= 0.0:
+			continue
+		var overlay_material := int(layer.get("havok_material", -1))
+		overlay_weights[overlay_material] = float(overlay_weights.get(overlay_material, 0.0)) + alpha
+		total_overlay_alpha += alpha
+	var weights: Dictionary = overlay_weights.duplicate()
+	weights[base_material] = float(weights.get(base_material, 0.0)) + maxf(0.0, 1.0 - total_overlay_alpha)
+	var dominant_material := -1
+	var dominant_weight := -1.0
+	for material_value: Variant in weights.keys():
+		var weight := float(weights[material_value])
+		if weight > dominant_weight:
+			dominant_weight = weight
+			dominant_material = int(material_value)
+	return dominant_material
 
 
-func _normalize_surface(surface: String) -> String:
-	var normalized := surface.to_lower()
-	return normalized if FOOTSTEP_GROUPS.has(normalized) else "stone"
+func _sample_land_layer_alpha(alpha_values: PackedFloat32Array, x: float, y: float) -> float:
+	if alpha_values.size() != 17 * 17:
+		return 0.0
+	var x0 := clampi(int(floor(x)), 0, 16)
+	var y0 := clampi(int(floor(y)), 0, 16)
+	var x1 := mini(x0 + 1, 16)
+	var y1 := mini(y0 + 1, 16)
+	var tx := clampf(x - float(x0), 0.0, 1.0)
+	var ty := clampf(y - float(y0), 0.0, 1.0)
+	var top := lerpf(alpha_values[y0 * 17 + x0], alpha_values[y0 * 17 + x1], tx)
+	var bottom := lerpf(alpha_values[y1 * 17 + x0], alpha_values[y1 * 17 + x1], tx)
+	return clampf(lerpf(top, bottom, ty), 0.0, 1.0)
+
+
+func _surface_group_from_havok_material(material: int, fallback: String) -> String:
+	# OblivionHavokMaterial values from the source NIF collision data.
+	match material:
+		0, 3, 10, 15, 18, 25: return "stone" # Stone, glass, heavy stone, and stairs
+		2, 17: return "earth" # Dirt and dirt stairs
+		4, 19: return "grass" # Grass and grass stairs
+		5, 11, 13, 20, 26, 28, 30: return "metal" # Metal, chain, elevator, and stairs
+		8, 23: return "water" # Water and water stairs
+		9, 12, 24, 27: return "wood" # Wood and wood stairs
+		14, 29: return "snow" # Snow and snow stairs
+		_: return fallback
 
 
 func _voice_group(race_editor_id: String) -> String:
