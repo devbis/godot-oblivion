@@ -54,6 +54,25 @@ PackedFloat32Array as_packed_coefficients(const std::vector<float>& coefficients
     return result;
 }
 
+Array land_texture_layers_to_array(const std::vector<oblivion::LandTextureLayer>& layers) {
+    Array result;
+    for (const auto& layer : layers) {
+        Dictionary item;
+        item["texture_form_id"] = static_cast<int64_t>(layer.texture_form_id);
+        item["quadrant"] = layer.quadrant;
+        item["layer"] = layer.layer;
+        item["alpha_layer"] = layer.alpha_layer;
+        item["havok_material"] = layer.havok_material;
+        PackedFloat32Array alpha;
+        alpha.resize(static_cast<int64_t>(layer.alpha.size()));
+        for (int64_t i = 0; i < alpha.size(); ++i)
+            alpha.set(i, layer.alpha[static_cast<std::size_t>(i)]);
+        item["alpha"] = alpha;
+        result.push_back(item);
+    }
+    return result;
+}
+
 PackedFloat32Array add_face_coefficients(const std::vector<float>& race,
                                          const std::vector<float>& individual) {
     const auto count = std::max(race.size(), individual.size());
@@ -307,6 +326,7 @@ public:
                         heights.set(i, cell.land_heights[static_cast<std::size_t>(i)]);
                     land["heights"] = heights;
                     land["texture_path"] = as_string(cell.land_texture_path);
+                    land["surface_layers"] = land_texture_layers_to_array(cell.land_texture_layers);
                     land_cells.push_back(land);
                 }
                 if (cell.has_water_level || center->has_worldspace_water_level) {
@@ -1084,6 +1104,7 @@ public:
         }
         result["nodes"] = nodes;
         result["collision_enabled"] = asset_data.collision_enabled;
+        result["havok_material"] = asset_data.havok_material;
         Array physics_bodies;
         for (const auto& body : asset_data.physics_bodies) {
             Dictionary item;
@@ -1111,6 +1132,7 @@ public:
             item["friction"] = body.friction;
             item["restitution"] = body.restitution;
             item["collision_layer"] = body.collision_layer;
+            item["havok_material"] = body.havok_material;
             Dictionary shape;
             shape["type"] = String::utf8(body.shape.type.c_str());
             shape["point1"] = Vector3(body.shape.point1[0], body.shape.point1[1], body.shape.point1[2]);
@@ -1329,6 +1351,7 @@ private:
                 heights.set(i, cell.land_heights[static_cast<std::size_t>(i)]);
             land["heights"] = heights;
             land["texture_path"] = as_string(cell.land_texture_path);
+            land["surface_layers"] = land_texture_layers_to_array(cell.land_texture_layers);
             result["land"] = land;
         }
         Array references;

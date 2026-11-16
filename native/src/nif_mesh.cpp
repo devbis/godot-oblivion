@@ -353,18 +353,101 @@ std::array<float, 3> havok_point_to_game_units(const nifly::Vector3& value) {
             converted[2] * kHavokToGameUnits};
 }
 
+template <typename ShapeRef>
+void collect_havok_shape_materials(nifly::NiHeader& header,
+                                   const ShapeRef& shape_ref,
+                                   std::vector<std::uint32_t>& materials,
+                                   std::unordered_set<std::uint32_t>& visited) {
+    if (shape_ref.IsEmpty() || !visited.insert(shape_ref.index).second) return;
+    auto* shape = header.GetBlock<nifly::bhkShape>(shape_ref.index);
+    if (!shape) return;
+
+    if (auto* mopp = header.GetBlock<nifly::bhkMoppBvTreeShape>(shape_ref.index)) {
+        collect_havok_shape_materials(header, mopp->shapeRef, materials, visited);
+        return;
+    }
+    if (auto* transform = header.GetBlock<nifly::bhkTransformShape>(shape_ref.index)) {
+        materials.push_back(transform->material);
+        return;
+    }
+    if (auto* list = header.GetBlock<nifly::bhkListShape>(shape_ref.index)) {
+        if (list->subShapeRefs.GetSize() == 0) materials.push_back(list->GetMaterial());
+        for (const auto& child_ref : list->subShapeRefs)
+            collect_havok_shape_materials(header, child_ref, materials, visited);
+        return;
+    }
+    if (auto* list = header.GetBlock<nifly::bhkConvexListShape>(shape_ref.index)) {
+        if (list->shapeRefs.GetSize() == 0) materials.push_back(list->GetMaterial());
+        for (const auto& child_ref : list->shapeRefs)
+            collect_havok_shape_materials(header, child_ref, materials, visited);
+        return;
+    }
+    if (auto* packed = header.GetBlock<nifly::bhkPackedNiTriStripsShape>(shape_ref.index)) {
+        if (!packed->subPartData.empty()) {
+            for (const auto& part : packed->subPartData) materials.push_back(part.material);
+        } else if (const auto* data = header.GetBlock<nifly::hkPackedNiTriStripsData>(packed->dataRef)) {
+            for (const auto& part : data->subPartData) materials.push_back(part.material);
+        }
+        return;
+    }
+    if (auto* compressed = header.GetBlock<nifly::bhkCompressedMeshShape>(shape_ref.index)) {
+        if (const auto* data = header.GetBlock<nifly::bhkCompressedMeshShapeData>(compressed->dataRef)) {
+            for (const auto& material : data->materials) materials.push_back(material.material);
+            for (const auto& triangle : data->bigTris) materials.push_back(triangle.material);
+        }
+        return;
+    }
+    if (auto* sphere_rep = dynamic_cast<nifly::bhkSphereRepShape*>(shape)) {
+        materials.push_back(sphere_rep->GetMaterial());
+    } else if (auto* strips = header.GetBlock<nifly::bhkNiTriStripsShape>(shape_ref.index)) {
+        materials.push_back(strips->GetMaterial());
+    } else if (auto* height_field = dynamic_cast<nifly::bhkHeightFieldShape*>(shape)) {
+        materials.push_back(height_field->GetMaterial());
+    }
+}
+
+std::uint32_t havok_footstep_family(std::uint32_t material) {
+    switch (material) {
+    case 0: case 3: case 10: case 15: case 18: case 25: return 0;
+    case 2: case 17: return 2;
+    case 4: case 19: return 4;
+    case 5: case 11: case 13: case 20: case 26: case 28: case 30: return 5;
+    case 8: case 23: return 8;
+    case 9: case 12: case 24: case 27: return 9;
+    case 14: case 29: return 14;
+    default: return material + 32;
+    }
+}
+
+std::int32_t uniform_havok_material(const std::vector<std::uint32_t>& materials) {
+    if (materials.empty()) return -1;
+    const auto first = materials.front();
+    const auto family = havok_footstep_family(first);
+    if (std::any_of(materials.begin() + 1, materials.end(), [family](std::uint32_t value) {
+            return havok_footstep_family(value) != family;
+        })) return -1;
+    return first <= 31 ? static_cast<std::int32_t>(first) : -1;
+}
+
 void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap& parents,
                     GlobalTransforms& global_transforms) {
     auto& header = file.GetHeader();
     const auto block_count = header.GetNumBlocks();
     std::unordered_map<uint32_t, std::string> body_node_names;
+    std::vector<std::uint32_t> all_collision_materials;
 
     for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
         auto* collision = header.GetBlock<nifly::bhkNiCollisionObject>(block_index);
         if (!collision) continue;
         auto* body = header.GetBlock<nifly::bhkRigidBody>(collision->bodyRef);
         auto* target = header.GetBlock<nifly::NiAVObject>(collision->targetRef);
-        if (!body || !target || target->name.get().empty()) continue;
+        if (!body) continue;
+
+        std::vector<std::uint32_t> body_materials;
+        std::unordered_set<std::uint32_t> visited_shapes;
+        collect_havok_shape_materials(header, body->shapeRef, body_materials, visited_shapes);
+        all_collision_materials.insert(all_collision_materials.end(), body_materials.begin(), body_materials.end());
+        if (!target || target->name.get().empty()) continue;
 
         const auto node_transform = global_transform(parents, target, global_transforms);
 
@@ -385,6 +468,7 @@ void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap&
         output.friction = body->friction;
         output.restitution = body->restitution;
         output.collision_layer = body->collisionFilter.layer;
+        output.havok_material = uniform_havok_material(body_materials);
 
         if (auto* capsule = header.GetBlock<nifly::bhkCapsuleShape>(body->shapeRef)) {
             output.shape.type = "capsule";
@@ -406,6 +490,8 @@ void append_physics(nifly::NifFile& file, NifAssetData& result, const ParentMap&
         body_node_names[output.block_index] = output.node_name;
         result.physics_bodies.push_back(std::move(output));
     }
+
+    result.havok_material = uniform_havok_material(all_collision_materials);
 
     for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
         auto* ragdoll = header.GetBlock<nifly::bhkRagdollConstraint>(block_index);

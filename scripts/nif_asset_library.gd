@@ -75,6 +75,7 @@ func meshes_for_model(model_path: String) -> Array:
 		"nodes": result.get("nodes", []),
 		"animations": result.get("animations", []),
 		"collision_enabled": bool(result.get("collision_enabled", false)),
+		"havok_material": int(result.get("havok_material", -1)),
 		"physics_bodies": physics_bodies,
 		"physics_constraints": result.get("physics_constraints", []),
 	}

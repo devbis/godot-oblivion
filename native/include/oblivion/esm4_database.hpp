@@ -90,6 +90,17 @@ struct LeveledEntry {
     std::uint16_t count = 1;
 };
 
+// One authored texture layer in a LAND record. Alpha layers carry their sparse
+// 17x17 VTXT mask for a single quadrant; base layers have alpha_layer=false.
+struct LandTextureLayer {
+    std::uint32_t texture_form_id = 0;
+    std::uint8_t quadrant = 0;
+    std::int16_t layer = 0;
+    bool alpha_layer = false;
+    std::vector<float> alpha;
+    std::int32_t havok_material = -1;
+};
+
 // LVLI: items chosen by the level of the looter.
 struct LeveledListRecord {
     std::uint32_t form_id = 0;
@@ -305,6 +316,7 @@ struct CellRecord {
     std::vector<float> land_heights;
     std::uint32_t land_texture_form_id = 0;
     std::string land_texture_path;
+    std::vector<LandTextureLayer> land_texture_layers;
     std::vector<PlacedReference> references;
 };
 
@@ -401,6 +413,7 @@ private:
     std::map<std::uint32_t, std::string> female_world_item_model_by_id_;
     std::map<std::uint32_t, std::uint16_t> item_biped_slots_by_id_;
     std::map<std::uint32_t, std::string> land_texture_path_by_id_;
+    std::map<std::uint32_t, std::uint8_t> land_texture_material_by_id_;
     std::map<std::uint32_t, float> worldspace_water_level_by_id_;
     std::map<std::string, std::size_t> cell_by_editor_id_;
     std::map<std::uint32_t, std::size_t> record_type_by_id_;

@@ -195,6 +195,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     female_world_item_model_by_id_.clear();
     item_biped_slots_by_id_.clear();
     land_texture_path_by_id_.clear();
+    land_texture_material_by_id_.clear();
     worldspace_water_level_by_id_.clear();
     record_type_by_id_.clear();
     record_type_names_.clear();
@@ -231,6 +232,11 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
             texture != land_texture_path_by_id_.end())
             cell.land_texture_path = texture->second.find('/') == std::string::npos
                 ? "textures/landscape/" + texture->second : texture->second;
+        for (auto& layer : cell.land_texture_layers) {
+            if (const auto material = land_texture_material_by_id_.find(layer.texture_form_id);
+                material != land_texture_material_by_id_.end())
+                layer.havok_material = material->second;
+        }
     }
     for (const auto& [form_id, script] : script_by_id_)
         script_id_by_editor_id_.try_emplace(lower_ascii(script.editor_id), form_id);
@@ -710,6 +716,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     ScriptRecord script;
     script.form_id = form_id;
     std::vector<float> land_heights;
+    std::vector<LandTextureLayer> land_texture_layers;
+    std::optional<std::size_t> active_land_alpha_layer;
     std::map<std::uint32_t, std::size_t> land_texture_usage;
     int race_part_section = -1;
     int race_part_index = -1;
@@ -802,6 +810,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "ICON" && is_land_texture) {
             const auto texture_path = read_zstring(value, subrecord_size);
             if (!texture_path.empty()) land_texture_path_by_id_[form_id] = texture_path;
+        } else if (tag == "HNAM" && is_land_texture && subrecord_size >= 3) {
+            land_texture_material_by_id_[form_id] = value[0];
         } else if (tag == "ICON" && (is_item_model || is_spell)) {
             const auto icon_path = read_zstring(value, subrecord_size);
             if (!icon_path.empty()) record_icon_path_by_id_[form_id] = icon_path;
@@ -846,9 +856,26 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 const auto texture_id = u32(value + offset);
                 if (texture_id != 0) ++land_texture_usage[texture_id];
             }
-        } else if ((tag == "BTXT" || tag == "ATXT") && is_land && subrecord_size >= 4) {
+        } else if ((tag == "BTXT" || tag == "ATXT") && is_land && subrecord_size >= 8) {
             const auto texture_id = u32(value);
             if (texture_id != 0) ++land_texture_usage[texture_id];
+            LandTextureLayer layer;
+            layer.texture_form_id = texture_id;
+            layer.quadrant = value[4];
+            layer.layer = static_cast<std::int16_t>(u16(value + 6));
+            layer.alpha_layer = tag == "ATXT";
+            if (layer.alpha_layer) layer.alpha.resize(17 * 17, 0.0f);
+            land_texture_layers.push_back(std::move(layer));
+            active_land_alpha_layer = tag == "ATXT"
+                ? std::optional<std::size_t>(land_texture_layers.size() - 1) : std::nullopt;
+        } else if (tag == "VTXT" && is_land && active_land_alpha_layer && subrecord_size % 8 == 0) {
+            auto& layer = land_texture_layers[*active_land_alpha_layer];
+            for (std::size_t offset = 0; offset < subrecord_size; offset += 8) {
+                const auto position = u16(value + offset);
+                if (position >= layer.alpha.size()) continue;
+                layer.alpha[position] = std::clamp(f32(value + offset + 4), 0.0f, 1.0f);
+            }
+            active_land_alpha_layer.reset();
         } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || is_container)) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) base_model_by_id_[form_id] = path;
@@ -1322,6 +1349,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         if (const auto cell_it = cell_by_id_.find(active_cell_id); cell_it != cell_by_id_.end()) {
             CellRecord& parent_cell = cells_[cell_it->second];
             if (!land_heights.empty()) parent_cell.land_heights = std::move(land_heights);
+            if (!land_texture_layers.empty())
+                parent_cell.land_texture_layers = std::move(land_texture_layers);
             if (!land_texture_usage.empty()) {
                 const auto dominant = std::max_element(land_texture_usage.begin(), land_texture_usage.end(),
                     [](const auto& left, const auto& right) { return left.second < right.second; });

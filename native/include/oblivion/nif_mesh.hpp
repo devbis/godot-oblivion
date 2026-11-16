@@ -65,6 +65,7 @@ struct NifPhysicsBodyData {
     float friction = 0.0f;
     float restitution = 0.0f;
     std::uint8_t collision_layer = 0;
+    std::int32_t havok_material = -1;
     NifPhysicsShapeData shape;
 };
 
@@ -142,6 +143,7 @@ struct NifAssetData {
     std::vector<NifParticleEmitterData> particle_emitters;
     std::vector<NifPhysicsBodyData> physics_bodies;
     std::vector<NifPhysicsConstraintData> physics_constraints;
+    std::int32_t havok_material = -1; // Set only when all authored collision parts agree.
     bool collision_enabled = false;
 };
 
