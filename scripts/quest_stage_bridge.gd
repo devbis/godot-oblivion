@@ -327,7 +327,14 @@ func _apply_door_open_state(reference: Dictionary, is_open: bool, world: Node3D,
 				_finish_door_animation.bind(animation_player, reference_id, is_open, world), CONNECT_ONE_SHOT
 			)
 		animation_player.play(sequence_name)
-		_play_door_audio(reference, is_open, world)
+		var audio_manager := world.get_tree().root.get_node_or_null("AudioManager")
+		var has_nif_sound_key := false
+		if audio_manager != null:
+			has_nif_sound_key = bool(audio_manager.call(
+				"play_nif_animation_sound_keys", animation_player, sequence_name, reference, world
+			))
+		if not has_nif_sound_key:
+			_play_door_audio(reference, is_open, world)
 		return "applied: %s (%s, NIF %s animation)" % [label, "open" if is_open else "closed", sequence_name]
 	if body_count == 0:
 		return "not applied: %s has no door collision or original NIF animation in this cell" % label
@@ -366,6 +373,9 @@ func _play_group(target: String, arguments: Array, references: Dictionary, world
 			_finish_reference_animation.bind(animation_player, reference_id, true, world), CONNECT_ONE_SHOT
 		)
 	animation_player.play(sequence_name)
+	var audio_manager := world.get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager != null:
+		audio_manager.call("play_nif_animation_sound_keys", animation_player, sequence_name, reference, world)
 	return "applied: %s (%s animation)" % [label, sequence_name]
 
 

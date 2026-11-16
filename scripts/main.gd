@@ -3252,6 +3252,13 @@ func _instantiate_imported_nif_physics(
 		var body_havok_material := int(body_data.get("havok_material", -1))
 		if body_havok_material >= 0:
 			physics_body.set_meta("havok_material", body_havok_material)
+			if physics_body is RigidBody3D and body_havok_material == 13:
+				var chain_body := physics_body as RigidBody3D
+				chain_body.contact_monitor = true
+				chain_body.max_contacts_reported = 4
+				chain_body.body_entered.connect(
+					_on_chain_body_entered.bind(chain_body, reference_id)
+				)
 		var node_transform := ActorFactory.godot_node_rest({
 			"translation": body_data.get("node_global_translation", Vector3.ZERO),
 			"rotation_rows": body_data.get("node_global_rotation_rows", PackedFloat32Array()),
@@ -5772,6 +5779,17 @@ func _on_crushing_log_body_entered(body: Node3D, log_body: RigidBody3D, trap_ref
 			trap_reference_id, str(body.get_meta("reference_name", body.name)), impact_speed, damage
 		])
 
+
+func _on_chain_body_entered(body: Node3D, chain_body: RigidBody3D, reference_id: int) -> void:
+	if _world_loading or not is_instance_valid(body) or not is_instance_valid(chain_body):
+		return
+	var impact_speed := chain_body.linear_velocity.length()
+	if body is CharacterBody3D:
+		impact_speed = maxf(impact_speed, (body as CharacterBody3D).velocity.length())
+	elif body is RigidBody3D:
+		impact_speed = maxf(impact_speed, (body as RigidBody3D).linear_velocity.length())
+	AudioManager.play_chain_impact(chain_body.global_position, impact_speed, reference_id)
+
 ## A reference with an enable parent (XESP) follows that reference's state; one without is disabled only by its flag.
 func _actor_reference_disabled(reference: Dictionary, depth: int = 0) -> bool:
 	var relocated: Dictionary = _relocated_actors.get(int(reference.get("form_id", 0)), {})
@@ -8239,6 +8257,7 @@ func _install_nif_animations(animated_root: Node3D, metadata: Dictionary, node_h
 			animation_count += 1
 	if animation_count == 0:
 		return
+	animation_player.set_meta("nif_animation_text_keys", sequences)
 	animated_root.add_child(animation_player)
 	animation_player.add_animation_library("", library)
 

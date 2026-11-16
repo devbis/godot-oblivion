@@ -80,11 +80,6 @@ func _play_text_key(key: Dictionary, rig: Dictionary, host: Node) -> void:
 	if not text.to_lower().begins_with("sound:"):
 		return
 	var sound_name := text.substr(6).strip_edges()
-	# The ambient sounds of the master are "AMB<Name>", filed as fx\ambient\amb_<name>.wav.
-	if not sound_name.to_upper().begins_with("AMB"):
-		return
 	var audio_manager := host.get_tree().root.get_node_or_null("AudioManager")
 	if audio_manager != null:
-		audio_manager.call(
-			"play_effect", "sound\\fx\\ambient\\amb_%s.wav" % sound_name.substr(3).to_lower(), rig.position, 0.0, 60.0
-		)
+		audio_manager.call("play_nif_sound_event", sound_name, rig.position)

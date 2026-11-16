@@ -19,6 +19,10 @@ var _stream_cache: Dictionary = {}
 var _footstep_candidates: Dictionary = {}
 var _last_footstep_asset: Dictionary = {}
 var _footstep_assets_loaded := false
+var _sound_event_assets: Dictionary = {}
+var _chain_impact_assets: Array[String] = []
+var _chain_impact_assets_loaded := false
+var _last_chain_impact_msec: Dictionary = {}
 var _reader_poll_remaining := 0.0
 var _weapon_poll_remaining := 0.0
 var _animation_poll_remaining := 0.0
@@ -53,6 +57,10 @@ func _process(delta: float) -> void:
 		_footstep_candidates.clear()
 		_last_footstep_asset.clear()
 		_footstep_assets_loaded = false
+		_sound_event_assets.clear()
+		_chain_impact_assets.clear()
+		_chain_impact_assets_loaded = false
+		_last_chain_impact_msec.clear()
 		_weapon_state_initialized = false
 		_observed_animations.clear()
 	_prune_dialogue_players()
@@ -467,6 +475,122 @@ func play_door_state(reference: Dictionary, is_open: bool, world: Node3D) -> voi
 ## General positional effect entry point for spells, impacts and other world events.
 func play_effect(asset_path: String, position: Vector3, volume_db := -3.0, max_distance := 36.0) -> void:
 	_play_asset_at(asset_path, position, null, volume_db, max_distance, 2.0)
+
+
+## Resolves the symbolic sound markers embedded in original NIF animation text keys.
+func play_nif_sound_event(sound_name: String, position: Vector3) -> void:
+	if not _reader_is_ready():
+		return
+	var normalized := sound_name.strip_edges().to_lower()
+	if normalized.begins_with("amb"):
+		play_effect("sound\\fx\\ambient\\amb_%s.wav" % normalized.substr(3), position, 0.0, 60.0)
+		return
+	if not normalized.begins_with("drs"):
+		return
+	var asset_path := _sound_event_asset(sound_name, "sound/fx/doors/")
+	if not asset_path.is_empty():
+		play_effect(asset_path, position, effect_volume_db, 42.0)
+
+
+func _sound_event_asset(sound_name: String, directory: String) -> String:
+	var directory_key := directory.to_lower()
+	if not _sound_event_assets.has(directory_key):
+		var assets_by_stem: Dictionary = {}
+		for path_value: Variant in _data_reader.call("list_assets", directory):
+			var path := str(path_value)
+			if path.get_extension().to_lower() != "wav":
+				continue
+			var normalized_path := path.replace("\\", "/")
+			assets_by_stem[_normalized_sound_stem(normalized_path.get_file().get_basename())] = path
+		_sound_event_assets[directory_key] = assets_by_stem
+	var assets_by_stem: Dictionary = _sound_event_assets[directory_key]
+	return str(assets_by_stem.get(_normalized_sound_stem(sound_name), ""))
+
+
+func _normalized_sound_stem(value: String) -> String:
+	return value.to_lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+## Plays sound text keys attached to an ordinary AnimationPlayer NIF sequence.
+func play_nif_animation_sound_keys(
+	animation_player: AnimationPlayer, sequence_name: String, reference: Dictionary, world: Node3D
+) -> bool:
+	if not is_instance_valid(animation_player) or not _reader_is_ready():
+		return false
+	var sequences: Variant = animation_player.get_meta("nif_animation_text_keys", [])
+	if not sequences is Array:
+		return false
+	var selected: Dictionary = {}
+	for sequence_value: Variant in sequences:
+		if not sequence_value is Dictionary:
+			continue
+		var candidate: Dictionary = sequence_value
+		if str(candidate.get("name", "")).to_lower() == sequence_name.to_lower():
+			selected = candidate
+			break
+	if selected.is_empty():
+		return false
+	var start_time := float(selected.get("start_time", 0.0))
+	var position := _reference_position(reference, world)
+	var has_supported_sound_key := false
+	for key_value: Variant in selected.get("text_keys", []):
+		if not key_value is Dictionary:
+			continue
+		var key: Dictionary = key_value
+		var text := str(key.get("name", ""))
+		if not text.to_lower().begins_with("sound:"):
+			continue
+		var sound_name := text.substr(6).strip_edges()
+		var normalized_sound_name := sound_name.to_lower()
+		if not normalized_sound_name.begins_with("amb") and not normalized_sound_name.begins_with("drs"):
+			continue
+		has_supported_sound_key = true
+		var delay := maxf(0.0, float(key.get("time", start_time)) - start_time)
+		if delay <= 0.02:
+			play_nif_sound_event(sound_name, position)
+		else:
+			_play_animation_sound_key_after(
+				delay / maxf(0.01, animation_player.speed_scale), sound_name, position,
+				animation_player, sequence_name, world
+			)
+	return has_supported_sound_key
+
+
+func _play_animation_sound_key_after(
+	delay: float, sound_name: String, position: Vector3,
+	animation_player: AnimationPlayer, sequence_name: String, world: Node3D
+) -> void:
+	await get_tree().create_timer(delay).timeout
+	if not is_instance_valid(animation_player) or not is_instance_valid(world):
+		return
+	if animation_player.current_animation != sequence_name or not animation_player.is_playing():
+		return
+	play_nif_sound_event(sound_name, position)
+
+
+## Plays the original chain collision foley when an articulated chain hits something hard.
+func play_chain_impact(position: Vector3, impact_speed: float, reference_id: int) -> void:
+	if not _reader_is_ready() or impact_speed < 0.45:
+		return
+	var now := Time.get_ticks_msec()
+	if now - int(_last_chain_impact_msec.get(reference_id, 0)) < 180:
+		return
+	if not _chain_impact_assets_loaded:
+		_chain_impact_assets = []
+		for path_value: Variant in _data_reader.call("list_assets", "sound/fx/phy/genericcollisions/chain/"):
+			var path := str(path_value)
+			var file_name := path.replace("\\", "/").get_file().to_lower()
+			if file_name.begins_with("phy_chain_") and file_name.get_extension() == "wav":
+				_chain_impact_assets.push_back(path)
+		_chain_impact_assets_loaded = true
+	if _chain_impact_assets.is_empty():
+		return
+	_last_chain_impact_msec[reference_id] = now
+	var variant := _next_combat_variant("chain_impact", _chain_impact_assets.size())
+	_play_asset_at(
+		_chain_impact_assets[variant - 1], position, null,
+		effect_volume_db - 1.5, 30.0, 2.0, _combat_audio_rng.randf_range(0.96, 1.04)
+	)
 
 
 func _resolve_data_reader() -> void:
