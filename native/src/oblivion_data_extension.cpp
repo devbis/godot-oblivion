@@ -791,6 +791,13 @@ public:
         return path ? as_string(*path) : String{};
     }
 
+    String find_base_model_path(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* path = data_->find_base_model_path(form_id_arg(form_id));
+        return path ? as_string(*path) : String{};
+    }
+
     // The model an item has lying in the world (armor and clothing differ from the worn one); empty when it has none.
     String find_world_item_model_path(int64_t form_id, bool female) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -944,6 +951,11 @@ public:
             item["name"] = as_string(emitter.name);
             item["texture_path"] = as_string(emitter.texture_path);
             item["position"] = Vector3(emitter.position[0], emitter.position[1], emitter.position[2]);
+            PackedFloat32Array rotation_rows;
+            rotation_rows.resize(9);
+            for (int i = 0; i < 9; ++i) rotation_rows.set(i, emitter.rotation_rows[static_cast<std::size_t>(i)]);
+            item["rotation_rows"] = rotation_rows;
+            item["scale"] = emitter.scale;
             item["color"] = Color(emitter.color[0], emitter.color[1], emitter.color[2], emitter.color[3]);
             item["volume_shape"] = as_string(emitter.volume_shape);
             item["volume_size"] = Vector3(emitter.volume_size[0], emitter.volume_size[1], emitter.volume_size[2]);
@@ -1215,6 +1227,7 @@ protected:
         ClassDB::bind_method(D_METHOD("get_outfit_items", "form_id"), &OblivionData::get_outfit_items);
         ClassDB::bind_method(D_METHOD("get_ai_package_info", "form_id"), &OblivionData::get_ai_package_info);
         ClassDB::bind_method(D_METHOD("find_item_model_path", "form_id", "female"), &OblivionData::find_item_model_path);
+        ClassDB::bind_method(D_METHOD("find_base_model_path", "form_id"), &OblivionData::find_base_model_path);
         ClassDB::bind_method(D_METHOD("find_world_item_model_path", "form_id", "female"), &OblivionData::find_world_item_model_path);
         ClassDB::bind_method(D_METHOD("get_item_biped_slots", "form_id"), &OblivionData::get_item_biped_slots);
         ClassDB::bind_method(D_METHOD("find_form_id_by_editor_id", "editor_id"), &OblivionData::find_form_id_by_editor_id);

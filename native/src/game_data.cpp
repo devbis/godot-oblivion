@@ -230,6 +230,10 @@ const std::string* GameData::find_world_item_model_path(std::uint32_t form_id, b
     return esm_.find_world_item_model_path(form_id, female);
 }
 
+const std::string* GameData::find_base_model_path(std::uint32_t form_id) const {
+    return esm_.find_base_model_path(form_id);
+}
+
 std::uint16_t GameData::find_item_biped_slots(std::uint32_t form_id) const {
     return esm_.find_item_biped_slots(form_id);
 }

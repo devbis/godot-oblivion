@@ -401,6 +401,11 @@ const std::string* Esm4Database::find_world_item_model_path(std::uint32_t form_i
     return male_world == world_item_model_by_id_.end() ? nullptr : &male_world->second;
 }
 
+const std::string* Esm4Database::find_base_model_path(std::uint32_t form_id) const {
+    const auto model = base_model_by_id_.find(form_id);
+    return model == base_model_by_id_.end() ? nullptr : &model->second;
+}
+
 std::uint16_t Esm4Database::find_item_biped_slots(std::uint32_t form_id) const {
     const auto it = item_biped_slots_by_id_.find(form_id);
     return it == item_biped_slots_by_id_.end() ? 0 : it->second;

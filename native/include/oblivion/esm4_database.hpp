@@ -337,6 +337,7 @@ public:
     [[nodiscard]] std::size_t idle_count() const noexcept { return idle_by_id_.size(); }
     [[nodiscard]] const std::string* find_item_model_path(std::uint32_t form_id, bool female) const;
     [[nodiscard]] const std::string* find_world_item_model_path(std::uint32_t form_id, bool female) const;
+    [[nodiscard]] const std::string* find_base_model_path(std::uint32_t form_id) const;
     [[nodiscard]] std::uint16_t find_item_biped_slots(std::uint32_t form_id) const;
     [[nodiscard]] std::uint32_t find_form_id_by_editor_id(std::string_view editor_id) const;
     [[nodiscard]] std::vector<std::uint32_t> find_form_ids_by_editor_id_prefix(std::string_view prefix) const;

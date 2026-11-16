@@ -108,6 +108,8 @@ struct NifParticleEmitterData {
     std::string name;
     std::string texture_path;
     std::array<float, 3> position{};
+    std::array<float, 9> rotation_rows{};
+    float scale = 1.0f;
     std::array<float, 4> color{};
     std::string volume_shape;
     std::array<float, 3> volume_size{};

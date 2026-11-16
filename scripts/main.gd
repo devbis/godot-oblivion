@@ -2391,9 +2391,9 @@ func _load_cell_geometry(
 			light.set_meta("reference_id", int(reference.get("form_id", 0)))
 			cell_visual_root.add_child(light)
 			var light_editor_id := str(reference.get("base_editor_id", "")).to_lower()
-			var uses_fire_flicker := light_editor_id == "prisonlamp190" or (light_flags & 0x48) != 0
+			var uses_fire_flicker := (light_flags & 0x48) != 0
 			if uses_fire_flicker:
-				light.light_energy = 1.55 if light_editor_id == "prisonlamp190" else 1.0
+				light.light_energy = 1.0
 				light.set_meta("flicker_base_energy", light.light_energy)
 				light.set_meta("flicker_base_range", light.omni_range)
 				light.set_meta("flicker_phase", randf_range(0.0, TAU))
@@ -2403,33 +2403,6 @@ func _load_cell_geometry(
 				await _add_window_light_beam(reference, reference_transform, generation)
 				if generation != _cell_load_generation:
 					return false
-			if light_editor_id == "prisonlamp190":
-				var fire_path := "Fire/FireTorchSmall.nif"
-				await assets.meshes_for_model(fire_path)
-				if generation != _cell_load_generation:
-					return false
-				var flame_transform := reference_transform
-				for torch_reference_value: Variant in cell.get("references", []):
-					var torch_reference: Dictionary = torch_reference_value
-					if str(torch_reference.get("base_editor_id", "")).to_lower() != "prisoncelltorch01":
-						continue
-					var torch_path := str(torch_reference.get("model_path", ""))
-					if torch_path.is_empty():
-						continue
-					await assets.meshes_for_model(torch_path)
-					if generation != _cell_load_generation:
-						return false
-					var torch_transform := _reference_transform(torch_reference)
-					var torch_metadata: Dictionary = assets.nif_metadata_cache.get(torch_path.to_lower().replace("\\", "/"), {})
-					for node_value: Variant in torch_metadata.get("nodes", []):
-						var node: Dictionary = node_value
-						if str(node.get("name", "")) != "FlameNode2":
-							continue
-						var flame_position: Vector3 = node.get("global_translation", Vector3.ZERO)
-						flame_transform = Transform3D(torch_transform.basis, torch_transform * flame_position)
-						break
-					break
-				_add_nif_particles(assets.nif_metadata_cache.get(fire_path.to_lower(), {}), flame_transform, fire_path)
 		if is_exterior and bool(reference.get("is_tree", false)):
 			var tree_distance := reference_transform.origin.distance_to(player.global_position)
 			if tree_distance > EXTERIOR_TREE_RENDER_DISTANCE:
@@ -2503,6 +2476,8 @@ func _load_cell_geometry(
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
 		_add_nif_particles(physics_metadata, reference_transform, model_path)
+		if not await _add_nif_attached_effects(physics_metadata, reference_transform, generation):
+			return false
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
 		var animate_reference := is_door or has_nif_animations
@@ -7955,6 +7930,61 @@ func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void
 	if skeleton == _player_skeleton:
 		print("OpenOB aligned avatar mesh origin to rig root: root_height=%.3fm" % rig_root_height)
 
+func _add_nif_attached_effects(
+	host_metadata: Dictionary,
+	reference_transform: Transform3D,
+	generation: int
+) -> bool:
+	for node_value: Variant in host_metadata.get("nodes", []):
+		var node: Dictionary = node_value
+		var socket_name := str(node.get("name", ""))
+		if socket_name.is_empty():
+			continue
+		var socket_form_id := int(data_reader.find_form_id_by_editor_id(socket_name))
+		if socket_form_id == 0 or str(data_reader.find_record_type(socket_form_id)) != "STAT":
+			continue
+		if str(data_reader.find_editor_id(socket_form_id)) != socket_name:
+			continue
+		var effect_model_path := str(data_reader.find_base_model_path(socket_form_id))
+		if effect_model_path.is_empty():
+			continue
+		var effect_key := effect_model_path.to_lower().replace("\\", "/")
+		var effect_meshes: Array = await assets.meshes_for_model(effect_model_path)
+		if generation != _cell_load_generation:
+			return false
+		var effect_metadata: Dictionary = assets.nif_metadata_cache.get(effect_key, {})
+		var socket_transform := ActorFactory.godot_node_rest({
+			"translation": node.get("global_translation", Vector3.ZERO),
+			"rotation_rows": node.get("global_rotation_rows", PackedFloat32Array()),
+			"scale": float(node.get("global_scale", 1.0)),
+		})
+		var has_particle_emitters := not (effect_metadata.get("particle_emitters", []) as Array).is_empty()
+		for mesh_entry: Dictionary in effect_meshes:
+			if bool(mesh_entry.get("editor_marker", false)):
+				continue
+			if has_particle_emitters and str(mesh_entry.get("diffuse_texture_path", "")).is_empty():
+				continue
+			var mesh := mesh_entry.get("mesh") as ArrayMesh
+			if mesh == null:
+				continue
+			var instance := MeshInstance3D.new()
+			instance.name = effect_model_path.get_file().get_basename() + "_" + str(mesh_entry.get("mesh_name", "Effect")).replace(":", "_")
+			instance.mesh = mesh
+			instance.material_override = await _material_for_reference(
+				effect_model_path,
+				str(mesh_entry.get("diffuse_texture_path", "")),
+				bool(mesh_entry.get("alpha_blend", false)),
+				bool(mesh_entry.get("alpha_test", false)),
+				int(mesh_entry.get("alpha_threshold", 128))
+			)
+			if generation != _cell_load_generation:
+				return false
+			instance.transform = reference_transform * socket_transform
+			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			cell_visual_root.add_child(instance)
+		_add_nif_particles(effect_metadata, reference_transform * socket_transform, effect_model_path)
+	return true
+
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
@@ -7978,11 +8008,17 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		var particles := GPUParticles3D.new()
 		# Particle shaders operate in Godot units; node scale is not reliably applied to
 		# world-space particles. Convert emitter dimensions and speed explicitly.
-		var unit_scale := reference_transform.basis.get_scale().x
-		var emitter_position: Vector3 = emitter.get("position", Vector3.ZERO)
+		var emitter_transform := ActorFactory.godot_node_rest({
+			"translation": emitter.get("position", Vector3.ZERO),
+			"rotation_rows": emitter.get("rotation_rows", PackedFloat32Array()),
+			"scale": float(emitter.get("scale", 1.0)),
+		})
+		var unit_scale := reference_transform.basis.get_scale().x * float(emitter.get("scale", 1.0))
 		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
-		var particle_basis := reference_transform.basis.orthonormalized()
-		var particle_origin := reference_transform * emitter_position
+		var particle_basis := (
+			reference_transform.basis.orthonormalized() * emitter_transform.basis.orthonormalized()
+		).orthonormalized()
+		var particle_origin := reference_transform * emitter_transform.origin
 		if is_light_beam_dust and str(emitter.get("volume_shape", "")) == "box":
 			# FXLightBeamDust01's editor marker runs from its origin upward, while Godot's box emitter is centered.
 			particle_origin += particle_basis * Vector3.UP * absf(volume.z) * 0.5

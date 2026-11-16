@@ -723,6 +723,10 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                 auto* node = volume ? header.GetBlock<nifly::NiNode>(volume->emitterNodeRef) : nullptr;
                 const auto transform = global_transform(parents, node ? static_cast<nifly::NiAVObject*>(node) : system, global_transforms);
                 output.position = to_godot(transform.translation);
+                for (std::size_t row = 0; row < 3; ++row)
+                    for (std::size_t column = 0; column < 3; ++column)
+                        output.rotation_rows[row * 3 + column] = transform.rotation[row][column];
+                output.scale = transform.scale;
                 if (auto* box = dynamic_cast<nifly::NiPSysBoxEmitter*>(emitter)) {
                     output.volume_shape = "box";
                     output.volume_size = {box->width, box->height, box->depth};
