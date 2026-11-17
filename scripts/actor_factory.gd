@@ -5,6 +5,8 @@ extends RefCounted
 const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const PLAYER_HEAD_CULL_MARGIN := 128.0
+const BIPED_SLOT_HEAD := 0x0001
+const BIPED_SLOT_HAIR := 0x0002
 const PLAYER_FACE_DETAIL_PARTS := [
 	"Characters/Imperial/eyeLeftHuman.nif",
 	"Characters/Imperial/eyeRightHuman.nif",
@@ -21,6 +23,13 @@ const PLAYER_AVATAR_PARTS := [
 	"Characters/Imperial/headhuman.nif",
 	"Characters/Imperial/male/hair01.nif",
 ]
+const BOUND_WEAPON_EFFECT_ITEMS := {
+	"BWAX": "BoundAxe",
+	"BWBO": "BoundBow",
+	"BWDA": "BoundDagger",
+	"BWMA": "BoundMace",
+	"BWSW": "BoundSword",
+}
 const FEMALE_AVATAR_PARTS := [
 	"Characters/_male/femaleupperbody.nif",
 	"Characters/_male/femalelowerbody.nif",
@@ -52,6 +61,7 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 	var head_model_path := npc_head_model_path(npc)
 	var head_part := _npc_head_part_entry(npc)
 	var equipment_ids := _npc_equipment_ids(npc)
+	var bound_equipment_ids := _npc_bound_equipment_ids(npc)
 	var covered_body_slots := 0
 	var covered_head_slots := 0
 	for equipment_form_id: int in equipment_ids:
@@ -117,14 +127,19 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		face_meshes.append_array(detail_meshes)
 		if not is_current.call():
 			return {}
-	if covered_head_slots == 0:
+	var face_covered_by_helmet := (covered_head_slots & BIPED_SLOT_HEAD) != 0
+	if face_covered_by_helmet:
+		for face_mesh: MeshInstance3D in face_meshes:
+			face_mesh.visible = false
+	var hair_meshes: Array[MeshInstance3D] = []
+	if (covered_head_slots & (BIPED_SLOT_HEAD | BIPED_SLOT_HAIR)) == 0:
 		var hair_form_id := int(npc.get("hair_form_id", 0))
 		var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
 		if hair_path.is_empty():
 			hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
 		var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
 		var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
-		await add_actor_model(
+		hair_meshes = await add_actor_model(
 			avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
 			"", "", "", not hair_is_model_space
 		)
@@ -133,6 +148,7 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 	var weapon_attached := false
 	var weapon_form_id := 0
 	var weapon_meshes: Array[MeshInstance3D] = []
+	var worn_equipment: Array[Dictionary] = []
 	var attached_item_names: Array[String] = []
 	for item_form_id: int in equipment_ids:
 		var item_type := str(data_reader.find_record_type(item_form_id))
@@ -159,13 +175,74 @@ func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, i
 		if not is_current.call():
 			return {}
 		attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
+		if item_type in ["ARMO", "CLOT"]:
+			worn_equipment.push_back({
+				"slots": int(data_reader.get_item_biped_slots(item_form_id)),
+				"meshes": item_meshes,
+			})
 		if item_type == "WEAP":
 			weapon_attached = true
 			weapon_form_id = item_form_id
 			weapon_meshes = item_meshes
+	var bound_gear_meshes: Array[MeshInstance3D] = []
+	var bound_armor_meshes: Array[MeshInstance3D] = []
+	var bound_weapon_form_id := 0
+	var bound_weapon_meshes: Array[MeshInstance3D] = []
+	var bound_item_names: Array[String] = []
+	var bound_gear_slots := 0
+	for item_form_id: int in bound_equipment_ids:
+		var item_type := str(data_reader.find_record_type(item_form_id))
+		if item_type not in ["ARMO", "WEAP"]:
+			continue
+		if item_type == "ARMO":
+			bound_gear_slots |= int(data_reader.get_item_biped_slots(item_form_id))
+		if item_type == "WEAP" and bound_weapon_form_id != 0:
+			continue
+		var item_path := str(data_reader.find_item_model_path(item_form_id, is_female))
+		if item_path.is_empty():
+			continue
+		var attachment := await equipment_attachment(item_form_id, item_path, item_type, skeleton)
+		if not is_current.call() or not is_instance_valid(skeleton):
+			return {}
+		if bool(attachment.get("skip", false)):
+			continue
+		var item_meshes := await add_actor_model(
+			avatar,
+			skeleton,
+			item_path,
+			str(attachment.get("bone", "")),
+			PackedByteArray(),
+			{},
+			bool(attachment.get("model_space", false)),
+			race_texture_key,
+			"",
+			"",
+			bool(attachment.get("adjust_rotation", false))
+		)
+		if not is_current.call():
+			return {}
+		for mesh: MeshInstance3D in item_meshes:
+			mesh.visible = false
+		bound_gear_meshes.append_array(item_meshes)
+		bound_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
+		if item_type == "WEAP" and bound_weapon_form_id == 0:
+			bound_weapon_form_id = item_form_id
+			bound_weapon_meshes = item_meshes
+		else:
+			bound_armor_meshes.append_array(item_meshes)
 	return {
-		"face_meshes": face_meshes, "attached_item_names": attached_item_names,
+		"face_meshes": face_meshes, "hair_meshes": hair_meshes,
+		"face_covered_by_helmet": face_covered_by_helmet,
+		"attached_item_names": attached_item_names,
 		"weapon_form_id": weapon_form_id, "weapon_meshes": weapon_meshes,
+		"worn_equipment": worn_equipment,
+		"bound_magic_effect_codes": _npc_bound_magic_effect_codes(npc),
+		"bound_gear_meshes": bound_gear_meshes,
+		"bound_armor_meshes": bound_armor_meshes,
+		"bound_gear_slots": bound_gear_slots,
+		"bound_item_names": bound_item_names,
+		"bound_weapon_form_id": bound_weapon_form_id,
+		"bound_weapon_meshes": bound_weapon_meshes,
 	}
 
 ## A creature is its skeleton with the skinned parts its record lists (NIFZ) attached; false when the cell was left.
@@ -502,6 +579,47 @@ func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
 		item_ids.push_back(item_id)
 	return item_ids
 
+## Bound items come from the NPC's authored spells. Oblivion applies these abilities during combat; they are staged
+## on the rig here so the scene can reveal them with the spell's appearance effect when combat starts.
+func _npc_bound_equipment_ids(npc: Dictionary) -> Array[int]:
+	var result: Array[int] = []
+	var seen: Dictionary = {}
+	for spell_id_value: Variant in npc.get("spell_form_ids", PackedInt64Array()):
+		var spell_id := int(spell_id_value)
+		var spell: Dictionary = data_reader.find_spell(spell_id)
+		if spell.is_empty():
+			continue
+		var spell_name := str(data_reader.find_editor_id(spell_id)).to_lower()
+		var mythic_dawn_spell := spell_name.ends_with("md")
+		for effect_value: Variant in spell.get("effects", []):
+			var effect: Dictionary = effect_value
+			var effect_code := str(effect.get("code", "")).to_upper()
+			var item_editor_id := ""
+			match effect_code:
+				"MYTH": item_editor_id = "BoundMythicDawnArmor" if mythic_dawn_spell else "BoundCuirass"
+				"MYHL": item_editor_id = "BoundMythicDawnHelmet" if mythic_dawn_spell else "BoundHelmet"
+				_: item_editor_id = str(BOUND_WEAPON_EFFECT_ITEMS.get(effect_code, ""))
+			if item_editor_id.is_empty():
+				continue
+			var item_form_id := int(data_reader.find_form_id_by_editor_id(item_editor_id))
+			if item_form_id <= 0 or seen.has(item_form_id):
+				continue
+			seen[item_form_id] = true
+			result.push_back(item_form_id)
+	return result
+
+func _npc_bound_magic_effect_codes(npc: Dictionary) -> Array[String]:
+	var result: Array[String] = []
+	for spell_id_value: Variant in npc.get("spell_form_ids", PackedInt64Array()):
+		var spell: Dictionary = data_reader.find_spell(int(spell_id_value))
+		for effect_value: Variant in spell.get("effects", []):
+			var code := str((effect_value as Dictionary).get("code", "")).to_upper()
+			if code not in ["MYTH", "MYHL", "BWAX", "BWBO", "BWDA", "BWMA", "BWSW"]:
+				continue
+			if not result.has(code):
+				result.push_back(code)
+	return result
+
 ## How a piece of equipment is fixed to a skeleton: {bone, model_space, adjust_rotation} for add_actor_model, or
 ## {skip: true} when it cannot be placed. Headgear rides the head bone; a shield and a weapon ride the bone their NIF names
 ## (its Prn node); body armor is skinned and needs no bone.
@@ -647,6 +765,7 @@ func add_actor_model(
 		if not bone_names.is_empty() and attach_bone.is_empty():
 			instance.skeleton = NodePath("../Skeleton3D")
 			instance.skin = skin_for_mesh(bone_names, skeleton)
+			instance.set_meta("oblivion_bone_names", bone_names)
 		added_instances.push_back(instance)
 	return added_instances
 

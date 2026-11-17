@@ -150,7 +150,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
         std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
-        std::string_view("MGEF"), std::string_view("CSTY"),
+        std::string_view("MGEF"), std::string_view("EFSH"), std::string_view("CSTY"),
         std::string_view("HAIR"), std::string_view("EYES"), std::string_view("ALCH"),
         std::string_view("AMMO"), std::string_view("APPA"), std::string_view("BOOK"),
         std::string_view("INGR"), std::string_view("KEYM"), std::string_view("MISC"),
@@ -182,6 +182,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     leveled_list_by_id_.clear();
     item_stats_by_id_.clear();
     magic_effect_by_code_.clear();
+    effect_shader_by_id_.clear();
     race_face_gen_by_id_.clear();
     outfit_by_id_.clear();
     ai_package_by_id_.clear();
@@ -324,6 +325,21 @@ const CombatStyleRecord* Esm4Database::find_combat_style(std::uint32_t form_id) 
 const SpellRecord* Esm4Database::find_spell(std::uint32_t form_id) const {
     const auto it = spell_by_id_.find(form_id);
     return it == spell_by_id_.end() ? nullptr : &it->second;
+}
+
+const MagicEffectRecord* Esm4Database::find_magic_effect(std::string_view effect_code) const {
+    const auto it = magic_effect_by_code_.find(lower_ascii(std::string(effect_code)));
+    return it == magic_effect_by_code_.end() ? nullptr : &it->second;
+}
+
+const EffectShaderRecord* Esm4Database::find_effect_shader(std::uint32_t form_id) const {
+    const auto it = effect_shader_by_id_.find(form_id);
+    return it == effect_shader_by_id_.end() ? nullptr : &it->second;
+}
+
+const LightData* Esm4Database::find_light(std::uint32_t form_id) const {
+    const auto it = light_by_id_.find(form_id);
+    return it == light_by_id_.end() ? nullptr : &it->second;
 }
 
 const WeaponRecord* Esm4Database::find_weapon(std::uint32_t form_id) const {
@@ -656,6 +672,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
     bool is_magic_effect = type == "MGEF";
+    bool is_effect_shader = type == "EFSH";
     bool is_outfit = type == "OTFT";
     const bool is_container = type == "CONT";
     const bool is_leveled_item = type == "LVLI";
@@ -706,6 +723,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     SpellRecord spell;
     spell.form_id = form_id;
     MagicEffectRecord magic_effect;
+    magic_effect.form_id = form_id;
+    EffectShaderRecord effect_shader;
+    effect_shader.form_id = form_id;
     RaceFaceGenRecord race_face_gen;
     race_face_gen.form_id = form_id;
     OutfitRecord outfit;
@@ -758,7 +778,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
+            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -815,6 +835,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "ICON" && (is_item_model || is_spell)) {
             const auto icon_path = read_zstring(value, subrecord_size);
             if (!icon_path.empty()) record_icon_path_by_id_[form_id] = icon_path;
+        } else if (tag == "ICON" && is_effect_shader) {
+            effect_shader.fill_texture_path = read_zstring(value, subrecord_size);
+        } else if (tag == "ICO2" && is_effect_shader) {
+            effect_shader.particle_texture_path = read_zstring(value, subrecord_size);
+        } else if (tag == "NAM7" && is_effect_shader) {
+            effect_shader.holes_texture_path = read_zstring(value, subrecord_size);
         } else if (tag == "SPIT" && is_spell && subrecord_size >= 16) {
             spell.spell_type = value[0];
             spell.cost = u32(value + 4);
@@ -835,7 +861,82 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "DATA" && is_magic_effect && subrecord_size >= 16) {
             magic_effect.flags = u32(value);
             magic_effect.base_cost = f32(value + 4);
+            magic_effect.associated_item_form_id = u32(value + 8);
             magic_effect.school = u32(value + 12);
+            if (subrecord_size >= 28)
+                magic_effect.light_form_id = u32(value + 24);
+            if (subrecord_size >= 36)
+                magic_effect.effect_shader_form_id = u32(value + 32);
+            if (subrecord_size >= 40)
+                magic_effect.enchant_shader_form_id = u32(value + 36);
+        } else if (tag == "DATA" && is_effect_shader && subrecord_size >= 16) {
+            effect_shader.flags = value[0];
+            effect_shader.membrane_source_blend = u32(value + 4);
+            effect_shader.membrane_blend_operation = u32(value + 8);
+            effect_shader.membrane_z_test = u32(value + 12);
+            if (subrecord_size >= 52) {
+                std::copy_n(value + 16, 4, effect_shader.fill_color.begin());
+                effect_shader.fill_alpha_fade_in = f32(value + 20);
+                effect_shader.fill_full_alpha_time = f32(value + 24);
+                effect_shader.fill_alpha_fade_out = f32(value + 28);
+                effect_shader.fill_persistent_alpha_ratio = f32(value + 32);
+                effect_shader.fill_alpha_pulse_amplitude = f32(value + 36);
+                effect_shader.fill_alpha_pulse_frequency = f32(value + 40);
+                effect_shader.fill_texture_scroll_u = f32(value + 44);
+                effect_shader.fill_texture_scroll_v = f32(value + 48);
+            }
+            if (subrecord_size >= 92) {
+                effect_shader.edge_falloff = f32(value + 52);
+                std::copy_n(value + 56, 4, effect_shader.edge_color.begin());
+                effect_shader.edge_alpha_fade_in = f32(value + 60);
+                effect_shader.edge_full_alpha_time = f32(value + 64);
+                effect_shader.edge_alpha_fade_out = f32(value + 68);
+                effect_shader.edge_persistent_alpha_ratio = f32(value + 72);
+                effect_shader.edge_alpha_pulse_amplitude = f32(value + 76);
+                effect_shader.edge_alpha_pulse_frequency = f32(value + 80);
+                effect_shader.fill_full_alpha_ratio = f32(value + 84);
+                effect_shader.edge_full_alpha_ratio = f32(value + 88);
+            }
+            if (subrecord_size >= 96)
+                effect_shader.membrane_destination_blend = u32(value + 92);
+            if (subrecord_size >= 112) {
+                effect_shader.particle_source_blend = u32(value + 96);
+                effect_shader.particle_blend_operation = u32(value + 100);
+                effect_shader.particle_z_test = u32(value + 104);
+                effect_shader.particle_destination_blend = u32(value + 108);
+            }
+            if (subrecord_size >= 224) {
+                effect_shader.particle_birth_ramp_up = f32(value + 112);
+                effect_shader.particle_full_birth_time = f32(value + 116);
+                effect_shader.particle_birth_ramp_down = f32(value + 120);
+                effect_shader.particle_full_birth_ratio = f32(value + 124);
+                effect_shader.particle_persistent_birth_ratio = f32(value + 128);
+                effect_shader.particle_lifetime = f32(value + 132);
+                effect_shader.particle_lifetime_variance = f32(value + 136);
+                effect_shader.particle_speed_along_normal = f32(value + 140);
+                effect_shader.particle_acceleration_along_normal = f32(value + 144);
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    effect_shader.particle_velocity[axis] = f32(value + 148 + axis * 4);
+                    effect_shader.particle_acceleration[axis] = f32(value + 160 + axis * 4);
+                }
+                for (std::size_t key = 0; key < 2; ++key) {
+                    effect_shader.particle_scale[key] = f32(value + 172 + key * 4);
+                    effect_shader.particle_scale_time[key] = f32(value + 180 + key * 4);
+                }
+                for (std::size_t key = 0; key < 3; ++key) {
+                    for (std::size_t channel = 0; channel < 3; ++channel)
+                        effect_shader.particle_color[key][channel] = value[188 + key * 4 + channel];
+                    effect_shader.particle_alpha[key] = f32(value + 200 + key * 4);
+                    effect_shader.particle_color_time[key] = f32(value + 212 + key * 4);
+                }
+            }
+            if (subrecord_size >= 244) {
+                effect_shader.particle_speed_along_normal_variance = f32(value + 224);
+                effect_shader.particle_initial_rotation = f32(value + 228);
+                effect_shader.particle_initial_rotation_variance = f32(value + 232);
+                effect_shader.particle_rotation_speed = f32(value + 236);
+                effect_shader.particle_rotation_speed_variance = f32(value + 240);
+            }
         } else if (tag == "DNAM" && is_worldspace && subrecord_size >= 8) {
             worldspace_water_level_by_id_[form_id] = f32(value + 4);
         } else if (tag == "VHGT" && is_land && subrecord_size >= 4 + 33 * 33) {
@@ -936,6 +1037,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "MODL" && is_item_model) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) item_model_by_id_[form_id] = path;
+        } else if (tag == "MODL" && is_magic_effect) {
+            magic_effect.model_path = read_zstring(value, subrecord_size);
         } else if (tag == "MOD3" && (type == "ARMO" || type == "CLOT")) {
             const auto path = read_zstring(value, subrecord_size);
             if (!path.empty()) female_item_model_by_id_[form_id] = path;
@@ -1368,6 +1471,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         spell_by_id_[form_id] = std::move(spell);
     if (is_magic_effect && !base_editor_id.empty())
         magic_effect_by_code_[lower_ascii(base_editor_id)] = magic_effect;
+    if (is_effect_shader)
+        effect_shader_by_id_[form_id] = std::move(effect_shader);
     if (is_race)
         race_face_gen_by_id_[form_id] = std::move(race_face_gen);
     if (is_outfit)

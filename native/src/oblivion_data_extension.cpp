@@ -689,6 +689,128 @@ public:
         return result;
     }
 
+    Dictionary find_magic_effect(const String& effect_code) const {
+        const CharString value = effect_code.utf8();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* effect = data_->find_magic_effect(value.get_data());
+        if (!effect) return {};
+        Dictionary result;
+        result["form_id"] = static_cast<int64_t>(effect->form_id);
+        result["flags"] = static_cast<int64_t>(effect->flags);
+        result["school"] = static_cast<int64_t>(effect->school);
+        result["base_cost"] = effect->base_cost;
+        result["associated_item_form_id"] = static_cast<int64_t>(effect->associated_item_form_id);
+        result["light_form_id"] = static_cast<int64_t>(effect->light_form_id);
+        result["effect_shader_form_id"] = static_cast<int64_t>(effect->effect_shader_form_id);
+        result["enchant_shader_form_id"] = static_cast<int64_t>(effect->enchant_shader_form_id);
+        result["model_path"] = as_string(effect->model_path);
+        return result;
+    }
+
+    Dictionary find_effect_shader(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* shader = data_->find_effect_shader(form_id_arg(form_id));
+        if (!shader) return {};
+        Dictionary result;
+        result["form_id"] = static_cast<int64_t>(shader->form_id);
+        result["flags"] = shader->flags;
+        result["fill_texture_path"] = as_string(shader->fill_texture_path);
+        result["holes_texture_path"] = as_string(shader->holes_texture_path);
+        result["particle_texture_path"] = as_string(shader->particle_texture_path);
+        result["membrane_source_blend"] = shader->membrane_source_blend;
+        result["membrane_blend_operation"] = shader->membrane_blend_operation;
+        result["membrane_z_test"] = shader->membrane_z_test;
+        result["membrane_destination_blend"] = shader->membrane_destination_blend;
+        PackedByteArray fill_color;
+        PackedByteArray edge_color;
+        for (std::size_t channel = 0; channel < 4; ++channel) {
+            fill_color.push_back(shader->fill_color[channel]);
+            edge_color.push_back(shader->edge_color[channel]);
+        }
+        result["fill_color"] = fill_color;
+        result["fill_alpha_fade_in"] = shader->fill_alpha_fade_in;
+        result["fill_full_alpha_time"] = shader->fill_full_alpha_time;
+        result["fill_alpha_fade_out"] = shader->fill_alpha_fade_out;
+        result["fill_persistent_alpha_ratio"] = shader->fill_persistent_alpha_ratio;
+        result["fill_alpha_pulse_amplitude"] = shader->fill_alpha_pulse_amplitude;
+        result["fill_alpha_pulse_frequency"] = shader->fill_alpha_pulse_frequency;
+        result["fill_texture_scroll_u"] = shader->fill_texture_scroll_u;
+        result["fill_texture_scroll_v"] = shader->fill_texture_scroll_v;
+        result["edge_falloff"] = shader->edge_falloff;
+        result["edge_color"] = edge_color;
+        result["edge_alpha_fade_in"] = shader->edge_alpha_fade_in;
+        result["edge_full_alpha_time"] = shader->edge_full_alpha_time;
+        result["edge_alpha_fade_out"] = shader->edge_alpha_fade_out;
+        result["edge_persistent_alpha_ratio"] = shader->edge_persistent_alpha_ratio;
+        result["edge_alpha_pulse_amplitude"] = shader->edge_alpha_pulse_amplitude;
+        result["edge_alpha_pulse_frequency"] = shader->edge_alpha_pulse_frequency;
+        result["fill_full_alpha_ratio"] = shader->fill_full_alpha_ratio;
+        result["edge_full_alpha_ratio"] = shader->edge_full_alpha_ratio;
+        result["particle_source_blend"] = shader->particle_source_blend;
+        result["particle_blend_operation"] = shader->particle_blend_operation;
+        result["particle_z_test"] = shader->particle_z_test;
+        result["particle_destination_blend"] = shader->particle_destination_blend;
+        result["particle_birth_ramp_up"] = shader->particle_birth_ramp_up;
+        result["particle_full_birth_time"] = shader->particle_full_birth_time;
+        result["particle_birth_ramp_down"] = shader->particle_birth_ramp_down;
+        result["particle_full_birth_ratio"] = shader->particle_full_birth_ratio;
+        result["particle_persistent_birth_ratio"] = shader->particle_persistent_birth_ratio;
+        result["particle_lifetime"] = shader->particle_lifetime;
+        result["particle_lifetime_variance"] = shader->particle_lifetime_variance;
+        result["particle_speed_along_normal"] = shader->particle_speed_along_normal;
+        result["particle_acceleration_along_normal"] = shader->particle_acceleration_along_normal;
+        PackedFloat32Array velocity;
+        PackedFloat32Array acceleration;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            velocity.push_back(shader->particle_velocity[axis]);
+            acceleration.push_back(shader->particle_acceleration[axis]);
+        }
+        result["particle_velocity"] = velocity;
+        result["particle_acceleration"] = acceleration;
+        PackedFloat32Array scale;
+        PackedFloat32Array scale_time;
+        for (std::size_t key = 0; key < 2; ++key) {
+            scale.push_back(shader->particle_scale[key]);
+            scale_time.push_back(shader->particle_scale_time[key]);
+        }
+        result["particle_scale"] = scale;
+        result["particle_scale_time"] = scale_time;
+        PackedByteArray colors;
+        PackedFloat32Array alpha;
+        PackedFloat32Array color_time;
+        for (std::size_t key = 0; key < 3; ++key) {
+            for (std::size_t channel = 0; channel < 3; ++channel)
+                colors.push_back(shader->particle_color[key][channel]);
+            alpha.push_back(shader->particle_alpha[key]);
+            color_time.push_back(shader->particle_color_time[key]);
+        }
+        result["particle_colors_rgb"] = colors;
+        result["particle_alpha"] = alpha;
+        result["particle_color_time"] = color_time;
+        result["particle_speed_along_normal_variance"] = shader->particle_speed_along_normal_variance;
+        result["particle_initial_rotation"] = shader->particle_initial_rotation;
+        result["particle_initial_rotation_variance"] = shader->particle_initial_rotation_variance;
+        result["particle_rotation_speed"] = shader->particle_rotation_speed;
+        result["particle_rotation_speed_variance"] = shader->particle_rotation_speed_variance;
+        return result;
+    }
+
+    Dictionary find_light(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto* light = data_->find_light(form_id_arg(form_id));
+        if (!light) return {};
+        Dictionary result;
+        result["radius"] = static_cast<int64_t>(light->radius);
+        result["flags"] = static_cast<int64_t>(light->flags);
+        PackedByteArray color;
+        for (const auto channel : light->color) color.push_back(channel);
+        result["color"] = color;
+        return result;
+    }
+
     // The contents of a CONT record: {name, weight, flags, contents: [{form_id, count}]}; empty when it is no container.
     Dictionary find_container(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1013,12 +1135,29 @@ public:
             particle_emitters.push_back(item);
         }
         result["particle_emitters"] = particle_emitters;
+        Array texture_flipbooks;
+        for (const auto& flipbook : asset_data.texture_flipbooks) {
+            Dictionary item;
+            item["target_name"] = as_string(flipbook.target_name);
+            Array texture_paths;
+            for (const auto& path : flipbook.texture_paths) texture_paths.push_back(as_string(path));
+            item["texture_paths"] = texture_paths;
+            item["frequency"] = flipbook.frequency;
+            item["phase"] = flipbook.phase;
+            item["frame_duration"] = flipbook.frame_duration;
+            item["start_time"] = flipbook.start_time;
+            item["stop_time"] = flipbook.stop_time;
+            item["flags"] = flipbook.flags;
+            texture_flipbooks.push_back(item);
+        }
+        result["texture_flipbooks"] = texture_flipbooks;
         Array mesh_array;
         for (const auto& mesh : asset_data.meshes) {
             Dictionary item;
             item["name"] = String::utf8(mesh.name.c_str());
             item["parent_node_name"] = String::utf8(mesh.parent_node_name.c_str());
             item["diffuse_texture_path"] = String::utf8(mesh.diffuse_texture_path.c_str());
+            item["normal_texture_path"] = String::utf8(mesh.normal_texture_path.c_str());
             item["editor_marker"] = mesh.editor_marker;
             item["alpha_blend"] = mesh.alpha_blend;
             item["alpha_test"] = mesh.alpha_test;
@@ -1208,6 +1347,12 @@ public:
                 for (const auto& key : track.scales)
                     for (const float value : key) scales.set(cursor++, value);
                 track_item["scales"] = scales;
+                PackedFloat32Array visibility;
+                visibility.resize(static_cast<int64_t>(track.visibility.size() * 2));
+                cursor = 0;
+                for (const auto& key : track.visibility)
+                    for (const float value : key) visibility.set(cursor++, value);
+                track_item["visibility_keys"] = visibility;
                 tracks.push_back(track_item);
             }
             animation_item["tracks"] = tracks;
@@ -1238,6 +1383,9 @@ protected:
         ClassDB::bind_method(D_METHOD("find_npc_base", "form_id"), &OblivionData::find_npc_base);
         ClassDB::bind_method(D_METHOD("find_creature_base", "form_id"), &OblivionData::find_creature_base);
         ClassDB::bind_method(D_METHOD("find_spell", "form_id"), &OblivionData::find_spell);
+        ClassDB::bind_method(D_METHOD("find_magic_effect", "effect_code"), &OblivionData::find_magic_effect);
+        ClassDB::bind_method(D_METHOD("find_effect_shader", "form_id"), &OblivionData::find_effect_shader);
+        ClassDB::bind_method(D_METHOD("find_light", "form_id"), &OblivionData::find_light);
         ClassDB::bind_method(D_METHOD("find_weapon", "form_id"), &OblivionData::find_weapon);
         ClassDB::bind_method(D_METHOD("find_container", "form_id"), &OblivionData::find_container);
         ClassDB::bind_method(D_METHOD("find_leveled_list", "form_id"), &OblivionData::find_leveled_list);

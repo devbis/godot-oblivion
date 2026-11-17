@@ -29,6 +29,15 @@ public:
         return esm_.find_combat_style(form_id);
     }
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
+    [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const {
+        return esm_.find_magic_effect(effect_code);
+    }
+    [[nodiscard]] const EffectShaderRecord* find_effect_shader(std::uint32_t form_id) const {
+        return esm_.find_effect_shader(form_id);
+    }
+    [[nodiscard]] const LightData* find_light(std::uint32_t form_id) const {
+        return esm_.find_light(form_id);
+    }
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const { return esm_.find_weapon(form_id); }
     [[nodiscard]] const ContainerRecord* find_container(std::uint32_t form_id) const { return esm_.find_container(form_id); }
     [[nodiscard]] const LeveledListRecord* find_leveled_list(std::uint32_t form_id) const { return esm_.find_leveled_list(form_id); }

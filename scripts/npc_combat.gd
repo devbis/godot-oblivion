@@ -676,6 +676,7 @@ func kill_actor(actor: Dictionary, run_death_events := true) -> void:
 	_forced.erase(reference_id)
 	_provoked.erase(reference_id)
 	_set_weapon_drawn(actor, false)
+	host.call("deactivate_npc_bound_equipment", reference_id)
 	_begin_knockdown(actor)
 	ActorRagdoll.start(actor, host.get("player") as PhysicsBody3D)
 	if is_instance_valid(root):
@@ -873,6 +874,7 @@ func _begin_combat(actor: Dictionary, root: Node3D, target_id: int = 0, play_att
 	# A fighter does not step aside for the player.
 	if is_instance_valid(root):
 		root.set("yields_to_player", false)
+	host.call("activate_npc_bound_equipment", int(actor.get("reference_id", 0)))
 	actor["combat"] = {
 		"state": "chase", "repath": 0.0, "cooldown": 0.0, "clip": "", "time": 0.0,
 		"hit_done": true, "target_id": target_id, "dodge_cooldown": 0.0, "dodge_attempted": false,

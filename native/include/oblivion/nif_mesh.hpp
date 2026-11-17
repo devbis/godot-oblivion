@@ -14,6 +14,7 @@ struct NifMeshData {
     std::string name;
     std::string parent_node_name;
     std::string diffuse_texture_path;
+    std::string normal_texture_path;
     bool editor_marker = false;
     bool alpha_blend = false;
     bool alpha_test = false;
@@ -91,6 +92,8 @@ struct NifAnimationTrackData {
     std::vector<std::array<float, 4>> translations;
     std::vector<std::array<float, 5>> rotations;
     std::vector<std::array<float, 2>> scales;
+    // NiBoolInterpolator visibility keys packed as time,visible.
+    std::vector<std::array<float, 2>> visibility;
 };
 
 struct NifAnimationData {
@@ -102,6 +105,17 @@ struct NifAnimationData {
     // The sequence's NiTextKeyExtraData entries: gameplay markers such as an attack's "hit" or a bow's "release".
     std::vector<std::pair<float, std::string>> text_keys;
     std::vector<NifAnimationTrackData> tracks;
+};
+
+struct NifTextureFlipbookData {
+    std::string target_name;
+    std::vector<std::string> texture_paths;
+    float frequency = 1.0f;
+    float phase = 0.0f;
+    float frame_duration = 0.0f;
+    float start_time = 0.0f;
+    float stop_time = 0.0f;
+    std::uint16_t flags = 0;
 };
 
 // Parameters stored in a Gamebryo particle emitter, in NIF scene units.
@@ -140,6 +154,7 @@ struct NifAssetData {
     std::vector<NifMeshData> meshes;
     std::vector<NifNodeData> nodes;
     std::vector<NifAnimationData> animations;
+    std::vector<NifTextureFlipbookData> texture_flipbooks;
     std::vector<NifParticleEmitterData> particle_emitters;
     std::vector<NifPhysicsBodyData> physics_bodies;
     std::vector<NifPhysicsConstraintData> physics_constraints;

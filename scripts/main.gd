@@ -243,6 +243,8 @@ const STARTUP_NEAR_REFERENCE_DISTANCE := 18.0
 const STARTUP_NEAR_TERRAIN_DISTANCE := 86.0
 const NPC_NEAR_LOAD_DISTANCE := 18.0
 const NPC_VISIBLE_LOAD_DISTANCE := 72.0
+const FIRE_VISUAL_LOD_DISTANCE := 8.0
+const FIRE_VISUAL_LOD_FADE := 1.0
 const PLAYER_AVATAR_PARTS := ActorFactory.PLAYER_AVATAR_PARTS
 const FEMALE_AVATAR_PARTS := ActorFactory.FEMALE_AVATAR_PARTS
 
@@ -277,6 +279,8 @@ var _reported_unanswered: Dictionary = {}
 var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
 var _flickering_lights: Array[OmniLight3D] = []
+var _nif_flipbook_instances: Array[Dictionary] = []
+var _nif_flipbook_texture_cache: Dictionary = {}
 var _cell_load_generation := 0
 var _cell_geometry_partition_origin := Vector3.ZERO
 var _deferred_world_generation := 0
@@ -509,6 +513,7 @@ func _set_cell_environment(cell: Dictionary) -> void:
 
 func _process(_delta: float) -> void:
 	_update_flickering_lights(_delta)
+	_update_nif_flipbooks(_delta)
 	if not _inventory_open:
 		_update_player_attack_hold(_delta)
 		_update_skinned_physics_rigs()
@@ -2530,18 +2535,23 @@ func _load_cell_geometry(
 			animated_reference_root.transform = reference_transform
 			cell_visual_root.add_child(animated_reference_root)
 		var item_mesh_instances: Array[MeshInstance3D] = []
+		var has_fire_emitters := _has_fire_particle_emitters(physics_metadata)
 		for mesh_index in range(meshes.size()):
 			var mesh_entry: Dictionary = meshes[mesh_index]
 			if bool(mesh_entry.get("editor_marker", false)):
 				continue
+			if has_fire_emitters and _is_fire_particle_mesh(mesh_entry):
+				continue
 			# Particle NIFs may contain untextured emitter volumes or invisible helper geometry.
 			if not (physics_metadata.get("particle_emitters", []) as Array).is_empty() and str(mesh_entry.get("diffuse_texture_path", "")).is_empty():
 				continue
+			var is_fire_lod_sprite := has_fire_emitters and not _texture_flipbook_for_mesh(mesh_entry, physics_metadata).is_empty()
 			var model_key := model_path.to_lower().replace("\\", "/")
 			var can_batch := (
 				is_exterior
 				and not is_pickup_item
 				and not animate_reference
+				and not is_fire_lod_sprite
 				and not _is_debug_service_model(model_path)
 				and not bool(mesh_entry.get("alpha_blend", false))
 			)
@@ -2596,6 +2606,8 @@ func _load_cell_geometry(
 					int(mesh_entry.get("alpha_threshold", 128))
 				)
 				if generation != _cell_load_generation:
+					return false
+				if not await _install_nif_texture_flipbook(instance, mesh_entry, physics_metadata, generation):
 					return false
 				if animate_reference:
 					var parent_node_name := str(mesh_entry.get("parent_node_name", ""))
@@ -5851,6 +5863,909 @@ func kill_npc(reference_name: String) -> bool:
 	_npc_combat.kill_actor(actor)
 	return true
 
+## NPC spell lists can contain bound-armor abilities. Their models are staged invisibly on the rig and appear when combat
+## begins, with a brief conjuration flash; the temporary armor and weapon dissolve when the actor dies.
+func activate_npc_bound_equipment(reference_id: int) -> void:
+	var actor := _npc_actor_by_id(reference_id)
+	if actor.is_empty() or bool(actor.get("dead", false)) or bool(actor.get("bound_gear_active", false)):
+		return
+	var bound_meshes: Array = actor.get("bound_gear_meshes", [])
+	if bound_meshes.is_empty():
+		return
+	actor["bound_gear_active"] = true
+	var transition_duration := _bound_magic_transition_duration(actor)
+	var bound_weapon_id := int(actor.get("bound_weapon_form_id", 0))
+	if bound_weapon_id > 0:
+		actor["unbound_weapon_form_id"] = int(actor.get("weapon_form_id", 0))
+		actor["unbound_weapon_meshes"] = actor.get("weapon_meshes", []).duplicate()
+		actor["unbound_weapon_record"] = actor.get("weapon_record", {}).duplicate(true)
+		for mesh_value: Variant in actor.get("unbound_weapon_meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.visible = false
+		actor["weapon_form_id"] = bound_weapon_id
+		actor["weapon_meshes"] = actor.get("bound_weapon_meshes", [])
+		actor["weapon_record"] = actor.get("bound_weapon_record", {})
+	var previous_tween: Variant = actor.get("bound_gear_tween")
+	if previous_tween is Tween and (previous_tween as Tween).is_running():
+		(previous_tween as Tween).kill()
+	var appearance := create_tween().set_parallel(true)
+	actor["bound_gear_tween"] = appearance
+	var replaced_meshes: Array[MeshInstance3D] = []
+	var bound_slots := int(actor.get("bound_gear_slots", 0))
+	for equipment_value: Variant in actor.get("worn_equipment", []):
+		var equipment: Dictionary = equipment_value
+		if (int(equipment.get("slots", 0)) & bound_slots) == 0:
+			continue
+		for mesh_value: Variant in equipment.get("meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if not is_instance_valid(mesh):
+				continue
+			replaced_meshes.push_back(mesh)
+			mesh.visible = true
+			mesh.transparency = 0.0
+			appearance.tween_property(mesh, "transparency", 1.0, transition_duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	actor["bound_hidden_gear_meshes"] = replaced_meshes
+	var hidden_face_meshes: Array[MeshInstance3D] = []
+	var hidden_hair_meshes: Array[MeshInstance3D] = []
+	if (bound_slots & 0x0001) != 0:
+		for mesh_value: Variant in actor.get("face_meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if not is_instance_valid(mesh) or not mesh.visible:
+				continue
+			hidden_face_meshes.push_back(mesh)
+			mesh.visible = false
+	if (bound_slots & 0x0003) != 0:
+		for mesh_value: Variant in actor.get("hair_meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if not is_instance_valid(mesh) or not mesh.visible:
+				continue
+			hidden_hair_meshes.push_back(mesh)
+			mesh.visible = false
+	actor["bound_hidden_face_meshes"] = hidden_face_meshes
+	actor["bound_hidden_hair_meshes"] = hidden_hair_meshes
+	for mesh_value: Variant in bound_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if not is_instance_valid(mesh):
+			continue
+		mesh.visible = true
+		mesh.transparency = 1.0
+		appearance.tween_property(mesh, "transparency", 0.0, transition_duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	appearance.finished.connect(_finish_npc_bound_equipment_appearance.bind(
+		replaced_meshes, actor, transition_duration
+	))
+	_spawn_npc_bound_magic_effect(actor, true)
+	var item_names: Array = actor.get("bound_item_names", [])
+	print("OpenOB magic: %s conjures %s" % [
+		str(actor.get("reference_name", "NPC")), ", ".join(PackedStringArray(item_names))
+	])
+
+## A bound weapon and armor are temporary effects rather than loot; on death they dissolve and the NPC's carried weapon
+## (if any) is restored on the corpse.
+func deactivate_npc_bound_equipment(reference_id: int) -> void:
+	var actor := _npc_actor_by_id(reference_id)
+	if actor.is_empty() or not bool(actor.get("bound_gear_active", false)):
+		return
+	actor["bound_gear_active"] = false
+	actor["bound_magic_effect_generation"] = int(actor.get("bound_magic_effect_generation", 0)) + 1
+	var appearance_effect := actor.get("bound_magic_appearance_effect") as Node3D
+	if is_instance_valid(appearance_effect):
+		appearance_effect.queue_free()
+	actor.erase("bound_magic_appearance_effect")
+	var transition_duration := _bound_magic_transition_duration(actor, true)
+	var previous_tween: Variant = actor.get("bound_gear_tween")
+	if previous_tween is Tween and (previous_tween as Tween).is_running():
+		(previous_tween as Tween).kill()
+	var disappearance := create_tween().set_parallel(true)
+	actor["bound_gear_tween"] = disappearance
+	var bound_meshes: Array = actor.get("bound_gear_meshes", [])
+	var replaced_meshes: Array = actor.get("bound_hidden_gear_meshes", [])
+	for mesh_value: Variant in bound_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if not is_instance_valid(mesh):
+			continue
+		mesh.visible = true
+		disappearance.tween_property(mesh, "transparency", 1.0, transition_duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	for mesh_value: Variant in replaced_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if not is_instance_valid(mesh):
+			continue
+		mesh.visible = true
+		mesh.transparency = 1.0
+		disappearance.tween_property(mesh, "transparency", 0.0, transition_duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	disappearance.finished.connect(_finish_npc_bound_equipment_fade.bind(
+		bound_meshes, replaced_meshes,
+		actor.get("bound_hidden_face_meshes", []), actor.get("bound_hidden_hair_meshes", [])
+	))
+	_spawn_npc_bound_magic_effect(actor, false)
+	actor.erase("bound_hidden_gear_meshes")
+	actor.erase("bound_hidden_face_meshes")
+	actor.erase("bound_hidden_hair_meshes")
+	if int(actor.get("bound_weapon_form_id", 0)) > 0:
+		actor["weapon_form_id"] = int(actor.get("unbound_weapon_form_id", 0))
+		actor["weapon_meshes"] = actor.get("unbound_weapon_meshes", [])
+		actor["weapon_record"] = actor.get("unbound_weapon_record", {})
+		for mesh_value: Variant in actor.get("weapon_meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.visible = true
+		actor.erase("unbound_weapon_form_id")
+		actor.erase("unbound_weapon_meshes")
+		actor.erase("unbound_weapon_record")
+
+func _finish_npc_bound_equipment_appearance(
+	replaced_meshes: Array, actor: Dictionary, transition_duration: float
+) -> void:
+	for mesh_value: Variant in replaced_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = false
+			mesh.transparency = 0.0
+	if bool(actor.get("bound_gear_active", false)) and not bool(actor.get("dead", false)):
+		_spawn_npc_bound_cast_glow(actor, transition_duration)
+		_spawn_npc_bound_magic_light_flash(actor)
+
+func _finish_npc_bound_equipment_fade(
+	bound_meshes: Array, replaced_meshes: Array,
+	hidden_face_meshes: Array, hidden_hair_meshes: Array
+) -> void:
+	for mesh_value: Variant in bound_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = false
+			mesh.transparency = 0.0
+	for mesh_value: Variant in replaced_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = true
+			mesh.transparency = 0.0
+	for mesh_value: Variant in hidden_face_meshes + hidden_hair_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = true
+
+func _npc_actor_by_id(reference_id: int) -> Dictionary:
+	for actor: Dictionary in _npc_actors:
+		if int(actor.get("reference_id", 0)) == reference_id:
+			return actor
+	return {}
+
+func _bound_magic_effect_data(actor: Dictionary, for_death := false) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	var seen_models: Dictionary = {}
+	var seen_shaders: Dictionary = {}
+	for code_value: Variant in actor.get("bound_magic_effect_codes", []):
+		var effect: Dictionary = data_reader.find_magic_effect(str(code_value))
+		if effect.is_empty():
+			continue
+		var model_path := str(effect.get("model_path", ""))
+		var shader_id := int(effect.get("effect_shader_form_id", 0))
+		if not model_path.is_empty():
+			var key := model_path.to_lower().replace("\\", "/")
+			if not seen_models.has(key):
+				seen_models[key] = true
+				results.push_back({"kind": "model", "path": model_path})
+		if not for_death and shader_id > 0 and not seen_shaders.has(shader_id):
+			seen_shaders[shader_id] = true
+			var shader: Dictionary = data_reader.find_effect_shader(shader_id)
+			if not shader.is_empty():
+				results.push_back({"kind": "shader", "data": shader})
+	if for_death:
+		# Oblivion uses DIAR's own effect shader for armor disintegration: red membrane/edge and fire particles.
+		var disintegrate_armor: Dictionary = data_reader.find_magic_effect("DIAR")
+		var death_shader_id := int(disintegrate_armor.get("effect_shader_form_id", 0))
+		if death_shader_id > 0:
+			var death_shader: Dictionary = data_reader.find_effect_shader(death_shader_id)
+			if not death_shader.is_empty():
+				results.push_back({"kind": "shader", "data": death_shader})
+	return results
+
+func _bound_magic_transition_duration(actor: Dictionary, for_death := false) -> float:
+	var duration := 0.0
+	for effect_value: Variant in _bound_magic_effect_data(actor, for_death):
+		var effect: Dictionary = effect_value
+		if str(effect.get("kind", "")) != "shader":
+			continue
+		var shader: Dictionary = effect.get("data", {})
+		var shader_duration := maxf(
+			maxf(
+				float(shader.get("particle_birth_ramp_up", 0.0))
+				+ float(shader.get("particle_full_birth_time", 0.0))
+				+ float(shader.get("particle_birth_ramp_down", 0.0)),
+				float(shader.get("fill_alpha_fade_in", 0.0))
+				+ float(shader.get("fill_full_alpha_time", 0.0))
+				+ float(shader.get("fill_alpha_fade_out", 0.0))
+			),
+			float(shader.get("edge_alpha_fade_in", 0.0))
+			+ float(shader.get("edge_full_alpha_time", 0.0))
+			+ float(shader.get("edge_alpha_fade_out", 0.0))
+		)
+		duration = maxf(duration, shader_duration)
+	return maxf(duration, 0.1)
+
+func _bound_magic_sphere_duration(metadata: Dictionary, for_death: bool, fallback: float) -> float:
+	var wanted_sequence := "SpecialIdle_HitEffect" if for_death else "SpecialIdle_Cast"
+	for animation_value: Variant in metadata.get("animations", []):
+		var animation: Dictionary = animation_value
+		if str(animation.get("name", "")) != wanted_sequence:
+			continue
+		var first_visible := INF
+		for track_value: Variant in animation.get("tracks", []):
+			var track: Dictionary = track_value
+			var target_name := str(track.get("node_name", "")).to_lower().get_slice(":", 0)
+			if target_name != "refractivesphere":
+				continue
+			var keys: PackedFloat32Array = track.get("visibility_keys", PackedFloat32Array())
+			for key_index in range(0, keys.size() - 1, 2):
+				var key_time := keys[key_index]
+				if keys[key_index + 1] > 0.5:
+					first_visible = minf(first_visible, key_time)
+				elif is_finite(first_visible):
+					return maxf(0.1, key_time - first_visible)
+		if is_finite(first_visible):
+			return maxf(0.1, float(animation.get("stop_time", 0.0)) - first_visible)
+	return maxf(0.1, fallback)
+
+func _bound_magic_light_records(actor: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	for code_value: Variant in actor.get("bound_magic_effect_codes", []):
+		var effect: Dictionary = data_reader.find_magic_effect(str(code_value))
+		var light_id := int(effect.get("light_form_id", 0))
+		if light_id <= 0 or seen.has(light_id):
+			continue
+		seen[light_id] = true
+		var light: Dictionary = data_reader.find_light(light_id)
+		if not light.is_empty():
+			result.push_back(light)
+	return result
+
+func _spawn_npc_bound_magic_light_flash(actor: Dictionary) -> void:
+	var avatar := actor.get("avatar") as Node3D
+	if not is_instance_valid(avatar):
+		return
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	var light_bone := "Bip01 Spine2"
+	var use_bone := is_instance_valid(skeleton) and skeleton.find_bone(light_bone) >= 0
+	# EFSH can remain active for several seconds; the LIGH record is only the cast flash, never an aura.
+	var fade_in_duration := 0.08
+	var fade_out_duration := 0.34
+	for light_data: Dictionary in _bound_magic_light_records(actor):
+		var color_bytes: PackedByteArray = light_data.get("color", PackedByteArray())
+		if color_bytes.size() < 3:
+			continue
+		var mount: Node3D
+		if use_bone:
+			var bone_attachment := BoneAttachment3D.new()
+			bone_attachment.name = "BoundMagicCastLightMount"
+			bone_attachment.bone_name = light_bone
+			skeleton.add_child(bone_attachment)
+			mount = bone_attachment
+		else:
+			mount = Node3D.new()
+			mount.name = "BoundMagicCastLightMount"
+			avatar.add_child(mount)
+		var light := OmniLight3D.new()
+		light.name = "BoundMagicCastLight"
+		light.light_color = Color8(color_bytes[0], color_bytes[1], color_bytes[2])
+		light.omni_range = maxf(0.05, float(light_data.get("radius", 0.0)) * game_units_to_meters)
+		light.omni_attenuation = 1.0
+		light.shadow_enabled = false
+		light.light_energy = 0.0
+		mount.add_child(light)
+		var flash := create_tween()
+		flash.tween_property(light, "light_energy", 0.8, fade_in_duration)
+		flash.tween_property(light, "light_energy", 0.0, fade_out_duration)
+		flash.tween_callback(mount.queue_free)
+
+func _spawn_npc_bound_cast_glow(actor: Dictionary, duration: float) -> void:
+	var avatar := actor.get("avatar") as Node3D
+	if not is_instance_valid(avatar):
+		return
+	var color := Color(1.0, 0.38, 0.12)
+	var has_shader_color := false
+	for effect_value: Variant in _bound_magic_effect_data(actor):
+		var effect_data: Dictionary = effect_value
+		if str(effect_data.get("kind", "")) != "shader":
+			continue
+		var shader_data: Dictionary = effect_data.get("data", {})
+		var color_bytes: PackedByteArray = shader_data.get("edge_color", PackedByteArray())
+		if color_bytes.size() < 3:
+			color_bytes = shader_data.get("fill_color", PackedByteArray())
+		if color_bytes.size() >= 3:
+			var shader_color := Color8(color_bytes[0], color_bytes[1], color_bytes[2])
+			if shader_color.get_luminance() > 0.01:
+				color = shader_color
+				has_shader_color = true
+				break
+	if not has_shader_color:
+		for light_data: Dictionary in _bound_magic_light_records(actor):
+			var light_color_bytes: PackedByteArray = light_data.get("color", PackedByteArray())
+			if light_color_bytes.size() < 3:
+				continue
+			var light_color := Color8(light_color_bytes[0], light_color_bytes[1], light_color_bytes[2])
+			if light_color.get_luminance() > 0.01:
+				color = light_color
+				break
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, blend_add, depth_draw_never, cull_front;
+
+uniform vec3 glow_color = vec3(1.0, 0.4, 0.1);
+uniform float intensity = 0.0;
+uniform float shell_width = 6.0;
+
+void vertex() {
+	// NIF actor vertices are still in Oblivion units here; expand away from the rig origin.
+	VERTEX += normalize(VERTEX) * shell_width;
+}
+
+void fragment() {
+	float facing = abs(dot(normalize(NORMAL), normalize(VIEW)));
+	float rim = pow(clamp(1.0 - facing, 0.0, 1.0), 1.25);
+	ALBEDO = glow_color;
+	ALPHA = clamp(intensity * (0.2 + 0.8 * rim), 0.0, 1.0);
+}
+"""
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	material.set_shader_parameter("glow_color", Vector3(color.r, color.g, color.b))
+	var overlays: Array[Dictionary] = []
+	for node_value: Variant in avatar.find_children("*", "MeshInstance3D", true, false):
+		var mesh := node_value as MeshInstance3D
+		if not is_instance_valid(mesh) or not mesh.is_visible_in_tree():
+			continue
+		overlays.push_back({"mesh": mesh, "previous": mesh.material_overlay})
+		mesh.material_overlay = material
+	if overlays.is_empty():
+		return
+	var glow := Node3D.new()
+	glow.name = "BoundArmorCastGlow"
+	avatar.add_child(glow)
+	# A short, bright silhouette sells the conjuration; it must not read as a permanent armor tint.
+	var total_duration := clampf(duration, 0.45, 0.65)
+	var fade_in_duration := 0.08
+	var peak_intensity := 1.4
+	var flash := glow.create_tween()
+	flash.tween_method(
+		Callable(self, "_set_effect_shader_alpha").bind(material, "intensity"),
+		0.0, peak_intensity, fade_in_duration
+	)
+	flash.tween_method(
+		Callable(self, "_set_effect_shader_alpha").bind(material, "intensity"),
+		peak_intensity, 0.0, total_duration - fade_in_duration
+	)
+	flash.tween_callback(_restore_effect_shader_overlays.bind(overlays, material))
+	flash.tween_callback(glow.queue_free)
+
+func _spawn_npc_bound_magic_effect(actor: Dictionary, appearing: bool) -> void:
+	_spawn_npc_bound_magic_effect_async(actor, appearing)
+
+func _spawn_npc_bound_magic_effect_async(actor: Dictionary, appearing: bool) -> void:
+	var avatar := actor.get("avatar") as Node3D
+	if not is_instance_valid(avatar):
+		return
+	var effect_generation := int(actor.get("bound_magic_effect_generation", 0)) + 1
+	actor["bound_magic_effect_generation"] = effect_generation
+	var for_death := not appearing
+	var effect_definitions := _bound_magic_effect_data(actor, for_death)
+	var effect := Node3D.new()
+	effect.name = "BoundMagicAppearance" if appearing else "BoundMagicRemoval"
+	var effect_owner: Node3D = effect
+	var skeleton := actor.get("skeleton") as Skeleton3D
+	var torso_bone := "Bip01 Spine2"
+	var torso_index := skeleton.find_bone(torso_bone) if is_instance_valid(skeleton) else -1
+	if torso_index >= 0:
+		# Preserve the NIF's model-space placement while letting its sphere follow the torso during ragdoll.
+		var attachment := BoneAttachment3D.new()
+		attachment.name = "BoundMagicEffectMount"
+		attachment.bone_name = torso_bone
+		skeleton.add_child(attachment)
+		attachment.add_child(effect)
+		_align_bound_magic_effect_to_actor(effect, avatar, skeleton, torso_index)
+		effect_owner = attachment
+	else:
+		avatar.add_child(effect)
+	var effect_key := "bound_magic_appearance_effect" if appearing else "bound_magic_death_effect"
+	actor[effect_key] = effect_owner
+	var transition_duration := _bound_magic_transition_duration(actor, for_death)
+	var maximum_effect_lifetime := 0.0
+	for effect_value: Variant in effect_definitions:
+		var effect_data: Dictionary = effect_value
+		if str(effect_data.get("kind", "")) == "model":
+			var model_path := str(effect_data.get("path", ""))
+			var model_key := model_path.to_lower().replace("\\", "/")
+			var meshes: Array = await assets.meshes_for_model(model_path)
+			if not _bound_magic_effect_is_current(actor, effect, effect_generation) or not is_instance_valid(avatar):
+				return
+			var metadata: Dictionary = assets.nif_metadata_cache.get(model_key, {})
+			var sphere_duration := _bound_magic_sphere_duration(metadata, for_death, transition_duration)
+			var has_particle_emitters := not (metadata.get("particle_emitters", []) as Array).is_empty()
+			for mesh_entry: Dictionary in meshes:
+				if bool(mesh_entry.get("editor_marker", false)):
+					continue
+				var mesh_name := str(mesh_entry.get("mesh_name", ""))
+				if has_particle_emitters and str(mesh_entry.get("diffuse_texture_path", "")).is_empty():
+					continue
+				var mesh := mesh_entry.get("mesh") as ArrayMesh
+				if mesh == null:
+					continue
+				var instance := MeshInstance3D.new()
+				instance.name = model_path.get_file().get_basename() + "_" + mesh_name
+				instance.mesh = mesh
+				var texture_path := str(mesh_entry.get("diffuse_texture_path", ""))
+				var is_refractive_sphere := mesh_name.to_lower().begins_with("refractivesphere")
+				if is_refractive_sphere:
+					var distortion_texture: Texture2D = null
+					var normal_texture_path := str(mesh_entry.get("normal_texture_path", ""))
+					if normal_texture_path.is_empty() and not texture_path.is_empty():
+						var diffuse_extension := texture_path.get_extension()
+						if not diffuse_extension.is_empty():
+							normal_texture_path = texture_path.get_basename() + "_n." + diffuse_extension
+					if not normal_texture_path.is_empty():
+						distortion_texture = await assets.texture_for_path(normal_texture_path) as Texture2D
+					if not _bound_magic_effect_is_current(actor, effect, effect_generation):
+						return
+					instance.material_override = _bound_refractive_material(distortion_texture)
+				else:
+					instance.material_override = await assets.material_for_texture(
+						texture_path,
+						bool(mesh_entry.get("alpha_blend", false)),
+						bool(mesh_entry.get("alpha_test", false)),
+						int(mesh_entry.get("alpha_threshold", 128))
+					)
+				if not _bound_magic_effect_is_current(actor, effect, effect_generation):
+					return
+				instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				if is_refractive_sphere and torso_index >= 0:
+					# Asset loading may span several animation frames; align at the moment the sphere appears.
+					_align_bound_magic_effect_to_actor(effect, avatar, skeleton, torso_index)
+				effect.add_child(instance)
+				if is_refractive_sphere:
+					instance.transparency = 1.0 if appearing else 0.0
+					var sphere_fade := effect.create_tween()
+					if appearing:
+						var sphere_fade_in := sphere_duration * 0.5
+						var sphere_fade_out := sphere_duration - sphere_fade_in
+						sphere_fade.tween_property(instance, "transparency", 0.0, sphere_fade_in)
+						sphere_fade.tween_property(instance, "transparency", 1.0, sphere_fade_out)
+					else:
+						sphere_fade.tween_property(instance, "transparency", 1.0, sphere_duration)
+					maximum_effect_lifetime = maxf(maximum_effect_lifetime, sphere_duration)
+				else:
+					instance.transparency = 1.0 if appearing else 0.0
+					var fade := effect.create_tween()
+					fade.tween_property(instance, "transparency", 0.0 if appearing else 1.0, transition_duration)
+			for emitter_value: Variant in metadata.get("particle_emitters", []):
+				maximum_effect_lifetime = maxf(maximum_effect_lifetime, float((emitter_value as Dictionary).get("lifetime", 0.0)))
+			_add_nif_particles(metadata, Transform3D.IDENTITY, model_path, effect)
+		else:
+			var shader: Dictionary = effect_data.get("data", {})
+			await _apply_effect_shader_membrane(effect, avatar, shader)
+			if not _bound_magic_effect_is_current(actor, effect, effect_generation):
+				return
+			maximum_effect_lifetime = maxf(
+				maximum_effect_lifetime,
+				float(shader.get("particle_lifetime", 0.0)) + float(shader.get("particle_lifetime_variance", 0.0))
+			)
+			# MYTH's destruction texture became a red torso blob with the surface-sampled approximation.
+			# Keep the authentic DIAR flakes on removal; the cast silhouette is drawn by the glow pass.
+			if for_death:
+				await _spawn_bound_effect_shader_particles(effect, avatar, shader, true)
+				if not _bound_magic_effect_is_current(actor, effect, effect_generation):
+					return
+	var cleanup_duration := maxf(transition_duration, maximum_effect_lifetime)
+	var cleanup := effect.create_tween()
+	cleanup.tween_interval(cleanup_duration)
+	cleanup.tween_callback(_finish_npc_bound_magic_effect.bind(actor, effect_owner, effect_key))
+
+func _bound_magic_effect_is_current(actor: Dictionary, effect: Node3D, generation: int) -> bool:
+	return is_instance_valid(effect) and not effect.is_queued_for_deletion() \
+		and int(actor.get("bound_magic_effect_generation", 0)) == generation
+
+func _align_bound_magic_effect_to_actor(effect: Node3D, avatar: Node3D, skeleton: Skeleton3D, bone_index: int) -> void:
+	var skeleton_to_avatar := skeleton.global_transform.affine_inverse() * avatar.global_transform
+	effect.transform = skeleton.get_bone_global_pose(bone_index).affine_inverse() * skeleton_to_avatar
+
+func _finish_npc_bound_magic_effect(actor: Dictionary, effect_owner: Node3D, effect_key: String) -> void:
+	if actor.get(effect_key) == effect_owner:
+		actor.erase(effect_key)
+	if is_instance_valid(effect_owner):
+		effect_owner.queue_free()
+
+func _bound_refractive_material(distortion_texture: Texture2D) -> ShaderMaterial:
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_back;
+
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear, repeat_disable;
+uniform sampler2D distortion_normal : filter_linear, repeat_enable;
+uniform bool use_distortion_normal = false;
+uniform float distortion_strength = 0.055;
+
+void fragment() {
+	// Oblivion ships a flowing refract_n.dds normal map beside refract.dds for the original heat shimmer.
+	vec3 view_normal = normalize(NORMAL);
+	vec2 heat_flow = vec2(view_normal.x, -view_normal.y) * 0.004;
+	if (use_distortion_normal) {
+		vec2 moving_uv_a = UV * 1.35 + vec2(0.0, -TIME * 0.22);
+		vec2 moving_uv_b = UV * 1.85 + vec2(0.37, TIME * 0.16);
+		vec2 normal_a = texture(distortion_normal, moving_uv_a).rg * 2.0 - 1.0;
+		vec2 normal_b = texture(distortion_normal, moving_uv_b).rg * 2.0 - 1.0;
+		heat_flow += normal_a + normal_b * 0.5;
+	}
+	float sphere_edge = clamp(length(view_normal.xy), 0.0, 1.0);
+	float interior_mask = 1.0 - smoothstep(0.72, 0.99, sphere_edge);
+	float sphere_strength = 0.45 + 0.55 * sphere_edge;
+	vec2 lens_offset = heat_flow * distortion_strength * sphere_strength;
+	vec2 sample_uv = clamp(SCREEN_UV + lens_offset, vec2(0.001), vec2(0.999));
+	ALBEDO = texture(screen_texture, sample_uv).rgb;
+	// Blend only the warped scene back in; fading the sphere's rim removes the glass-shell silhouette.
+	ALPHA = 0.62 * interior_mask;
+}
+"""
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	if distortion_texture != null:
+		material.set_shader_parameter("distortion_normal", distortion_texture)
+		material.set_shader_parameter("use_distortion_normal", true)
+	return material
+
+func _apply_effect_shader_membrane(effect: Node3D, avatar: Node3D, shader_data: Dictionary) -> void:
+	# EFSH flag 0x01 disables the membrane (fill/edge) pass; particle shader data remains active.
+	if (int(shader_data.get("flags", 0)) & 0x01) != 0:
+		return
+	var fill_bytes: PackedByteArray = shader_data.get("fill_color", PackedByteArray())
+	var edge_bytes: PackedByteArray = shader_data.get("edge_color", PackedByteArray())
+	if fill_bytes.size() < 3 or edge_bytes.size() < 3:
+		return
+	var fill_color := Color8(fill_bytes[0], fill_bytes[1], fill_bytes[2])
+	var edge_color := Color8(edge_bytes[0], edge_bytes[1], edge_bytes[2])
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_back;
+
+uniform vec3 fill_color = vec3(0.0);
+uniform vec3 edge_color = vec3(0.0);
+uniform float fill_alpha = 0.0;
+uniform float edge_alpha = 0.0;
+uniform float edge_falloff = 1.0;
+uniform bool inverse_edge = false;
+uniform float fill_pulse_amplitude = 0.0;
+uniform float fill_pulse_frequency = 1.0;
+uniform float edge_pulse_amplitude = 0.0;
+uniform float edge_pulse_frequency = 1.0;
+uniform sampler2D fill_texture : source_color, filter_linear, repeat_enable;
+uniform bool use_fill_texture = false;
+uniform vec2 fill_texture_scroll = vec2(0.0);
+uniform sampler2D holes_texture : filter_linear, repeat_enable;
+uniform bool use_holes_texture = false;
+
+void fragment() {
+	vec2 uv = UV + fill_texture_scroll * TIME;
+	float mask = use_fill_texture ? texture(fill_texture, uv).a : 1.0;
+	if (use_holes_texture) {
+		mask *= 1.0 - texture(holes_texture, uv).r;
+	}
+	float facing = abs(dot(normalize(NORMAL), normalize(VIEW)));
+	float rim = pow(clamp(1.0 - facing, 0.0, 1.0), max(edge_falloff, 0.001));
+	if (inverse_edge) {
+		rim = 1.0 - rim;
+	}
+	float fill_pulse = max(0.0, 1.0 + fill_pulse_amplitude * sin(TIME * fill_pulse_frequency * 6.2831853));
+	float edge_pulse = max(0.0, 1.0 + edge_pulse_amplitude * sin(TIME * edge_pulse_frequency * 6.2831853));
+	vec3 glow = fill_color * fill_alpha * fill_pulse * mask
+		+ edge_color * edge_alpha * edge_pulse * rim;
+	ALBEDO = glow;
+	ALPHA = clamp(max(fill_alpha * mask, edge_alpha * rim), 0.0, 1.0);
+}
+"""
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	material.set_shader_parameter("fill_color", Vector3(fill_color.r, fill_color.g, fill_color.b))
+	material.set_shader_parameter("edge_color", Vector3(edge_color.r, edge_color.g, edge_color.b))
+	material.set_shader_parameter("edge_falloff", float(shader_data.get("edge_falloff", 1.0)))
+	material.set_shader_parameter("inverse_edge", (int(shader_data.get("flags", 0)) & 0x10) != 0)
+	material.set_shader_parameter("fill_pulse_amplitude", float(shader_data.get("fill_alpha_pulse_amplitude", 0.0)))
+	material.set_shader_parameter("fill_pulse_frequency", float(shader_data.get("fill_alpha_pulse_frequency", 1.0)))
+	material.set_shader_parameter("edge_pulse_amplitude", float(shader_data.get("edge_alpha_pulse_amplitude", 0.0)))
+	material.set_shader_parameter("edge_pulse_frequency", float(shader_data.get("edge_alpha_pulse_frequency", 1.0)))
+	material.set_shader_parameter("fill_texture_scroll", Vector2(
+		float(shader_data.get("fill_texture_scroll_u", 0.0)),
+		float(shader_data.get("fill_texture_scroll_v", 0.0))
+	))
+	var fill_path := str(shader_data.get("fill_texture_path", ""))
+	if not fill_path.is_empty():
+		var fill_texture := await assets.texture_for_path(fill_path) as Texture2D
+		if not is_instance_valid(effect) or fill_texture == null:
+			return
+		material.set_shader_parameter("fill_texture", fill_texture)
+		material.set_shader_parameter("use_fill_texture", true)
+	var holes_path := str(shader_data.get("holes_texture_path", ""))
+	if not holes_path.is_empty():
+		var holes_texture := await assets.texture_for_path(holes_path) as Texture2D
+		if not is_instance_valid(effect):
+			return
+		if holes_texture != null:
+			material.set_shader_parameter("holes_texture", holes_texture)
+			material.set_shader_parameter("use_holes_texture", true)
+	var overlays: Array[Dictionary] = []
+	for node_value: Variant in avatar.find_children("*", "MeshInstance3D", true, false):
+		var mesh := node_value as MeshInstance3D
+		if not is_instance_valid(mesh) or not mesh.is_visible_in_tree() or effect.is_ancestor_of(mesh):
+			continue
+		overlays.push_back({"mesh": mesh, "previous": mesh.material_overlay})
+		mesh.material_overlay = material
+	if overlays.is_empty():
+		return
+	var fill_target := float(shader_data.get("fill_full_alpha_ratio", 0.0))
+	var edge_target := float(shader_data.get("edge_full_alpha_ratio", 0.0))
+	_tween_effect_shader_alpha(
+		effect, material, "fill_alpha", fill_target,
+		float(shader_data.get("fill_persistent_alpha_ratio", 0.0)),
+		float(shader_data.get("fill_alpha_fade_in", 0.0)),
+		float(shader_data.get("fill_full_alpha_time", 0.0)),
+		float(shader_data.get("fill_alpha_fade_out", 0.0))
+	)
+	_tween_effect_shader_alpha(
+		effect, material, "edge_alpha", edge_target,
+		float(shader_data.get("edge_persistent_alpha_ratio", 0.0)),
+		float(shader_data.get("edge_alpha_fade_in", 0.0)),
+		float(shader_data.get("edge_full_alpha_time", 0.0)),
+		float(shader_data.get("edge_alpha_fade_out", 0.0))
+	)
+	var restore := effect.create_tween()
+	restore.tween_interval(_bound_effect_shader_duration(shader_data))
+	restore.tween_callback(_restore_effect_shader_overlays.bind(overlays, material))
+
+func _tween_effect_shader_alpha(
+	effect: Node3D, material: ShaderMaterial, parameter: String,
+	full_ratio: float, persistent_ratio: float, fade_in: float, full_time: float, fade_out: float
+) -> void:
+	var tween := effect.create_tween()
+	if fade_in > 0.0:
+		tween.tween_method(Callable(self, "_set_effect_shader_alpha").bind(material, parameter), 0.0, full_ratio, fade_in)
+	else:
+		material.set_shader_parameter(parameter, full_ratio)
+	if full_time > 0.0:
+		tween.tween_interval(full_time)
+	if fade_out > 0.0:
+		tween.tween_method(Callable(self, "_set_effect_shader_alpha").bind(material, parameter), full_ratio, persistent_ratio, fade_out)
+	else:
+		material.set_shader_parameter(parameter, persistent_ratio)
+
+func _set_effect_shader_alpha(value: float, material: ShaderMaterial, parameter: String) -> void:
+	material.set_shader_parameter(parameter, value)
+
+func _restore_effect_shader_overlays(overlays: Array, effect_material: Material) -> void:
+	for overlay_value: Variant in overlays:
+		var entry: Dictionary = overlay_value
+		var mesh := entry.get("mesh") as MeshInstance3D
+		if is_instance_valid(mesh) and mesh.material_overlay == effect_material:
+			mesh.material_overlay = entry.get("previous") as Material
+
+func _bound_effect_shader_duration(shader: Dictionary) -> float:
+	return maxf(
+		float(shader.get("fill_alpha_fade_in", 0.0))
+		+ float(shader.get("fill_full_alpha_time", 0.0))
+		+ float(shader.get("fill_alpha_fade_out", 0.0)),
+		float(shader.get("edge_alpha_fade_in", 0.0))
+		+ float(shader.get("edge_full_alpha_time", 0.0))
+		+ float(shader.get("edge_alpha_fade_out", 0.0))
+	)
+
+func _spawn_bound_effect_shader_particles(effect: Node3D, avatar: Node3D, shader: Dictionary, appearing: bool) -> void:
+	# EFSH flag 0x08 disables its particle pass while leaving the membrane pass available.
+	if (int(shader.get("flags", 0)) & 0x08) != 0:
+		return
+	var texture_path := str(shader.get("particle_texture_path", ""))
+	if texture_path.is_empty():
+		return
+	var texture := await assets.texture_for_path(texture_path) as Texture2D
+	if texture == null or not is_instance_valid(effect) or not is_instance_valid(avatar):
+		return
+	var emission_points := PackedVector3Array()
+	var emission_directions := PackedVector3Array()
+	var surface_velocity_min := INF
+	var surface_velocity_max := 0.0
+	var effect_inverse := effect.global_transform.affine_inverse()
+	var skeleton := avatar.find_child("Skeleton3D", true, false) as Skeleton3D
+	var velocity_values: PackedFloat32Array = shader.get("particle_velocity", PackedFloat32Array())
+	var velocity_vector := Vector3.ZERO
+	if velocity_values.size() >= 3:
+		velocity_vector = Vector3(velocity_values[0], velocity_values[2], -velocity_values[1])
+	var speed_along_normal := float(shader.get("particle_speed_along_normal", 0.0))
+	var speed_variance := absf(float(shader.get("particle_speed_along_normal_variance", 0.0)))
+	for node_value: Variant in avatar.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := node_value as MeshInstance3D
+		if not is_instance_valid(mesh_instance) or not mesh_instance.is_visible_in_tree() \
+				or effect.is_ancestor_of(mesh_instance) or mesh_instance.mesh == null:
+			continue
+		var mesh := mesh_instance.mesh
+		var mesh_to_effect := effect_inverse * mesh_instance.global_transform
+		for surface_index in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(surface_index)
+			if arrays.size() <= Mesh.ARRAY_VERTEX:
+				continue
+			var vertices := arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array
+			if vertices.is_empty():
+				continue
+			var normals := PackedVector3Array()
+			if arrays.size() > Mesh.ARRAY_NORMAL:
+				normals = arrays[Mesh.ARRAY_NORMAL] as PackedVector3Array
+			var mesh_bone_names: Array = mesh_instance.get_meta("oblivion_bone_names", [])
+			var bones := PackedInt32Array()
+			var weights := PackedFloat32Array()
+			if arrays.size() > Mesh.ARRAY_BONES:
+				bones = arrays[Mesh.ARRAY_BONES] as PackedInt32Array
+			if arrays.size() > Mesh.ARRAY_WEIGHTS:
+				weights = arrays[Mesh.ARRAY_WEIGHTS] as PackedFloat32Array
+			var has_skin := is_instance_valid(skeleton) and not mesh_bone_names.is_empty() \
+				and bones.size() == vertices.size() * 4 and weights.size() == vertices.size() * 4
+			var bone_transforms: Array[Transform3D] = []
+			if has_skin:
+				bone_transforms.resize(mesh_bone_names.size())
+				var skeleton_to_effect := effect_inverse * skeleton.global_transform
+				for bind_index in mesh_bone_names.size():
+					var bone_index := skeleton.find_bone(str(mesh_bone_names[bind_index]))
+					if bone_index < 0:
+						bone_transforms[bind_index] = Transform3D.IDENTITY
+						continue
+					var inverse_bind := skeleton.get_bone_global_rest(bone_index).affine_inverse()
+					bone_transforms[bind_index] = skeleton_to_effect \
+						* skeleton.get_bone_global_pose(bone_index) * inverse_bind
+			var stride := maxi(1, ceili(float(vertices.size()) / 48.0))
+			for vertex_index in range(0, vertices.size(), stride):
+				var point := mesh_to_effect * vertices[vertex_index]
+				var normal := Vector3.ZERO
+				if normals.size() == vertices.size():
+					normal = (mesh_to_effect.basis * normals[vertex_index]).normalized()
+				if has_skin:
+					point = Vector3.ZERO
+					normal = Vector3.ZERO
+					for influence in range(4):
+						var bind_index := bones[vertex_index * 4 + influence]
+						var weight := weights[vertex_index * 4 + influence]
+						if bind_index < 0 or bind_index >= bone_transforms.size() or weight <= 0.0:
+							continue
+						var bone_transform := bone_transforms[bind_index]
+						point += (bone_transform * vertices[vertex_index]) * weight
+						if normals.size() == vertices.size():
+							normal += (bone_transform.basis * normals[vertex_index]).normalized() * weight
+					normal = normal.normalized()
+				if normal.length_squared() < 0.001:
+					normal = point.normalized() if point.length_squared() > 0.001 else Vector3.UP
+				var point_velocity := velocity_vector + normal * speed_along_normal
+				var point_speed := point_velocity.length()
+				emission_points.push_back(point)
+				emission_directions.push_back(point_velocity.normalized() if point_speed > 0.001 else normal)
+				surface_velocity_min = minf(surface_velocity_min, maxf(0.0, point_speed - speed_variance))
+				surface_velocity_max = maxf(surface_velocity_max, point_speed + speed_variance)
+				if emission_points.size() >= 512:
+					break
+			if emission_points.size() >= 512:
+				break
+		if emission_points.size() >= 512:
+			break
+	if emission_points.is_empty():
+		return
+	var side := ceili(sqrt(float(emission_points.size())))
+	var point_image := Image.create(side, side, false, Image.FORMAT_RGBF)
+	var normal_image := Image.create(side, side, false, Image.FORMAT_RGBF)
+	for point_index in emission_points.size():
+		var point := emission_points[point_index]
+		point_image.set_pixel(point_index % side, point_index / side, Color(point.x, point.y, point.z, 1.0))
+		var emission_direction := emission_directions[point_index]
+		normal_image.set_pixel(
+			point_index % side, point_index / side,
+			Color(emission_direction.x, emission_direction.y, emission_direction.z, 1.0)
+		)
+	var particles := GPUParticles3D.new()
+	particles.name = "EffectShaderParticles"
+	particles.amount = emission_points.size()
+	var base_lifetime := maxf(0.01, float(shader.get("particle_lifetime", 0.5)))
+	var lifetime_variance := absf(float(shader.get("particle_lifetime_variance", 0.0)))
+	particles.lifetime = base_lifetime + lifetime_variance
+	particles.lifetime_randomness = clampf(2.0 * lifetime_variance / particles.lifetime, 0.0, 1.0)
+	particles.local_coords = true
+	particles.explosiveness = 0.0
+	particles.emitting = true
+	particles.amount_ratio = 0.0 if appearing else float(shader.get("particle_persistent_birth_ratio", 1.0))
+	particles.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var process := ParticleProcessMaterial.new()
+	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_DIRECTED_POINTS
+	process.emission_point_texture = ImageTexture.create_from_image(point_image)
+	process.emission_normal_texture = ImageTexture.create_from_image(normal_image)
+	process.emission_point_count = emission_points.size()
+	process.direction = Vector3.UP
+	process.spread = 0.0
+	# The particles are parented under the actor avatar, whose root already converts game units to meters.
+	process.initial_velocity_min = surface_velocity_min if is_finite(surface_velocity_min) else 0.0
+	process.initial_velocity_max = maxf(process.initial_velocity_min, surface_velocity_max)
+	var acceleration: PackedFloat32Array = shader.get("particle_acceleration", PackedFloat32Array())
+	if acceleration.size() >= 3:
+		process.gravity = Vector3(acceleration[0], acceleration[2], -acceleration[1])
+	var normal_acceleration := float(shader.get("particle_acceleration_along_normal", 0.0))
+	process.linear_accel_min = normal_acceleration
+	process.linear_accel_max = normal_acceleration
+	var rotation := float(shader.get("particle_initial_rotation", 0.0))
+	var rotation_variance := absf(float(shader.get("particle_initial_rotation_variance", 0.0)))
+	process.angle_min = rotation - rotation_variance
+	process.angle_max = rotation + rotation_variance
+	var rotation_speed := float(shader.get("particle_rotation_speed", 0.0))
+	var rotation_speed_variance := absf(float(shader.get("particle_rotation_speed_variance", 0.0)))
+	process.angular_velocity_min = rotation_speed - rotation_speed_variance
+	process.angular_velocity_max = rotation_speed + rotation_speed_variance
+	var scale_values: PackedFloat32Array = shader.get("particle_scale", PackedFloat32Array())
+	var scale_times: PackedFloat32Array = shader.get("particle_scale_time", PackedFloat32Array())
+	var particle_size := maxf(0.01, float(scale_values[1] if scale_values.size() > 1 else 1.0))
+	var quad := QuadMesh.new()
+	quad.size = Vector2.ONE * particle_size
+	var scale_curve := Curve.new()
+	if scale_values.size() >= 2 and scale_times.size() >= 2:
+		scale_curve.add_point(Vector2(0.0, maxf(0.0, scale_values[0] / maxf(scale_values[1], 0.001))))
+		scale_curve.add_point(Vector2(clampf(scale_times[0], 0.0, 1.0), maxf(0.0, scale_values[0] / maxf(scale_values[1], 0.001))))
+		scale_curve.add_point(Vector2(clampf(scale_times[1], 0.0, 1.0), 1.0))
+		var scale_curve_texture := CurveTexture.new()
+		scale_curve_texture.curve = scale_curve
+		process.scale_curve = scale_curve_texture
+	var color_bytes: PackedByteArray = shader.get("particle_colors_rgb", PackedByteArray())
+	var alpha: PackedFloat32Array = shader.get("particle_alpha", PackedFloat32Array())
+	var color_times: PackedFloat32Array = shader.get("particle_color_time", PackedFloat32Array())
+	if color_bytes.size() >= 9 and alpha.size() >= 3 and color_times.size() >= 3:
+		var gradient := Gradient.new()
+		gradient.set_offset(0, clampf(color_times[0], 0.0, 1.0))
+		gradient.set_color(0, Color8(color_bytes[0], color_bytes[1], color_bytes[2], roundi(alpha[0] * 255.0)))
+		gradient.set_offset(1, 1.0)
+		gradient.set_color(1, Color8(color_bytes[6], color_bytes[7], color_bytes[8], roundi(alpha[2] * 255.0)))
+		for key_index in range(1, 2):
+			gradient.add_point(
+				clampf(color_times[key_index], 0.0, 1.0),
+				Color8(color_bytes[key_index * 3], color_bytes[key_index * 3 + 1], color_bytes[key_index * 3 + 2], roundi(alpha[key_index] * 255.0))
+			)
+		var color_ramp := GradientTexture1D.new()
+		color_ramp.gradient = gradient
+		process.color_ramp = color_ramp
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	material.albedo_texture = texture
+	material.albedo_color = Color.WHITE
+	material.vertex_color_use_as_albedo = true
+	var quad_mesh := quad
+	quad_mesh.material = material
+	particles.draw_pass_1 = quad_mesh
+	particles.process_material = process
+	effect.add_child(particles)
+	var ramp_up := maxf(0.0, float(shader.get("particle_birth_ramp_up", 0.0)))
+	var full_birth_time := maxf(0.0, float(shader.get("particle_full_birth_time", 0.0)))
+	var ramp_down := maxf(0.0, float(shader.get("particle_birth_ramp_down", 0.0)))
+	var target_ratio := float(shader.get("particle_persistent_birth_ratio", 1.0))
+	var transition := effect.create_tween()
+	if appearing:
+		particles.amount_ratio = 0.0
+		var full_ratio := float(shader.get("particle_full_birth_ratio", 1.0))
+		if ramp_up > 0.0:
+			transition.tween_property(particles, "amount_ratio", full_ratio, ramp_up)
+		else:
+			particles.amount_ratio = full_ratio
+		if full_birth_time > 0.0:
+			transition.tween_interval(full_birth_time)
+		if ramp_down > 0.0:
+			transition.tween_property(particles, "amount_ratio", target_ratio, ramp_down)
+		else:
+			particles.amount_ratio = target_ratio
+	else:
+		particles.amount_ratio = target_ratio
+		if ramp_down > 0.0:
+			transition.tween_property(particles, "amount_ratio", 0.0, ramp_down)
+		else:
+			particles.amount_ratio = 0.0
+
 func stop_npc_combat(reference_name: String) -> String:
 	var reference_id := _reference_id_by_name(reference_name)
 	if reference_id == 0 or _npc_combat == null:
@@ -6766,6 +7681,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		avatar.add_child(skeleton)
 		var face_meshes: Array[MeshInstance3D] = []
 		var assembled: Dictionary = {}
+		var bound_item_names: Array[String] = []
 		var animations := {}
 		if is_creature:
 			# The rig hangs from its root bone, as a humanoid's does: the feet stand on the floor once it is lowered.
@@ -6790,6 +7706,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			face_meshes = assembled["face_meshes"]
 			var attached_item_names: Array[String] = assembled["attached_item_names"]
 			print("OpenOB attached equipment to %s: %s" % [actor_name, str(attached_item_names)])
+			bound_item_names = assembled.get("bound_item_names", [])
+			if not bound_item_names.is_empty():
+				print("OpenOB staged bound equipment for %s: %s" % [actor_name, str(bound_item_names)])
 			await assets.meshes_for_model(PLAYER_IDLE_KF)
 			await assets.meshes_for_model(PLAYER_DIRECTIONAL_KFS["Forward"][0])
 			await assets.meshes_for_model(PLAYER_FAST_FORWARD_KF)
@@ -6823,8 +7742,10 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			# The folder the actor's clips come from: a creature has its own next to its skeleton.
 			"animation_root": str(npc.get("model_path", "")).replace("\\", "/").get_base_dir() + "/" if is_creature else "",
 			"root": actor_root,
+			"avatar": avatar,
 			"skeleton": skeleton,
 			"face_meshes": face_meshes,
+			"hair_meshes": assembled.get("hair_meshes", []),
 			"face_expression": initial_expression,
 			"face_expression_weight": 0.7,
 			"face_expression_previous": "",
@@ -6853,6 +7774,16 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"weapon_form_id": int(assembled.get("weapon_form_id", 0)),
 			"weapon_meshes": assembled.get("weapon_meshes", []),
 			"weapon_record": _find_weapon_record(int(assembled.get("weapon_form_id", 0))) if int(assembled.get("weapon_form_id", 0)) != 0 else {},
+			"worn_equipment": assembled.get("worn_equipment", []),
+			"bound_gear_meshes": assembled.get("bound_gear_meshes", []),
+			"bound_armor_meshes": assembled.get("bound_armor_meshes", []),
+			"bound_gear_slots": int(assembled.get("bound_gear_slots", 0)),
+			"bound_item_names": bound_item_names,
+			"bound_magic_effect_codes": assembled.get("bound_magic_effect_codes", []),
+			"bound_weapon_form_id": int(assembled.get("bound_weapon_form_id", 0)),
+			"bound_weapon_meshes": assembled.get("bound_weapon_meshes", []),
+			"bound_weapon_record": _find_weapon_record(int(assembled.get("bound_weapon_form_id", 0))) if int(assembled.get("bound_weapon_form_id", 0)) != 0 else {},
+			"bound_gear_active": false,
 			"active_animation": "",
 			"animation_time": 0.0,
 			"animation_from_pose": [],
@@ -7995,8 +8926,11 @@ func _add_nif_attached_effects(
 			"scale": float(node.get("global_scale", 1.0)),
 		})
 		var has_particle_emitters := not (effect_metadata.get("particle_emitters", []) as Array).is_empty()
+		var has_fire_emitters := _has_fire_particle_emitters(effect_metadata)
 		for mesh_entry: Dictionary in effect_meshes:
 			if bool(mesh_entry.get("editor_marker", false)):
+				continue
+			if has_fire_emitters and _is_fire_particle_mesh(mesh_entry):
 				continue
 			if has_particle_emitters and str(mesh_entry.get("diffuse_texture_path", "")).is_empty():
 				continue
@@ -8018,14 +8952,153 @@ func _add_nif_attached_effects(
 			instance.transform = reference_transform * socket_transform
 			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			cell_visual_root.add_child(instance)
+			if not await _install_nif_texture_flipbook(instance, mesh_entry, effect_metadata, generation):
+				return false
 		_add_nif_particles(effect_metadata, reference_transform * socket_transform, effect_model_path)
 	return true
+
+func _has_fire_particle_emitters(metadata: Dictionary) -> bool:
+	for emitter_value: Variant in metadata.get("particle_emitters", []):
+		var emitter: Dictionary = emitter_value
+		if str(emitter.get("texture_path", "")).to_lower().replace("\\", "/").contains("fire"):
+			return true
+	return false
+
+func _is_fire_particle_mesh(mesh_entry: Dictionary) -> bool:
+	var texture_path := str(mesh_entry.get("diffuse_texture_path", "")).to_lower().replace("\\", "/")
+	return texture_path.contains("fireflameparticle") or texture_path.contains("firesparkparticle") or texture_path.contains("firesmokeparticle")
+
+func _texture_flipbook_for_mesh(mesh_entry: Dictionary, metadata: Dictionary) -> Dictionary:
+	var mesh_name := str(mesh_entry.get("mesh_name", "")).to_lower()
+	var mesh_base_name := mesh_name.split(":", false, 1)[0]
+	var mesh_texture := str(mesh_entry.get("diffuse_texture_path", "")).to_lower().replace("\\", "/")
+	var texture_match: Dictionary = {}
+	for flipbook_value: Variant in metadata.get("texture_flipbooks", []):
+		var flipbook: Dictionary = flipbook_value
+		var target_name := str(flipbook.get("target_name", "")).to_lower()
+		if target_name == mesh_name or target_name == mesh_base_name:
+			return flipbook
+		var frame_paths: Array = flipbook.get("texture_paths", [])
+		if frame_paths.is_empty():
+			continue
+		if str(frame_paths[0]).to_lower().replace("\\", "/") == mesh_texture:
+			return flipbook
+		if texture_match.is_empty():
+			for frame_path_value: Variant in frame_paths:
+				if str(frame_path_value).to_lower().replace("\\", "/") == mesh_texture:
+					texture_match = flipbook
+					break
+	return texture_match
+
+func _install_nif_texture_flipbook(
+	instance: MeshInstance3D,
+	mesh_entry: Dictionary,
+	metadata: Dictionary,
+	generation: int
+) -> bool:
+	var flipbook := _texture_flipbook_for_mesh(mesh_entry, metadata)
+	if flipbook.is_empty():
+		return true
+	var frame_paths: Array = flipbook.get("texture_paths", [])
+	if frame_paths.size() < 2:
+		return true
+	var cache_key := ""
+	for frame_path_value: Variant in frame_paths:
+		cache_key += str(frame_path_value).to_lower() + "|"
+	var frames: Array = _nif_flipbook_texture_cache.get(cache_key, [])
+	if frames.is_empty():
+		for frame_path_value: Variant in frame_paths:
+			var texture := await assets.texture_for_path(str(frame_path_value)) as Texture2D
+			if generation != _cell_load_generation:
+				return false
+			if texture == null:
+				return true
+			frames.push_back(texture)
+		_nif_flipbook_texture_cache[cache_key] = frames
+	var source_material := instance.material_override as StandardMaterial3D
+	if source_material == null:
+		return true
+	var material := source_material.duplicate() as StandardMaterial3D
+	if material == null:
+		return true
+	material.albedo_texture = frames[0] as Texture2D
+	var fire_lod_sprite := _has_fire_particle_emitters(metadata)
+	if fire_lod_sprite:
+		material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		material.billboard_keep_scale = true
+		material.emission_enabled = true
+		material.emission = Color.WHITE
+		material.emission_texture = frames[0] as Texture2D
+		material.emission_energy_multiplier = 1.5
+		instance.visibility_range_begin = FIRE_VISUAL_LOD_DISTANCE
+		instance.visibility_range_begin_margin = FIRE_VISUAL_LOD_FADE
+		instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	instance.material_override = material
+	_nif_flipbook_instances.push_back({
+		"instance": instance,
+		"material": material,
+		"frames": frames,
+		"frequency": maxf(absf(float(flipbook.get("frequency", 1.0))), 0.01),
+		"phase": float(flipbook.get("phase", 0.0)),
+		"frame_duration": float(flipbook.get("frame_duration", 0.0)),
+		"start_time": float(flipbook.get("start_time", 0.0)),
+		"stop_time": float(flipbook.get("stop_time", 0.0)),
+		"flags": int(flipbook.get("flags", 0)),
+		"elapsed": 0.0,
+		"frame_index": 0,
+		"fire_lod": fire_lod_sprite,
+	})
+	return true
+
+func _update_nif_flipbooks(delta: float) -> void:
+	for index in range(_nif_flipbook_instances.size() - 1, -1, -1):
+		var animation: Dictionary = _nif_flipbook_instances[index]
+		var instance_value: Variant = animation.get("instance")
+		if not is_instance_valid(instance_value):
+			_nif_flipbook_instances.remove_at(index)
+			continue
+		var instance := instance_value as MeshInstance3D
+		if instance == null:
+			_nif_flipbook_instances.remove_at(index)
+			continue
+		var frames: Array = animation.get("frames", [])
+		var material := animation.get("material") as StandardMaterial3D
+		if frames.size() < 2 or material == null:
+			_nif_flipbook_instances.remove_at(index)
+			continue
+		animation["elapsed"] = float(animation.get("elapsed", 0.0)) + delta
+		var frame_duration := float(animation.get("frame_duration", 0.0))
+		var controller_duration := float(animation.get("stop_time", 0.0)) - float(animation.get("start_time", 0.0))
+		var frame_rate := float(animation.get("frequency", 1.0))
+		if frame_duration > 0.0:
+			frame_rate = 1.0 / frame_duration
+		elif controller_duration > 0.0:
+			frame_rate = float(frames.size()) / controller_duration
+		var controller_time := float(animation["elapsed"]) * float(animation.get("frequency", 1.0)) + float(animation.get("phase", 0.0))
+		var frame_position := floori(controller_time * frame_rate)
+		var cycle_mode := int(animation.get("flags", 0)) & 6
+		var frame_index := posmod(frame_position, frames.size())
+		if cycle_mode == 2 and frames.size() > 1:
+			var ping_pong_period := (frames.size() - 1) * 2
+			var ping_pong_position := posmod(frame_position, ping_pong_period)
+			frame_index = ping_pong_position if ping_pong_position < frames.size() else ping_pong_period - ping_pong_position
+		elif cycle_mode == 4:
+			frame_index = mini(frame_position, frames.size() - 1)
+		if frame_index == int(animation.get("frame_index", -1)):
+			continue
+		animation["frame_index"] = frame_index
+		var texture := frames[frame_index] as Texture2D
+		material.albedo_texture = texture
+		if bool(animation.get("fire_lod", false)):
+			material.emission_texture = texture
 
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
-func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, model_path := "") -> void:
+func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, model_path := "", parent_root: Node3D = null) -> void:
 	var is_light_beam_dust := model_path.to_lower().replace("\\", "/").ends_with("/fxlightbeamdust01.nif")
+	var has_fire_lod_sprite := _has_fire_particle_emitters(metadata) and not (metadata.get("texture_flipbooks", []) as Array).is_empty()
 	for emitter_value: Variant in metadata.get("particle_emitters", []):
 		var emitter: Dictionary = emitter_value
 		var lifetime := float(emitter.get("lifetime", 0.0))
@@ -8036,6 +9109,7 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			max_rate = maxf(max_rate, rate_keys[i])
 		var radius := float(emitter.get("radius", 0.0))
 		var texture_path := str(emitter.get("texture_path", "")).replace("\\", "/")
+		var is_fire_particle := texture_path.to_lower().contains("fire")
 		if lifetime <= 0.0 or max_rate <= 0.0 or radius <= 0.0 or texture_path.is_empty():
 			continue
 		var texture := assets.texture_for_path(texture_path) as Texture2D
@@ -8051,7 +9125,7 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		})
 		var unit_scale := reference_transform.basis.get_scale().x * float(emitter.get("scale", 1.0))
 		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
-		var particle_basis := (
+		var particle_basis := Basis.IDENTITY if is_fire_particle else (
 			reference_transform.basis.orthonormalized() * emitter_transform.basis.orthonormalized()
 		).orthonormalized()
 		var particle_origin := reference_transform * emitter_transform.origin
@@ -8061,6 +9135,10 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		particles.transform = Transform3D(particle_basis, particle_origin)
 		particles.amount = clampi(ceili(max_rate * lifetime), 1, 4096)
 		particles.lifetime = lifetime
+		if is_fire_particle and has_fire_lod_sprite:
+			particles.visibility_range_end = FIRE_VISUAL_LOD_DISTANCE
+			particles.visibility_range_end_margin = FIRE_VISUAL_LOD_FADE
+			particles.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		var capacity_rate := float(particles.amount) / lifetime
 		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
 		particles.local_coords = not bool(emitter.get("world_space", false))
@@ -8155,12 +9233,13 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			material.emission_enabled = true
 			material.emission = Color(1.0, 0.52, 0.18)
 			material.emission_texture = texture
-			material.emission_energy_multiplier = 1.4
+			material.emission_energy_multiplier = 2.2
 		var quad := QuadMesh.new()
 		quad.size = Vector2.ONE * radius * 2.0 * unit_scale * (1.75 if flame_particle else 1.0)
 		quad.material = material
 		particles.draw_pass_1 = quad
-		cell_visual_root.add_child(particles)
+		var particle_parent := parent_root if is_instance_valid(parent_root) else cell_visual_root
+		particle_parent.add_child(particles)
 		if rate_keys.size() >= 4:
 			_install_particle_rate_animation(particles, emitter, rate_keys, capacity_rate)
 

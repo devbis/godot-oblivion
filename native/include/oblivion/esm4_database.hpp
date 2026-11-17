@@ -153,6 +153,74 @@ struct SpellEffectRecord {
     float base_cost = 0.0f;
 };
 
+struct MagicEffectRecord {
+    std::uint32_t form_id = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t school = 0;
+    float base_cost = 0.0f;
+    std::uint32_t associated_item_form_id = 0;
+    std::uint32_t light_form_id = 0;
+    std::uint32_t effect_shader_form_id = 0;
+    std::uint32_t enchant_shader_form_id = 0;
+    std::string model_path;
+};
+
+struct EffectShaderRecord {
+    std::uint32_t form_id = 0;
+    std::uint8_t flags = 0;
+    std::string fill_texture_path;
+    std::string holes_texture_path;
+    std::string particle_texture_path;
+    std::uint32_t membrane_source_blend = 0;
+    std::uint32_t membrane_blend_operation = 0;
+    std::uint32_t membrane_z_test = 0;
+    std::uint32_t membrane_destination_blend = 0;
+    std::array<std::uint8_t, 4> fill_color{};
+    float fill_alpha_fade_in = 0.0f;
+    float fill_full_alpha_time = 0.0f;
+    float fill_alpha_fade_out = 0.0f;
+    float fill_persistent_alpha_ratio = 0.0f;
+    float fill_alpha_pulse_amplitude = 0.0f;
+    float fill_alpha_pulse_frequency = 0.0f;
+    float fill_texture_scroll_u = 0.0f;
+    float fill_texture_scroll_v = 0.0f;
+    float edge_falloff = 0.0f;
+    std::array<std::uint8_t, 4> edge_color{};
+    float edge_alpha_fade_in = 0.0f;
+    float edge_full_alpha_time = 0.0f;
+    float edge_alpha_fade_out = 0.0f;
+    float edge_persistent_alpha_ratio = 0.0f;
+    float edge_alpha_pulse_amplitude = 0.0f;
+    float edge_alpha_pulse_frequency = 0.0f;
+    float fill_full_alpha_ratio = 0.0f;
+    float edge_full_alpha_ratio = 0.0f;
+    std::uint32_t particle_source_blend = 0;
+    std::uint32_t particle_blend_operation = 0;
+    std::uint32_t particle_z_test = 0;
+    std::uint32_t particle_destination_blend = 0;
+    float particle_birth_ramp_up = 0.0f;
+    float particle_full_birth_time = 0.0f;
+    float particle_birth_ramp_down = 0.0f;
+    float particle_full_birth_ratio = 0.0f;
+    float particle_persistent_birth_ratio = 0.0f;
+    float particle_lifetime = 0.0f;
+    float particle_lifetime_variance = 0.0f;
+    float particle_speed_along_normal = 0.0f;
+    float particle_acceleration_along_normal = 0.0f;
+    std::array<float, 3> particle_velocity{};
+    std::array<float, 3> particle_acceleration{};
+    std::array<float, 2> particle_scale{};
+    std::array<float, 2> particle_scale_time{};
+    std::array<std::array<std::uint8_t, 3>, 3> particle_color{};
+    std::array<float, 3> particle_alpha{};
+    std::array<float, 3> particle_color_time{};
+    float particle_speed_along_normal_variance = 0.0f;
+    float particle_initial_rotation = 0.0f;
+    float particle_initial_rotation_variance = 0.0f;
+    float particle_rotation_speed = 0.0f;
+    float particle_rotation_speed_variance = 0.0f;
+};
+
 // The WEAP DATA subrecord: how the weapon is held (and so which first-person clips play) and how fast and far it swings.
 struct WeaponRecord {
     // 0 blade one hand, 1 blade two hand, 2 blunt one hand, 3 blunt two hand, 4 staff, 5 bow.
@@ -334,6 +402,9 @@ public:
     [[nodiscard]] const CreatureBaseRecord* find_creature_base(std::uint32_t form_id) const;
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
+    [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const;
+    [[nodiscard]] const EffectShaderRecord* find_effect_shader(std::uint32_t form_id) const;
+    [[nodiscard]] const LightData* find_light(std::uint32_t form_id) const;
     [[nodiscard]] const WeaponRecord* find_weapon(std::uint32_t form_id) const;
     [[nodiscard]] const ContainerRecord* find_container(std::uint32_t form_id) const;
     [[nodiscard]] const LeveledListRecord* find_leveled_list(std::uint32_t form_id) const;
@@ -427,12 +498,8 @@ private:
     std::map<std::string, std::uint32_t> script_id_by_editor_id_;
     std::map<std::string, float> float_game_settings_;
     std::map<std::string, std::int32_t> integer_game_settings_;
-    struct MagicEffectRecord {
-        std::uint32_t flags = 0;
-        std::uint32_t school = 0;
-        float base_cost = 0.0f;
-    };
     std::map<std::string, MagicEffectRecord, std::less<>> magic_effect_by_code_;
+    std::map<std::uint32_t, EffectShaderRecord> effect_shader_by_id_;
     std::map<std::uint32_t, float> global_value_by_id_;
     std::size_t record_count_ = 0;
     std::size_t unplaced_reference_count_ = 0;

@@ -72,6 +72,7 @@ func meshes_for_model(model_path: String) -> Array:
 	var physics_bodies: Array = result.get("physics_bodies", [])
 	var metadata := {
 		"particle_emitters": result.get("particle_emitters", []),
+		"texture_flipbooks": result.get("texture_flipbooks", []),
 		"nodes": result.get("nodes", []),
 		"animations": result.get("animations", []),
 		"collision_enabled": bool(result.get("collision_enabled", false)),
@@ -105,6 +106,7 @@ func meshes_for_model(model_path: String) -> Array:
 				"bone_indices": mesh_data.get("bone_indices", PackedInt32Array()),
 				"bone_weights": mesh_data.get("bone_weights", PackedFloat32Array()),
 				"diffuse_texture_path": str(mesh_data.get("diffuse_texture_path", "")),
+				"normal_texture_path": str(mesh_data.get("normal_texture_path", "")),
 				"alpha_blend": bool(mesh_data.get("alpha_blend", false)),
 				"alpha_test": bool(mesh_data.get("alpha_test", false)),
 				"alpha_threshold": int(mesh_data.get("alpha_threshold", 128)),

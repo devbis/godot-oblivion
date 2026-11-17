@@ -163,6 +163,23 @@ void append_shape(nifly::NifFile& file, nifly::NiShape& shape,
     output.name = shape.name.get();
     output.parent_node_name = parent_node_name;
     file.GetTextureSlot(&shape, output.diffuse_texture_path, 0);
+    if (auto* texturing_property = file.GetTexturingProperty(&shape)) {
+        if (texturing_property->hasNormalTex) {
+            if (auto* texture = file.GetHeader().GetBlock<nifly::NiSourceTexture>(texturing_property->normalTex.sourceRef))
+                output.normal_texture_path = texture->fileName.get();
+        }
+    }
+    if (output.normal_texture_path.empty()) {
+        // BSLightingShaderProperty stores its normal map in texture-set slot 1.
+        std::string normal_texture_path;
+        file.GetTextureSlot(&shape, normal_texture_path, 1);
+        if (normal_texture_path != output.diffuse_texture_path)
+            output.normal_texture_path = std::move(normal_texture_path);
+    }
+    if (output.normal_texture_path.empty()) {
+        // Legacy NiTexturingProperty bump maps use slot 5.
+        file.GetTextureSlot(&shape, output.normal_texture_path, 5);
+    }
     if (const auto* alpha = file.GetAlphaProperty(&shape)) {
         output.alpha_blend = (alpha->flags & 0x0001U) != 0;
         output.alpha_test = (alpha->flags & 0x0200U) != 0;
@@ -626,6 +643,27 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                            output.global_rotation_rows, output.global_scale);
             result.nodes.push_back(std::move(output));
         }
+
+        auto& header = file.GetHeader();
+        for (uint32_t block_index = 0; block_index < header.GetNumBlocks(); ++block_index) {
+            auto* controller = header.GetBlock<nifly::NiFlipController>(block_index);
+            if (!controller) continue;
+            auto* target = header.GetBlock<nifly::NiObjectNET>(controller->targetRef);
+            NifTextureFlipbookData flipbook;
+            if (target) flipbook.target_name = target->name.get();
+            flipbook.frequency = controller->frequency;
+            flipbook.phase = controller->phase;
+            flipbook.frame_duration = controller->delta;
+            flipbook.start_time = controller->startTime;
+            flipbook.stop_time = controller->stopTime;
+            flipbook.flags = controller->flags;
+            for (uint32_t frame_index = 0; frame_index < controller->sourceRefs.GetSize(); ++frame_index) {
+                auto* texture = header.GetBlock<nifly::NiSourceTexture>(controller->sourceRefs.GetBlockRef(frame_index));
+                if (texture && !texture->fileName.get().empty())
+                    flipbook.texture_paths.push_back(texture->fileName.get());
+            }
+            if (flipbook.texture_paths.size() >= 2) result.texture_flipbooks.push_back(std::move(flipbook));
+        }
     }
 
     for (uint32_t block_index = 0; block_index < file.GetHeader().GetNumBlocks(); ++block_index) {
@@ -640,6 +678,30 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
             for (const auto& key : text_keys->textKeys) animation.text_keys.emplace_back(key.time, key.value.get());
         }
         for (const auto& link : sequence->controlledBlocks) {
+            auto* bool_interpolator = file.GetHeader().GetBlock<nifly::NiBoolInterpolator>(link.interpolatorRef);
+            if (bool_interpolator) {
+                NifAnimationTrackData track;
+                track.node_name = link.nodeName.get();
+                if (track.node_name.empty())
+                    track.node_name = nif_string_palette_entry(file.GetHeader(), link.stringPaletteRef, link.nodeNameOffset);
+                if (track.node_name.empty())
+                    track.node_name = nif_string_palette_entry(file.GetHeader(), sequence->stringPaletteRef, link.nodeNameOffset);
+                if (track.node_name.empty()) track.node_name = link.targetName.get();
+                auto* bool_data = file.GetHeader().GetBlock<nifly::NiBoolData>(bool_interpolator->dataRef);
+                if (bool_data && bool_data->data.GetNumKeys() > 0) {
+                    for (uint32_t key_index = 0; key_index < bool_data->data.GetNumKeys(); ++key_index) {
+                        const auto key = bool_data->data.GetKey(static_cast<int>(key_index));
+                        track.visibility.push_back({key.time, key.value != 0 ? 1.0f : 0.0f});
+                    }
+                } else {
+                    track.visibility.push_back({sequence->startTime, bool_interpolator->boolValue != 0 ? 1.0f : 0.0f});
+                    if (sequence->stopTime > sequence->startTime)
+                        track.visibility.push_back({sequence->stopTime, bool_interpolator->boolValue != 0 ? 1.0f : 0.0f});
+                }
+                if (!track.node_name.empty() && !track.visibility.empty())
+                    animation.tracks.push_back(std::move(track));
+                continue;
+            }
             if (auto* spline = file.GetHeader().GetBlock<nifly::NiBSplineTransformInterpolator>(link.interpolatorRef)) {
                 NifAnimationTrackData track;
                 track.node_name = link.nodeName.get();
