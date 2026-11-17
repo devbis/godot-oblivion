@@ -2476,7 +2476,7 @@ func _load_cell_geometry(
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
 		_add_nif_particles(physics_metadata, reference_transform, model_path)
-		if not await _add_nif_attached_effects(physics_metadata, reference_transform, generation):
+		if not await _add_nif_attached_effects(physics_metadata, reference_transform, model_path, generation):
 			return false
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
@@ -7964,8 +7964,10 @@ func _align_avatar_to_floor_origin(avatar: Node3D, skeleton: Skeleton3D) -> void
 func _add_nif_attached_effects(
 	host_metadata: Dictionary,
 	reference_transform: Transform3D,
+	host_model_path: String,
 	generation: int
 ) -> bool:
+	var host_model_key := host_model_path.strip_edges().to_lower().replace("\\", "/")
 	for node_value: Variant in host_metadata.get("nodes", []):
 		var node: Dictionary = node_value
 		var socket_name := str(node.get("name", ""))
@@ -7978,6 +7980,9 @@ func _add_nif_attached_effects(
 			continue
 		var effect_model_path := str(data_reader.find_base_model_path(socket_form_id))
 		if effect_model_path.is_empty():
+			continue
+		# A model's root node can share its EDID, but it is not an attachment socket.
+		if effect_model_path.strip_edges().to_lower().replace("\\", "/") == host_model_key:
 			continue
 		var effect_key := effect_model_path.to_lower().replace("\\", "/")
 		var effect_meshes: Array = await assets.meshes_for_model(effect_model_path)
