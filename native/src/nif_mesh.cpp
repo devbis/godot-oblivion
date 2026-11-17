@@ -385,13 +385,13 @@ void collect_havok_shape_materials(nifly::NiHeader& header,
     if (auto* packed = header.GetBlock<nifly::bhkPackedNiTriStripsShape>(shape_ref.index)) {
         if (!packed->subPartData.empty()) {
             for (const auto& part : packed->subPartData) materials.push_back(part.material);
-        } else if (const auto* data = header.GetBlock<nifly::hkPackedNiTriStripsData>(packed->dataRef)) {
+        } else if (auto* data = header.GetBlock<nifly::hkPackedNiTriStripsData>(packed->dataRef)) {
             for (const auto& part : data->subPartData) materials.push_back(part.material);
         }
         return;
     }
     if (auto* compressed = header.GetBlock<nifly::bhkCompressedMeshShape>(shape_ref.index)) {
-        if (const auto* data = header.GetBlock<nifly::bhkCompressedMeshShapeData>(compressed->dataRef)) {
+        if (auto* data = header.GetBlock<nifly::bhkCompressedMeshShapeData>(compressed->dataRef)) {
             for (const auto& material : data->materials) materials.push_back(material.material);
             for (const auto& triangle : data->bigTris) materials.push_back(triangle.material);
         }
