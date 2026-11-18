@@ -1444,16 +1444,71 @@ func _quest_distance(from: String, to: String) -> Variant:
 	return (from_position as Vector3).distance_to(to_position as Vector3) / game_units_to_meters
 
 ## Answers world-state queries made by GameMode scripts during a tick.
-func _quest_world_command(command: String, target: String, _arguments: Array) -> Variant:
-	if command.to_lower() != "getopenstate":
-		return null
-	var wanted_name := target.strip_edges().to_lower()
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if str(reference.get("reference_name", "")).to_lower() != wanted_name:
-			continue
-		return quest_bridge.get_door_open_state(reference, self)
+func _quest_world_command(command: String, target: String, arguments: Array) -> Variant:
+	match command.to_lower():
+		"getopenstate":
+			var wanted_name := target.strip_edges().to_lower()
+			for reference_value: Variant in current_cell.get("references", []):
+				var reference: Dictionary = reference_value
+				if str(reference.get("reference_name", "")).to_lower() != wanted_name:
+					continue
+				return quest_bridge.get_door_open_state(reference, self)
+			return null
+		"getdetected":
+			return _quest_actor_detects_target(target, str(arguments[0]) if not arguments.is_empty() else "")
 	return null
+
+const NPC_DETECTION_RANGE_M := 20.0
+var _quest_detection_log_states: Dictionary = {}
+
+func _quest_actor_detects_target(observer_name: String, target_name: String) -> Variant:
+	var observer: Dictionary = {}
+	var wanted_observer := observer_name.strip_edges().to_lower()
+	for actor: Dictionary in _npc_actors:
+		if str(actor.get("reference_name", "")).strip_edges().to_lower() == wanted_observer:
+			observer = actor
+			break
+	if observer.is_empty() or bool(observer.get("dead", false)):
+		_log_quest_detection_state(observer_name, target_name, "unavailable", "observer is not loaded or is dead")
+		return null
+	var observer_root_value: Variant = observer.get("root")
+	if not is_instance_valid(observer_root_value):
+		_log_quest_detection_state(observer_name, target_name, "unavailable", "observer has no live scene node")
+		return null
+	var observer_root := observer_root_value as Node3D
+	if observer_root == null:
+		_log_quest_detection_state(observer_name, target_name, "unavailable", "observer has no 3D scene node")
+		return null
+	var target_position: Variant = _quest_position(target_name)
+	if not target_position is Vector3:
+		_log_quest_detection_state(observer_name, target_name, "unavailable", "target position is unavailable")
+		return null
+	var eye_position := observer_root.global_position + Vector3.UP * 1.45
+	var target_point: Vector3 = (target_position as Vector3) + Vector3.UP * 1.0
+	var distance_m := eye_position.distance_to(target_point)
+	if distance_m > NPC_DETECTION_RANGE_M:
+		_log_quest_detection_state(observer_name, target_name, "out_of_range", "%.1fm away; range %.1fm" % [distance_m, NPC_DETECTION_RANGE_M])
+		return 0.0
+	# Actors notice a nearby target only when static geometry does not block their view.
+	var query := PhysicsRayQueryParameters3D.create(eye_position, target_point, 2)
+	query.collide_with_areas = false
+	var obstruction := get_world_3d().direct_space_state.intersect_ray(query)
+	if not obstruction.is_empty():
+		_log_quest_detection_state(observer_name, target_name, "occluded", "line of sight is blocked at %.1fm" % distance_m)
+		return 0.0
+	_log_quest_detection_state(observer_name, target_name, "detected", "clear line of sight at %.1fm" % distance_m)
+	return 1.0
+
+
+func _log_quest_detection_state(observer_name: String, target_name: String, state: String, detail: String) -> void:
+	var key := "%08X:%s->%s" % [
+		int(current_cell.get("form_id", 0)), observer_name.strip_edges().to_lower(), target_name.strip_edges().to_lower()
+	]
+	if str(_quest_detection_log_states.get(key, "")) == state:
+		return
+	_quest_detection_log_states[key] = state
+	var verdict := "unknown" if state == "unavailable" else "yes" if state == "detected" else "no"
+	print("OpenOB detection: %s -> %s: %s (%s)" % [observer_name, target_name, verdict, detail])
 
 
 func lock_info(reference: Dictionary) -> Dictionary:

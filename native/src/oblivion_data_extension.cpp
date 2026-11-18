@@ -1551,7 +1551,8 @@ public:
                                                                const oblivion::ScriptValue* target,
                                                                const std::vector<oblivion::ScriptValue>& arguments)
                                    -> std::optional<oblivion::ScriptValue> {
-                if (lower_ascii(command) == "getopenstate") {
+                const auto lowered_command = lower_ascii(command);
+                if (lowered_command == "getopenstate" || lowered_command == "getdetected") {
                     Array godot_arguments;
                     for (const auto& argument : arguments) {
                         godot_arguments.push_back(argument.is_text ? Variant(utf8_text(argument.text))

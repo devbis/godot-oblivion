@@ -346,6 +346,10 @@ public:
             constexpr std::uint16_t kGetIsID = 72;
             constexpr std::uint16_t kGetIsRace = 69;
             constexpr std::uint16_t kGetIsSex = 70;  // param 0 male, 1 female
+            constexpr std::uint16_t kGetPCIsRace = 130;
+            constexpr std::uint16_t kGetPCIsSex = 131;  // param 0 male, 1 female
+            if (function_index == kGetPCIsRace) return parameter1 == dialogue_->listener_race ? 1.0 : 0.0;
+            if (function_index == kGetPCIsSex) return (parameter1 != 0) == dialogue_->listener_female ? 1.0 : 0.0;
             if (function_index == kGetIsID || function_index == kGetIsRace || function_index == kGetIsSex) {
                 if (run_on > 1) return std::nullopt;
                 const bool is_listener = run_on == 1;

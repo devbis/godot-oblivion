@@ -234,7 +234,7 @@ public:
     // Returns false when no actor stands for the reference.
     bool set_actor_variable(std::string_view reference, std::string_view variable, double value);
 
-    // The player as a listener: the race and sex that topic conditions read (GetIsRace, GetIsSex).
+    // The player as a listener: the race and sex that topic conditions read (GetIsRace/GetIsSex and GetPCIsRace/GetPCIsSex).
     void set_listener(std::uint32_t race, bool female) {
         listener_race_ = race;
         listener_female_ = female;
