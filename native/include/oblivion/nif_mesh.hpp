@@ -133,7 +133,11 @@ struct NifParticleEmitterData {
     float speed = 0.0f;
     float speed_variation = 0.0f;
     float radius = 0.0f;
+    float radius_variation = 0.0f;
     float lifetime = 0.0f;
+    float lifetime_variation = 0.0f;
+    bool additive_blend = false;
+    std::array<float, 3> acceleration{};
     float grow_time = 0.0f;
     float fade_time = 0.0f;
     float birth_rate = 0.0f;

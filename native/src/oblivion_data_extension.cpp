@@ -1174,7 +1174,11 @@ public:
             item["speed"] = emitter.speed;
             item["speed_variation"] = emitter.speed_variation;
             item["radius"] = emitter.radius;
+            item["radius_variation"] = emitter.radius_variation;
             item["lifetime"] = emitter.lifetime;
+            item["lifetime_variation"] = emitter.lifetime_variation;
+            item["additive_blend"] = emitter.additive_blend;
+            item["acceleration"] = Vector3(emitter.acceleration[0], emitter.acceleration[1], emitter.acceleration[2]);
             item["grow_time"] = emitter.grow_time;
             item["fade_time"] = emitter.fade_time;
             item["birth_rate"] = emitter.birth_rate;

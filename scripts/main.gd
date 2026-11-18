@@ -9773,7 +9773,9 @@ func _update_nif_flipbooks(delta: float) -> void:
 ## receives the delta from its rest global transform to its sampled global transform.
 func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, model_path := "", parent_root: Node3D = null) -> void:
 	var is_light_beam_dust := model_path.to_lower().replace("\\", "/").ends_with("/fxlightbeamdust01.nif")
-	var has_fire_lod_sprite := _has_fire_particle_emitters(metadata) and not (metadata.get("texture_flipbooks", []) as Array).is_empty()
+	var is_fire_model := _has_fire_particle_emitters(metadata)
+	var has_fire_lod_sprite := is_fire_model and not (metadata.get("texture_flipbooks", []) as Array).is_empty()
+	var reference_scale := reference_transform.basis.get_scale().x
 	for emitter_value: Variant in metadata.get("particle_emitters", []):
 		var emitter: Dictionary = emitter_value
 		var lifetime := float(emitter.get("lifetime", 0.0))
@@ -9783,6 +9785,8 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		for i in range(1, rate_keys.size(), 2):
 			max_rate = maxf(max_rate, rate_keys[i])
 		var radius := float(emitter.get("radius", 0.0))
+		var radius_variation := absf(float(emitter.get("radius_variation", 0.0)))
+		var lifetime_variation := absf(float(emitter.get("lifetime_variation", 0.0)))
 		var texture_path := str(emitter.get("texture_path", "")).replace("\\", "/")
 		var is_fire_particle := texture_path.to_lower().contains("fire")
 		if lifetime <= 0.0 or max_rate <= 0.0 or radius <= 0.0 or texture_path.is_empty():
@@ -9798,26 +9802,38 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			"rotation_rows": emitter.get("rotation_rows", PackedFloat32Array()),
 			"scale": float(emitter.get("scale", 1.0)),
 		})
-		var unit_scale := reference_transform.basis.get_scale().x * float(emitter.get("scale", 1.0))
+		var unit_scale := reference_scale * float(emitter.get("scale", 1.0))
 		var volume: Vector3 = (emitter.get("volume_size", Vector3.ZERO) as Vector3) * unit_scale
 		var particle_basis := Basis.IDENTITY if is_fire_particle else (
 			reference_transform.basis.orthonormalized() * emitter_transform.basis.orthonormalized()
 		).orthonormalized()
 		var particle_origin := reference_transform * emitter_transform.origin
+		var acceleration: Vector3 = emitter.get("acceleration", Vector3.ZERO)
+		if is_fire_model:
+			# These fire NIFs place the entire effect in the billboard's rest plane,
+			# with its vertical axis along local -Z. Unfold the emitter and force
+			# together, just like the distant sprite, without tilting the flame.
+			var upright := Basis.IDENTITY
+			if emitter_transform.basis.y.normalized().dot(Vector3.FORWARD) > 0.9:
+				upright = Basis(Vector3.RIGHT, PI * 0.5)
+			var fire_axes := Basis(Vector3.UP, reference_transform.basis.orthonormalized().get_euler().y) * upright
+			particle_origin = reference_transform.origin + fire_axes * emitter_transform.origin * reference_scale
+			acceleration = fire_axes * acceleration * reference_scale
 		if is_light_beam_dust and str(emitter.get("volume_shape", "")) == "box":
 			# FXLightBeamDust01's editor marker runs from its origin upward, while Godot's box emitter is centered.
 			particle_origin += particle_basis * Vector3.UP * absf(volume.z) * 0.5
 		particles.transform = Transform3D(particle_basis, particle_origin)
-		particles.amount = clampi(ceili(max_rate * lifetime), 1, 4096)
-		particles.lifetime = lifetime
+		particles.lifetime = lifetime + lifetime_variation
+		particles.amount = clampi(ceili(max_rate * particles.lifetime), 1, 4096)
 		if is_fire_particle and has_fire_lod_sprite:
 			particles.visibility_range_end = FIRE_VISUAL_LOD_DISTANCE
 			particles.visibility_range_end_margin = FIRE_VISUAL_LOD_FADE
 			particles.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		var capacity_rate := float(particles.amount) / lifetime
+		var capacity_rate := float(particles.amount) / particles.lifetime
 		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
 		particles.local_coords = not bool(emitter.get("world_space", false))
 		var process := ParticleProcessMaterial.new()
+		process.lifetime_randomness = clampf(2.0 * lifetime_variation / particles.lifetime, 0.0, 0.99)
 		var mesh_points: PackedVector3Array = emitter.get("mesh_emission_points", PackedVector3Array())
 		if not mesh_points.is_empty():
 			var side := ceili(sqrt(float(mesh_points.size())))
@@ -9852,9 +9868,11 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		var variation := absf(float(emitter.get("speed_variation", 0.0))) * unit_scale
 		process.initial_velocity_min = maxf(0.0, speed - variation)
 		process.initial_velocity_max = maxf(process.initial_velocity_min, speed + variation)
-		process.gravity = Vector3.ZERO
-		# NiPSysColorModifier animates each particle's color and alpha over its life. Its color keys
-		# are independent of the emitter's constant color and the texture's own transparency.
+		process.gravity = acceleration if is_fire_model else Vector3.ZERO
+		process.scale_min = maxf(0.01, 1.0 - radius_variation / radius)
+		process.scale_max = 1.0 + radius_variation / radius
+		# The color modifier sets the particle's RGBA over its life. Use the
+		# initial emitter color when there is no modifier.
 		var color_keys: PackedFloat32Array = emitter.get("color_keys", PackedFloat32Array())
 		if color_keys.size() >= 10 and color_keys.size() % 5 == 0:
 			var color_gradient := Gradient.new()
@@ -9882,6 +9900,8 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			var color_ramp := GradientTexture1D.new()
 			color_ramp.gradient = color_gradient
 			process.color_ramp = color_ramp
+		else:
+			process.color = emitter.get("color", Color.WHITE)
 		var grow := clampf(float(emitter.get("grow_time", 0.0)) / lifetime, 0.0, 1.0)
 		var fade := clampf(float(emitter.get("fade_time", 0.0)) / lifetime, 0.0, 1.0)
 		if grow > 0.0 or fade > 0.0:
@@ -9892,6 +9912,9 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			if fade > 0.0 and 1.0 - fade > grow:
 				size_curve.add_point(Vector2(1.0 - fade, 1.0))
 			size_curve.add_point(Vector2(1.0, 0.0 if fade > 0.0 else 1.0))
+			for key in range(size_curve.point_count):
+				size_curve.set_point_left_mode(key, Curve.TANGENT_LINEAR)
+				size_curve.set_point_right_mode(key, Curve.TANGENT_LINEAR)
 			var curve_texture := CurveTexture.new()
 			curve_texture.curve = size_curve
 			process.scale_curve = curve_texture
@@ -9900,17 +9923,13 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		material.billboard_keep_scale = true
 		material.albedo_texture = texture
-		material.albedo_color = emitter.get("color", Color.WHITE)
 		material.vertex_color_use_as_albedo = true
-		var flame_particle := texture_path.to_lower().contains("fireflameparticle")
-		if flame_particle:
-			material.emission_enabled = true
-			material.emission = Color(1.0, 0.52, 0.18)
-			material.emission_texture = texture
-			material.emission_energy_multiplier = 2.2
+		if bool(emitter.get("additive_blend", false)):
+			material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		var quad := QuadMesh.new()
-		quad.size = Vector2.ONE * radius * 2.0 * unit_scale * (1.75 if flame_particle else 1.0)
+		quad.size = Vector2.ONE * radius * 2.0 * unit_scale
 		quad.material = material
 		particles.draw_pass_1 = quad
 		var particle_parent := parent_root if is_instance_valid(parent_root) else cell_visual_root

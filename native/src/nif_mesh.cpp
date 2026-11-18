@@ -855,7 +855,14 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
             auto* system = header.GetBlock<nifly::NiParticleSystem>(index);
             if (!system) continue;
             std::string texture;
+            bool additive_blend = false;
             for (const auto& property_ref : system->propertyRefs) {
+                if (const auto* alpha = header.GetBlock<nifly::NiAlphaProperty>(property_ref)) {
+                    // NiAlphaProperty packs enable, source, and destination blend factors.
+                    // The flame and sparks use SRC_ALPHA, ONE. Smoke uses SRC_ALPHA, INV_SRC_ALPHA.
+                    additive_blend = (alpha->flags & 1u) && ((alpha->flags >> 1u) & 15u) == 6u
+                        && ((alpha->flags >> 5u) & 15u) == 0u;
+                }
                 auto* property = header.GetBlock<nifly::NiTexturingProperty>(property_ref);
                 if (!property || !property->hasBaseTex) continue;
                 auto* source = header.GetBlock<nifly::NiSourceTexture>(property->baseTex.sourceRef);
@@ -867,6 +874,7 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                 NifParticleEmitterData output;
                 output.name = emitter->name.get();
                 output.texture_path = texture;
+                output.additive_blend = additive_blend;
                 auto* volume = dynamic_cast<nifly::NiPSysVolumeEmitter*>(emitter);
                 auto* node = volume ? header.GetBlock<nifly::NiNode>(volume->emitterNodeRef) : nullptr;
                 const auto transform = global_transform(parents, node ? static_cast<nifly::NiAVObject*>(node) : system, global_transforms);
@@ -902,7 +910,9 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                 output.speed = emitter->speed;
                 output.speed_variation = emitter->speedVariation;
                 output.radius = emitter->radius;
+                output.radius_variation = emitter->radiusVariation;
                 output.lifetime = emitter->lifeSpan;
+                output.lifetime_variation = emitter->lifeSpanVariation;
                 for (const auto& other_ref : system->modifierRefs) {
                     auto* grow_fade = header.GetBlock<nifly::NiPSysGrowFadeModifier>(other_ref);
                     if (grow_fade && grow_fade->isActive) {
@@ -910,7 +920,8 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                         output.fade_time = grow_fade->fadeTime;
                     }
                     auto* color_modifier = header.GetBlock<nifly::NiPSysColorModifier>(other_ref);
-                    auto* color_data = color_modifier ? header.GetBlock<nifly::NiColorData>(color_modifier->dataRef) : nullptr;
+                    auto* color_data = color_modifier && color_modifier->isActive
+                        ? header.GetBlock<nifly::NiColorData>(color_modifier->dataRef) : nullptr;
                     if (color_data) {
                         for (uint32_t key_index = 0; key_index < color_data->data.GetNumKeys(); ++key_index) {
                             const auto key = color_data->data.GetKey(static_cast<int>(key_index));
@@ -918,6 +929,31 @@ NifAssetData decode_nif(const std::vector<std::uint8_t>& bytes, bool geometry_on
                                 key.time, key.value.r, key.value.g, key.value.b, key.value.a
                             });
                         }
+                    }
+                    const auto* gravity = header.GetBlock<nifly::NiPSysGravityModifier>(other_ref);
+                    if (gravity && gravity->isActive && gravity->forceType != nifly::FORCE_UNKNOWN) {
+                        const auto* gravity_node = header.GetBlock<nifly::NiNode>(gravity->gravityObjRef);
+                        const auto gravity_transform = global_transform(
+                            parents, gravity_node ? static_cast<const nifly::NiAVObject*>(gravity_node) : system,
+                            global_transforms);
+                        const auto offset = gravity_transform.translation - transform.translation;
+                        auto direction = gravity->worldAligned ? gravity->gravityAxis
+                            : gravity_transform.rotation * gravity->gravityAxis;
+                        float distance = 0.0f;
+                        if (gravity->forceType == nifly::FORCE_SPHERICAL) {
+                            // Godot has one constant gravity vector per emitter. Sample the point
+                            // force and its decay at the original emission point.
+                            direction = offset;
+                            distance = direction.length();
+                        } else {
+                            direction.Normalize();
+                            distance = std::abs(direction.dot(offset));
+                        }
+                        direction.Normalize();
+                        const auto acceleration = to_godot(
+                            direction * (gravity->strength * std::exp(-gravity->decay * distance)));
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            output.acceleration[axis] += acceleration[axis];
                     }
                 }
                 output.declination = emitter->declination;
