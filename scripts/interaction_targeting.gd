@@ -42,7 +42,7 @@ var container_lookup := Callable()
 ## (collider: Node) -> Dictionary of the NPC actor owning that collider, or {}.
 var actor_lookup := Callable()
 ## (ray_origin: Vector3, ray_direction: Vector3, max_length: float) -> Dictionary with `actor` and `distance` (along the
-## ray) of the nearest dead body the ray passes through, or {}. A body has no collider (it must not block the living).
+## ray) of the nearest placed dead body without an active ragdoll collider, or {}.
 var corpse_lookup := Callable()
 
 static func empty_snapshot() -> Dictionary:
@@ -112,15 +112,28 @@ func acquire() -> Dictionary:
 	query.collide_with_areas = true
 	query.collide_with_bodies = true
 	var hit := world_host.get_world_3d().direct_space_state.intersect_ray(query)
+	var hit_collider := hit.get("collider") as Node if not hit.is_empty() else null
+	var hit_actor: Dictionary = actor_lookup.call(hit_collider) if actor_lookup.is_valid() and is_instance_valid(hit_collider) else {}
+	if not hit_actor.is_empty() and bool(hit_actor.get("dead", false)):
+		var hit_position: Vector3 = hit.get("position", ray_origin)
+		if ray_direction.dot(hit_position - reach_origin) <= 0.0 \
+				or hit_position.distance_to(reach_origin) > container_range_m:
+			return empty_snapshot()
+		return _snapshot("corpse", "loot", int(hit_actor.get("reference_id", -1)),
+			str(hit_actor.get("display_name", hit_actor.get("name", "Body"))), {"actor": hit_actor})
 	if corpse_lookup.is_valid():
 		var ray_length := max_reach + ray_origin.distance_to(reach_origin)
 		var corpse: Dictionary = corpse_lookup.call(ray_origin, ray_direction, ray_length)
 		var world_distance := ray_origin.distance_to(hit.get("position", ray_origin)) if not hit.is_empty() else INF
-		if not corpse.is_empty() and float(corpse.get("distance", INF)) < world_distance:
-			var corpse_point: Vector3 = ray_origin + ray_direction * float(corpse.get("distance", 0.0))
+		var dead: Dictionary = corpse.get("actor", {})
+		var ray_hit_is_corpse := is_instance_valid(hit_collider) \
+			and int(hit_collider.get_meta("reference_id", -2)) == int(dead.get("reference_id", -1))
+		# A ragdoll's own collision shape is closer than its skeleton-bone center. Treat that ray hit as the corpse,
+		# rather than letting the corpse block its own loot target.
+		if not corpse.is_empty() and (ray_hit_is_corpse or float(corpse.get("distance", INF)) < world_distance):
+			var corpse_point: Vector3 = corpse.get("position", ray_origin + ray_direction * float(corpse.get("distance", 0.0)))
 			if corpse_point.distance_to(reach_origin) > container_range_m:
 				return empty_snapshot()
-			var dead: Dictionary = corpse.get("actor", {})
 			return _snapshot("corpse", "loot", int(dead.get("reference_id", -1)),
 				str(dead.get("display_name", dead.get("name", "Body"))), {"actor": dead})
 	if hit.is_empty():

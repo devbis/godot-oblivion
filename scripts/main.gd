@@ -400,7 +400,7 @@ var _loot_weight_label: Label
 ## What each body and container still holds, by reference id; filled the first time it is opened and kept for the session.
 var _loot_contents: Dictionary = {}
 var _drop_serial := 0
-const CORPSE_TARGET_RADIUS_M := 0.1
+const CORPSE_TARGET_RADIUS_M := 0.04
 const DROPPED_ITEM_REFERENCE_BASE := 0x7E000000
 var _placed_items: Dictionary = {}
 var _aimed_target: Dictionary = InteractionTargeting.empty_snapshot()
@@ -5160,8 +5160,10 @@ func _setup_targeting() -> void:
 	targeting.container_lookup = _container_reference_by_id
 	targeting.corpse_lookup = _corpse_under_ray
 	targeting.actor_lookup = func(collider: Node) -> Dictionary:
+		var collider_reference_id := int(collider.get_meta("reference_id", -1)) if is_instance_valid(collider) else -1
 		for actor: Dictionary in _npc_actors:
-			if actor.get("root") == collider:
+			if actor.get("root") == collider or (collider_reference_id >= 0
+					and int(actor.get("reference_id", -1)) == collider_reference_id):
 				# A fighter is not talked to: the reticle shows the attack icon and Space does nothing.
 				actor["hostile"] = _is_fighting(actor)
 				return actor
@@ -6124,8 +6126,7 @@ func _activate_target(target: Dictionary) -> void:
 			if not report.begins_with("applied:"):
 				_show_interaction_toast("Cannot open %s" % str(target.get("display_name", "door")))
 
-## The nearest dead body the ray passes through. A body has no collider (it must not block the living), so the bones are
-## tested instead: the ray has to pass within CORPSE_TARGET_RADIUS_M of one.
+## Fallback for a placed corpse with no active ragdoll collider: test its posed skeleton bones with a small aiming margin.
 func _corpse_under_ray(origin: Vector3, direction: Vector3, max_length: float) -> Dictionary:
 	var best := {}
 	var best_distance := max_length
@@ -6146,7 +6147,7 @@ func _corpse_under_ray(origin: Vector3, direction: Vector3, max_length: float) -
 				continue
 			if (origin + direction * along).distance_to(point) <= CORPSE_TARGET_RADIUS_M:
 				best_distance = along
-				best = {"actor": actor, "distance": along}
+				best = {"actor": actor, "distance": along, "position": point}
 	return best
 
 ## The items a body or container starts with: a container's CNTO list, a body's carried items, outfit and weapon. Leveled
@@ -7957,10 +7958,31 @@ func _melee_hit(power_attack := false, clip := "") -> bool:
 	else:
 		forward = -player.global_basis.z
 		origin = player.global_position + Vector3.UP * 1.0 + forward * 0.3
-	var query := PhysicsRayQueryParameters3D.create(
-		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
-	)
-	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+	# Oblivion melee uses a forgiving weapon/actor hit volume rather than requiring the reticle to cross one
+	# exact line. Sweep a small sphere along the swing direction; frequent samples keep walls in front of targets
+	# blocking the blow while making small creatures and ragdolls much easier to connect with.
+	var space := player.get_world_3d().direct_space_state
+	var sweep_shape := SphereShape3D.new()
+	sweep_shape.radius = 0.32
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = sweep_shape
+	query.collision_mask = CombatProjectile.HIT_COLLISION_MASK
+	query.exclude = [player.get_rid()]
+	query.collide_with_areas = true
+	query.collide_with_bodies = true
+	var hit := {}
+	var steps := maxi(1, ceili(reach / 0.12))
+	for step in range(steps + 1):
+		var distance_along := reach * float(step) / float(steps)
+		query.transform = Transform3D(Basis.IDENTITY, origin + forward * distance_along)
+		var overlaps := space.intersect_shape(query, 8)
+		if not overlaps.is_empty():
+			var overlap: Dictionary = overlaps[0]
+			hit = {
+				"collider": overlap.get("collider"),
+				"position": origin + forward * distance_along,
+			}
+			break
 	var health_damage := _player_hit_health_damage(power_attack, clip)
 	var blocked := _provoke_actor(hit.get("collider"), _player_hit_fatigue_damage(health_damage), true, health_damage)
 	if not hit.is_empty():
@@ -7976,7 +7998,7 @@ func _melee_hit(power_attack := false, clip := "") -> bool:
 			)
 	var body := hit.get("collider") as RigidBody3D
 	if body != null:
-		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, hit.position - body.global_position)
+		body.apply_impulse(forward * MELEE_PUSH_IMPULSE, Vector3(hit.position) - body.global_position)
 	return blocked
 
 ## Oblivion plays BlockAttack on the attacker when a defender blocks its melee blow.

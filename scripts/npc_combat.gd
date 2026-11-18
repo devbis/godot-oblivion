@@ -33,8 +33,6 @@ const DODGE_MOVEMENT_DURATION_S := 0.3
 const PLAYER_ATTACK_DODGE_RANGE_M := 3.0
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
-## A melee blow does not reach a target this far above or below the attacker, however close it is on the floor plan.
-const MELEE_VERTICAL_REACH_M := 1.8
 const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
 const POWER_ATTACK_MIN_ENGAGE_DISTANCE_SETTING := "fCombatMinEngageDistance"
@@ -1015,7 +1013,9 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		target = target_actor.root as CollisionObject3D
 	var to_player := target.global_position - root.global_position
 	var flat := Vector2(to_player.x, to_player.z)
-	var distance := flat.length()
+	# Keep the steering direction horizontal, but measure weapon reach in 3D. Horizontal-only range lets
+	# an NPC hit a player who is flying well above or below it.
+	var distance := to_player.length()
 	if distance > LOSE_INTEREST_M or bool(host.get("_dialogue_active")):
 		_end_combat(actor)
 		return
@@ -1050,8 +1050,6 @@ func _update_combat(actor: Dictionary, root: Node3D, player: CharacterBody3D, de
 		return
 	var archer := _is_archer(actor)
 	var in_attack_range := distance <= (ARCHER_RANGE_M if archer else _reach_m(actor) * 0.85)
-	if not archer and absf(target.global_position.y - root.global_position.y) > MELEE_VERTICAL_REACH_M:
-		in_attack_range = false
 	if archer:
 		in_attack_range = in_attack_range and distance >= ARCHER_MIN_RANGE_M and _sees_player(root, target)
 	if in_attack_range:
@@ -1541,9 +1539,8 @@ func _land_hit(actor: Dictionary, root: Node3D, player: CollisionObject3D, targe
 	if _is_archer(actor):
 		_loose_arrow(actor, root, player, target_actor)
 		return
-	var distance := Vector2(player.global_position.x - root.global_position.x, player.global_position.z - root.global_position.z).length()
-	if distance > _reach_m(actor) + HIT_REACH_SLACK_M \
-			or absf(player.global_position.y - root.global_position.y) > MELEE_VERTICAL_REACH_M:
+	var distance := player.global_position.distance_to(root.global_position)
+	if distance > _reach_m(actor) + HIT_REACH_SLACK_M:
 		return
 	var damage := _hit_damage(actor, bool(combat.get("power", false)), str(combat.get("clip", "")))
 	if target_actor.is_empty():
