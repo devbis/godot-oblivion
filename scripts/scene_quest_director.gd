@@ -252,6 +252,8 @@ func clear_navigation_tiles() -> void:
 	clear_pathgrid()
 
 func _collect_static_bodies(node: Node, bodies: Array) -> void:
+	if node.process_mode == Node.PROCESS_MODE_DISABLED or node.is_queued_for_deletion():
+		return
 	if node is StaticBody3D:
 		bodies.push_back(node)
 	for child: Node in node.get_children():

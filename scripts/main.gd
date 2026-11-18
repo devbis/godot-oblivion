@@ -282,6 +282,7 @@ var _reported_unanswered: Dictionary = {}
 ## Action lines of the quest bridge already reported, so a command asked on every tick is printed once.
 var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
+var _outgoing_cell_visual_root: Node3D
 var _flickering_lights: Array[OmniLight3D] = []
 var _nif_flipbook_instances: Array[Dictionary] = []
 var _nif_flipbook_texture_cache: Dictionary = {}
@@ -2574,8 +2575,7 @@ func _load_cell_geometry(
 			$TestFloor/MeshInstance3D.visible = true
 			$TestFloor/CollisionShape3D.disabled = false
 		_flickering_lights.clear()
-		for child in cell_visual_root.get_children():
-			child.queue_free()
+		_begin_cell_reference_load(is_exterior and keep_exterior_terrain)
 		await get_tree().process_frame
 
 	var instance_count := 0
@@ -2635,11 +2635,6 @@ func _load_cell_geometry(
 		instance_count += terrain_batch_instances
 	if clear_existing and _add_water_region(cell.get("water_cells", [])):
 		instance_count += 1
-	if is_exterior and not clear_existing and is_instance_valid(_outgoing_exterior_terrain):
-		_outgoing_exterior_terrain.hide()
-		_outgoing_exterior_terrain.queue_free()
-		_outgoing_exterior_terrain = null
-		_exterior_terrain_root.show()
 	load_slice_started = Time.get_ticks_usec()
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
@@ -3030,6 +3025,38 @@ func _load_cell_geometry(
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
 	return true
+
+func _begin_cell_reference_load(keep_previous: bool) -> void:
+	if keep_previous and not is_instance_valid(_outgoing_cell_visual_root):
+		_outgoing_cell_visual_root = cell_visual_root
+		_outgoing_cell_visual_root.name = "OutgoingStreamedCell"
+		# Its objects stay visible, but the incoming cell owns physics and interactions.
+		_outgoing_cell_visual_root.process_mode = Node.PROCESS_MODE_DISABLED
+	else:
+		cell_visual_root.hide()
+		cell_visual_root.queue_free()
+	if not keep_previous and is_instance_valid(_outgoing_cell_visual_root):
+		_outgoing_cell_visual_root.hide()
+		_outgoing_cell_visual_root.queue_free()
+		_outgoing_cell_visual_root = null
+	cell_visual_root = Node3D.new()
+	cell_visual_root.name = "StreamedCell"
+	cell_visual_root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	cell_visual_root.visible = not is_instance_valid(_outgoing_cell_visual_root)
+	add_child(cell_visual_root)
+
+func _finish_exterior_visual_load() -> void:
+	# Switch terrain, water, and placed objects together, after both geometry passes.
+	if is_instance_valid(_outgoing_cell_visual_root):
+		_outgoing_cell_visual_root.hide()
+		_outgoing_cell_visual_root.queue_free()
+		_outgoing_cell_visual_root = null
+		cell_visual_root.show()
+	if is_instance_valid(_outgoing_exterior_terrain):
+		_outgoing_exterior_terrain.hide()
+		_outgoing_exterior_terrain.queue_free()
+		_outgoing_exterior_terrain = null
+		_exterior_terrain_root.show()
 
 func _begin_exterior_terrain_load(is_exterior: bool, keep_previous: bool) -> void:
 	if is_instance_valid(_exterior_terrain_root):
@@ -4738,6 +4765,8 @@ func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
 	)
 	if not geometry_complete or generation != _deferred_world_generation:
 		return
+	if is_exterior:
+		_finish_exterior_visual_load()
 	_exterior_collision_stream_enabled = is_exterior
 	_exterior_terrain_collision_stream_enabled = is_exterior
 	_npc_stream_enabled = true
