@@ -54,6 +54,8 @@ struct TopicRun {
     const DialogResponse* reply = nullptr;  // the reply whose conditions held first, or null
     std::string quest_editor_id;
     QuestTick tick;                          // what its result did
+    std::vector<std::string> selection_diagnostics; // closest rejected replies, when no reply was eligible
+    std::string selection_failure_signature;  // stable across repeated GameMode attempts with the same failure
 };
 
 class QuestWorld;
@@ -94,7 +96,8 @@ public:
     TopicRun run_topic(const DialogTopic& topic, const DialogueContext& context, const DistanceFunction& distance = {},
                        int depth = 0);
     const DialogResponse* find_topic_reply(const DialogTopic& topic, const DialogueContext& context) const;
-    bool topic_reply_conditions_hold(const DialogResponse& reply, const DialogueContext& context) const;
+    bool topic_reply_conditions_hold(const DialogResponse& reply, const DialogueContext& context,
+                                     ConditionEvaluation* evaluation = nullptr) const;
     TopicRun run_topic_reply(const DialogResponse& reply, const DialogueContext& context,
                              const DistanceFunction& distance = {}, int depth = 0);
 
@@ -323,6 +326,7 @@ private:
     std::set<QuestDriver*> started_;
     std::unordered_map<std::string, QuestDriver*> by_editor_id_;  // lowercase editor ID
     std::unordered_map<std::uint32_t, QuestDriver*> by_form_id_;
+    std::unordered_map<std::string, std::string> dialogue_selection_failures_; // context key -> last failure signature
     ScriptCache scripts_;
     int running_ = 0;
     std::vector<std::function<void()>> pending_;

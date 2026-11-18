@@ -1669,10 +1669,13 @@ public:
         const auto* greeting = greeting_;
         if (greeting) {
             auto run = world_->run_dialogue_topic(*greeting, context, distance_function(distance));
-            if (run.reply) return dialogue_result(*greeting, context, run);
+            if (run.reply || !run.selection_diagnostics.empty()) return dialogue_result(*greeting, context, run);
         }
         Dictionary result;
         result["success"] = false;
+        PackedStringArray diagnostics;
+        diagnostics.push_back(utf8_text("GREETING topic record is missing"));
+        result["selection_diagnostics"] = diagnostics;
         return result;
     }
 
@@ -1750,17 +1753,7 @@ public:
         const auto* topic = game_->find_topic(form_id_arg(topic_form_id));
         if (!topic || topic->editor_id == "GREETING") return {};
         const auto context = make_dialogue_context(speaker_base, listener_base, listener_race, listener_female);
-        if (!world_->dialogue_topic_available(*topic, context)) {
-            Dictionary result;
-            result["success"] = false;
-            return result;
-        }
         auto run = world_->run_dialogue_topic(*topic, context, distance_function(distance));
-        if (!run.reply) {
-            Dictionary result;
-            result["success"] = false;
-            return result;
-        }
         return dialogue_result(*topic, context, run);
     }
 
@@ -1940,6 +1933,11 @@ private:
                                const oblivion::TopicRun& run) const {
         Dictionary result = tick_to_dictionary(run.tick);
         result["success"] = run.reply != nullptr;
+        if (!run.selection_diagnostics.empty()) {
+            PackedStringArray diagnostics;
+            for (const auto& line : run.selection_diagnostics) diagnostics.push_back(utf8_text(line));
+            result["selection_diagnostics"] = diagnostics;
+        }
         if (!run.reply) return result;
         const oblivion::DialogResponseLine* line = nullptr;
         for (const auto& candidate : run.reply->lines) {

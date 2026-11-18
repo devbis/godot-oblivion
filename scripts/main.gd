@@ -1429,7 +1429,9 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	# A distance to a reference outside the loaded cell is far away by design (see _quest_distance), so it is not
 	# reported. Other functions the scene cannot answer come back on every tick; report each one only the first time.
 	for name: String in result.get("unanswered", PackedStringArray()):
-		if name != "getdistance" and not _reported_unanswered.has(name):
+		if name.begins_with("dialogue selection failed:"):
+			report.push_back(name)
+		elif name != "getdistance" and not _reported_unanswered.has(name):
 			_reported_unanswered[name] = true
 			report.push_back("unanswered (first time): " + name)
 	return report
@@ -2066,6 +2068,8 @@ func _select_npc_conversation_line(topic_ids: Array, speaker: Dictionary, listen
 			bool(listener_npc.get("female", false)), Callable(self, "_quest_distance")
 		)
 		if not bool(result.get("success", false)):
+			for diagnostic_value: Variant in result.get("selection_diagnostics", PackedStringArray()):
+				print("OpenOB dialogue selection failed: " + str(diagnostic_value))
 			continue
 		_suppress_scripted_dialogue_presentation = true
 		var report := _apply_driver_result(result)
@@ -4850,6 +4854,8 @@ func _begin_dialogue(actor: Dictionary, show_failure_toast: bool = true) -> bool
 		Callable(self, "_quest_distance")
 	)
 	if not bool(greeting.get("success", false)):
+		for diagnostic_value: Variant in greeting.get("selection_diagnostics", PackedStringArray()):
+			print("OpenOB dialogue selection failed: " + str(diagnostic_value))
 		_dialogue_actor = {}
 		if show_failure_toast:
 			_show_interaction_toast("They have nothing to say")
@@ -4973,6 +4979,8 @@ func _select_dialogue_topic(topic_form_id: int) -> void:
 		Callable(self, "_quest_distance")
 	)
 	if not bool(response.get("success", false)):
+		for diagnostic_value: Variant in response.get("selection_diagnostics", PackedStringArray()):
+			print("OpenOB dialogue selection failed: " + str(diagnostic_value))
 		_dialogue_subtitle_label.text = "That topic is no longer available."
 		_refresh_dialogue_topics()
 		return

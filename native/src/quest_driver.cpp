@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 #include "oblivion/quest_runtime.hpp"
 #include "oblivion/script_interpreter.hpp"
@@ -418,10 +420,11 @@ TopicRun QuestDriver::run_topic(const DialogTopic& topic, const DialogueContext&
     return run_topic_reply(*reply, context, distance, depth);
 }
 
-bool QuestDriver::topic_reply_conditions_hold(const DialogResponse& reply, const DialogueContext& context) const {
+bool QuestDriver::topic_reply_conditions_hold(const DialogResponse& reply, const DialogueContext& context,
+                                             ConditionEvaluation* evaluation) const {
     if (reply.quest != quest_.form_id) return false;
     DriverConditionHost conditions(this, world_, &context);
-    return evaluate_conditions(reply.conditions, conditions);
+    return evaluate_conditions(reply.conditions, conditions, nullptr, evaluation);
 }
 
 TopicRun QuestDriver::run_topic_reply(const DialogResponse& reply, const DialogueContext& context,
@@ -712,6 +715,7 @@ void QuestWorld::clear_actors() {
         actors_.clear();
         reference_bases_.clear();
         package_by_reference_.clear();
+        dialogue_selection_failures_.clear();
     });
 }
 
@@ -757,12 +761,66 @@ const DialogResponse* QuestWorld::find_dialogue_topic_reply(const DialogTopic& t
 TopicRun QuestWorld::run_dialogue_topic(const DialogTopic& topic, const DialogueContext& context,
                                         const DistanceFunction& distance, int depth) {
     RunGuard guard(*this);
+    struct RejectedReply {
+        const DialogResponse* response = nullptr;
+        std::string quest_editor_id;
+        ConditionEvaluation evaluation;
+    };
+    std::vector<RejectedReply> rejected;
     for (const auto& response : topic.responses) {
         auto* quest = find_form(response.quest);
-        if (!quest || !is_started(quest) || !quest->topic_reply_conditions_hold(response, context)) continue;
+        if (!quest || !is_started(quest)) continue;
+        ConditionEvaluation evaluation;
+        if (!quest->topic_reply_conditions_hold(response, context, &evaluation)) {
+            rejected.push_back({&response, quest->quest().editor_id, std::move(evaluation)});
+            continue;
+        }
         return quest->run_topic_reply(response, context, distance, depth);
     }
     TopicRun empty;
+    if (rejected.empty()) {
+        empty.selection_diagnostics.push_back("no reply records from a started quest belong to this topic");
+        empty.selection_failure_signature = "no-started-replies:" + std::to_string(topic.form_id);
+        return empty;
+    }
+
+    std::stable_sort(rejected.begin(), rejected.end(), [](const RejectedReply& left, const RejectedReply& right) {
+        const auto left_total = std::max<std::size_t>(left.evaluation.groups_total, 1);
+        const auto right_total = std::max<std::size_t>(right.evaluation.groups_total, 1);
+        const auto left_ratio = left.evaluation.groups_passed * right_total;
+        const auto right_ratio = right.evaluation.groups_passed * left_total;
+        if (left_ratio != right_ratio) return left_ratio > right_ratio;
+        return left.evaluation.groups_passed > right.evaluation.groups_passed;
+    });
+
+    std::ostringstream signature;
+    signature << "no-eligible-reply:" << topic.form_id;
+    const auto candidate_count = std::min<std::size_t>(rejected.size(), 3);
+    for (std::size_t index = 0; index < candidate_count; ++index) {
+        const auto& candidate = rejected[index];
+        signature << ':' << candidate.response->form_id;
+        for (const auto& key : candidate.evaluation.failure_keys) signature << '[' << key << ']';
+        // Include observed values as well as condition identities. A condition can keep failing while its value
+        // changes (for example a quest stage or detection result), and that changed evidence should be logged once.
+        for (const auto& group : candidate.evaluation.failed_groups) signature << '{' << group << '}';
+
+        std::ostringstream diagnostic;
+        diagnostic << "closest INFO 0x" << std::hex << std::setw(8) << std::setfill('0') << candidate.response->form_id
+                   << std::dec << " from " << candidate.quest_editor_id << " (\"" << candidate.response->text << "\"): "
+                   << candidate.evaluation.groups_passed << '/' << candidate.evaluation.groups_total
+                   << " condition groups matched";
+        const auto failed_count = std::min<std::size_t>(candidate.evaluation.failed_groups.size(), 3);
+        if (failed_count > 0) {
+            diagnostic << "; failed groups: ";
+            for (std::size_t group_index = 0; group_index < failed_count; ++group_index) {
+                if (group_index > 0) diagnostic << "; ";
+                diagnostic << candidate.evaluation.failed_groups[group_index];
+            }
+            if (failed_count < candidate.evaluation.failed_groups.size()) diagnostic << "; ...";
+        }
+        empty.selection_diagnostics.push_back(diagnostic.str());
+    }
+    empty.selection_failure_signature = signature.str();
     return empty;
 }
 
@@ -780,8 +838,34 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     }
     RunGuard guard(*this);
     const auto* topic = find_topic_ ? find_topic_(topic_editor_id) : nullptr;
+    std::ostringstream context_key_builder;
+    context_key_builder << topic_editor_id << ':' << speaker << ':' << listener << ':' << speaker_reference;
+    const std::string selection_context_key = context_key_builder.str();
+    const auto speaker_label = speaker_reference.empty() ? "0x" + [&] {
+        std::ostringstream label;
+        label << std::hex << std::setw(8) << std::setfill('0') << speaker;
+        return label.str();
+    }() : std::string(speaker_reference);
+    std::string listener_label = listener == kPlayerReference ? "player" : "0x" + [&] {
+        std::ostringstream label;
+        label << std::hex << std::setw(8) << std::setfill('0') << listener;
+        return label.str();
+    }();
+    if (listener != kPlayerReference) {
+        for (const auto& [reference_name, reference_base_id] : reference_bases_) {
+            if (reference_base_id == listener) {
+                listener_label = reference_name;
+                break;
+            }
+        }
+    }
     if (!topic) {
-        tick.unanswered.push_back("sayto");
+        const std::string signature = "missing-topic:" + std::string(topic_editor_id);
+        if (dialogue_selection_failures_[selection_context_key] != signature) {
+            dialogue_selection_failures_[selection_context_key] = signature;
+            tick.unanswered.push_back("dialogue selection failed: topic=" + std::string(topic_editor_id)
+                + " speaker=" + speaker_label + " listener=" + listener_label + "; topic record is missing");
+        }
         return 0.0;
     }
     DialogueContext context;
@@ -796,7 +880,18 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
         }
     }
     const auto run = run_dialogue_topic(*topic, context, distance, depth);
-    if (!run.reply) return 0.0;
+    if (!run.reply) {
+        if (dialogue_selection_failures_[selection_context_key] != run.selection_failure_signature) {
+            dialogue_selection_failures_[selection_context_key] = run.selection_failure_signature;
+            std::ostringstream diagnostic;
+            diagnostic << "dialogue selection failed: topic=" << topic->editor_id << " speaker=" << speaker_label
+                       << " listener=" << listener_label << "; no eligible reply";
+            for (const auto& detail : run.selection_diagnostics) diagnostic << "; " << detail;
+            tick.unanswered.push_back(diagnostic.str());
+        }
+        return 0.0;
+    }
+    dialogue_selection_failures_.erase(selection_context_key);
     append_tick(tick, run.tick);
     // The line is recorded as spoken, so the scene can show it: its text, speaker, reply form and quest.
     ScriptAction speech;

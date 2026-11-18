@@ -1,6 +1,8 @@
 #include "oblivion/quest_runtime.hpp"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 #include <unordered_set>
 
 namespace oblivion {
@@ -21,14 +23,82 @@ bool condition_joins_next(std::uint8_t code) {
     return (code & 0x01) != 0;
 }
 
+namespace {
+
+std::string condition_function_name(std::uint16_t function_index) {
+    switch (function_index) {
+    case 1: return "GetDistance";
+    case 45: return "GetDetected";
+    case 56: return "GetQuestRunning";
+    case 58: return "GetStage";
+    case 59: return "GetStageDone";
+    case 60: return "GetInCell";
+    case 69: return "GetIsRace";
+    case 70: return "GetIsSex";
+    case 72: return "GetIsID";
+    case 79: return "GetQuestVariable";
+    case 130: return "GetPCIsRace";
+    case 131: return "GetPCIsSex";
+    case 161: return "GetIsCurrentPackage";
+    default: return "condition";
+    }
+}
+
+std::string condition_operator_name(ConditionOperator operation) {
+    switch (operation) {
+    case ConditionOperator::Equal: return "==";
+    case ConditionOperator::NotEqual: return "!=";
+    case ConditionOperator::Greater: return ">";
+    case ConditionOperator::GreaterEqual: return ">=";
+    case ConditionOperator::Less: return "<";
+    case ConditionOperator::LessEqual: return "<=";
+    }
+    return "?";
+}
+
+std::string failed_condition_detail(const QuestCondition& condition, const std::optional<double>& value,
+                                   const std::optional<double>& comparison) {
+    std::ostringstream detail;
+    const auto name = condition_function_name(condition.function_index);
+    detail << name << '[' << condition.function_index << ']';
+    detail << "(p1=0x" << std::hex << std::setw(8) << std::setfill('0') << condition.parameter1
+           << ", p2=" << std::dec << condition.parameter2 << ", runOn=" << condition.run_on << ") returned ";
+    if (value) detail << std::setprecision(5) << std::defaultfloat << *value;
+    else detail << "<unavailable>";
+    detail << ", expected " << condition_operator_name(condition_operator(condition.operator_code)) << ' ';
+    if (condition.comparison_is_global) {
+        detail << "GLOB 0x" << std::hex << condition.comparison_global_form_id;
+        detail << std::dec << "=";
+        if (comparison) detail << std::setprecision(5) << std::defaultfloat << *comparison;
+        else detail << "<unavailable>";
+    } else {
+        detail << std::dec << std::setprecision(5) << std::defaultfloat << condition.comparison;
+    }
+    return detail.str();
+}
+
+std::string failed_condition_key(const QuestCondition& condition) {
+    std::ostringstream key;
+    key << condition.function_index << ':' << condition.parameter1 << ':' << condition.parameter2 << ':'
+        << condition.run_on << ':' << static_cast<unsigned>(condition.operator_code);
+    if (condition.comparison_is_global) key << ":g" << condition.comparison_global_form_id;
+    else key << ":v" << std::setprecision(5) << std::defaultfloat << condition.comparison;
+    return key.str();
+}
+
+} // namespace
+
 bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHost& host,
-                         std::vector<std::string>* unimplemented) {
+                         std::vector<std::string>* unimplemented, ConditionEvaluation* evaluation) {
+    ConditionEvaluation details;
     bool all = true;
     std::size_t index = 0;
     while (index < conditions.size()) {
         // One disjunction: conditions linked by OR, ending at the first one that does not join the next.
         bool any = false;
         bool joined = false;
+        std::vector<std::string> failed_alternatives;
+        std::vector<std::string> failed_keys;
         do {
             const auto& condition = conditions[index];
             const auto value = host.call_condition(condition.function_index, condition.parameter1, condition.parameter2,
@@ -53,12 +123,38 @@ bool evaluate_conditions(const std::vector<QuestCondition>& conditions, ScriptHo
                 if (std::find(unimplemented->begin(), unimplemented->end(), name) == unimplemented->end())
                     unimplemented->push_back(name);
             }
+            if (!holds && evaluation) {
+                failed_alternatives.push_back(failed_condition_detail(condition, value, comparison));
+                failed_keys.push_back(failed_condition_key(condition));
+            }
             any = any || holds;
             joined = condition_joins_next(condition.operator_code);
             ++index;
         } while (joined && index < conditions.size());
-        all = all && any;
+        ++details.groups_total;
+        if (any) {
+            ++details.groups_passed;
+        } else {
+            all = false;
+            if (evaluation) {
+                std::ostringstream group;
+                group << '[';
+                for (std::size_t failure_index = 0; failure_index < failed_alternatives.size(); ++failure_index) {
+                    if (failure_index > 0) group << " OR ";
+                    group << failed_alternatives[failure_index];
+                }
+                group << ']';
+                details.failed_groups.push_back(group.str());
+                std::ostringstream key;
+                for (std::size_t failure_index = 0; failure_index < failed_keys.size(); ++failure_index) {
+                    if (failure_index > 0) key << '|';
+                    key << failed_keys[failure_index];
+                }
+                details.failure_keys.push_back(key.str());
+            }
+        }
     }
+    if (evaluation) *evaluation = std::move(details);
     return all;
 }
 
