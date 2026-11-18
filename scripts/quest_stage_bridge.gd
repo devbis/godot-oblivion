@@ -11,6 +11,9 @@ var actor_state: Dictionary = {}
 ## again when their cell is loaded again. The name is not unique (guards share a base editor id), so the id is the key.
 var removed_reference_ids: Dictionary = {}
 
+var _indexed_cell: Dictionary = {}
+var _reference_names: Dictionary = {}
+
 
 ## Destinations of MoveTo for actors that were not loaded yet, by reference id; the scene applies one when it builds the actor.
 var pending_moves: Dictionary = {}
@@ -72,7 +75,11 @@ func apply(runs: Array, cell: Dictionary, world: Node3D, transform_of: Callable)
 ## Applies a list of actions, such as the ones a quest driver tick returns.
 func apply_actions(actions: Array, cell: Dictionary, world: Node3D, transform_of: Callable) -> PackedStringArray:
 	var report := PackedStringArray()
-	var references := _references_by_name(cell)
+	if actions.is_empty():
+		return report
+	if not is_same(cell, _indexed_cell):
+		_indexed_cell = cell
+		_reference_names = _references_by_name(cell)
 	for action_value: Variant in actions:
 		var action: Dictionary = action_value
 		var command := str(action.get("command", "")).to_lower()
@@ -82,7 +89,7 @@ func apply_actions(actions: Array, cell: Dictionary, world: Node3D, transform_of
 			if command in ["setstage", "startquest"]:
 				report.push_back("  %s handled by the quest world" % command)
 			continue
-		report.push_back("  " + _apply_action(action, references, world, transform_of))
+		report.push_back("  " + _apply_action(action, _reference_names, world, transform_of))
 	return report
 
 
