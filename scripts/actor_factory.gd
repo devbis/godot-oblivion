@@ -7,6 +7,8 @@ const FaceGenData := preload("res://scripts/facegen_data.gd")
 const PLAYER_HEAD_CULL_MARGIN := 128.0
 const BIPED_SLOT_HEAD := 0x0001
 const BIPED_SLOT_HAIR := 0x0002
+const RACE_TAIL_PART := 4
+const BEAST_SKELETON := "Characters/_male/skeletonbeast.nif"
 const PLAYER_FACE_DETAIL_PARTS := [
 	"Characters/Imperial/eyeLeftHuman.nif",
 	"Characters/Imperial/eyeRightHuman.nif",
@@ -310,6 +312,14 @@ func _npc_head_part_entry(npc: Dictionary) -> Dictionary:
 		return {"model_path": npc_head_model_path(npc), "texture_path": ""}
 	return race_head_parts[0]
 
+static func _npc_tail_part(npc: Dictionary) -> Dictionary:
+	var body_parts: Array = npc.get("race_body_parts", [])
+	return body_parts[RACE_TAIL_PART] if body_parts.size() > RACE_TAIL_PART else {}
+
+static func npc_skeleton_path(npc: Dictionary, default_skeleton: String) -> String:
+	var tail: Dictionary = _npc_tail_part(npc)
+	return BEAST_SKELETON if not str(tail.get("model_path", "")).is_empty() else default_skeleton
+
 func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
 	var race_body_parts: Array = npc.get("race_body_parts", [])
@@ -325,15 +335,14 @@ func _npc_body_part_entries(npc: Dictionary, is_female: bool) -> Array[Dictionar
 			"texture_path": str(race_part.get("texture_path", "")),
 			"biped_slot": body_slots[index],
 		})
-	if race_body_parts.size() > 4:
-		var tail_part: Dictionary = race_body_parts[4]
-		var tail_model_path := str(tail_part.get("model_path", ""))
-		if not tail_model_path.is_empty():
-			entries.push_back({
-				"model_path": tail_model_path,
-				"texture_path": str(tail_part.get("texture_path", "")),
-				"biped_slot": 0x8000,
-			})
+	var tail_part := _npc_tail_part(npc)
+	var tail_model_path := str(tail_part.get("model_path", ""))
+	if not tail_model_path.is_empty():
+		entries.push_back({
+			"model_path": tail_model_path,
+			"texture_path": str(tail_part.get("texture_path", "")),
+			"biped_slot": 0x8000,
+		})
 	return entries
 
 func _npc_face_detail_entries(npc: Dictionary) -> Array[Dictionary]:
@@ -821,7 +830,7 @@ func _normalize_texture_asset_path(texture_path: String) -> String:
 
 static func build_skeleton(node_data: Array) -> Skeleton3D:
 	if node_data.is_empty():
-		push_warning("Original male skeleton.nif did not provide node data")
+		push_warning("Original skeleton NIF did not provide node data")
 		return null
 	var skeleton := Skeleton3D.new()
 	skeleton.name = "Skeleton3D"

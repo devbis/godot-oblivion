@@ -8225,19 +8225,20 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		if quest_bridge.is_actor_removed(reference_id):
 			_npc_loaded_reference_ids[reference_id] = true
 			continue
-		# A creature's body is sized from its own skeleton, which is read before the actor is added.
-		var creature_skeleton: Skeleton3D = null
+		# A creature's collider is sized from its rig. Humanoid races with tails also
+		# need their own rig before the body meshes can be skinned.
+		var skeleton_path := str(npc.get("model_path", "")) if is_creature else ActorFactory.npc_skeleton_path(npc, PLAYER_SKELETON)
+		var skeleton_key := skeleton_path.to_lower().replace("\\", "/")
 		if is_creature:
-			var creature_model := str(npc.get("model_path", ""))
-			await _ensure_creature_clip_index(creature_model.replace("\\", "/").get_base_dir() + "/")
-			await assets.meshes_for_model(creature_model)
-			if stream_generation != _npc_stream_generation:
-				return
-			var creature_metadata: Dictionary = assets.nif_metadata_cache.get(creature_model.to_lower().replace("\\", "/"), {})
-			creature_skeleton = ActorFactory.build_skeleton(creature_metadata.get("nodes", []))
-			if creature_skeleton == null:
-				push_warning("OpenOB creature %s: no skeleton in %s" % [str(npc.get("editor_id", "")), creature_model])
-				continue
+			await _ensure_creature_clip_index(skeleton_path.replace("\\", "/").get_base_dir() + "/")
+		await assets.meshes_for_model(skeleton_path)
+		if stream_generation != _npc_stream_generation:
+			return
+		var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(skeleton_key, {})
+		var skeleton := ActorFactory.build_skeleton(skeleton_metadata.get("nodes", []))
+		if skeleton == null:
+			push_warning("OpenOB actor %s: no skeleton in %s" % [str(npc.get("editor_id", "")), skeleton_path])
+			continue
 		var actor_root := CharacterBody3D.new()
 		actor_root.set_script(NpcRouteController)
 		var actor_name := str(reference.get("reference_name", "")).strip_edges()
@@ -8269,8 +8270,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		var actor_height_scale := maxf(0.1, float(npc.get("race_height_scale", 1.0))) if not is_creature else 1.0
 		actor_capsule.radius = HUMANOID_ACTOR_CAPSULE_RADIUS_M * actor_height_scale
 		actor_capsule.height = HUMANOID_ACTOR_CAPSULE_HEIGHT_M * actor_height_scale
-		if creature_skeleton != null:
-			var creature_size := _creature_capsule_size(creature_skeleton, float(npc.get("base_scale", 1.0)))
+		if is_creature:
+			var creature_size := _creature_capsule_size(skeleton, float(npc.get("base_scale", 1.0)))
 			actor_capsule.radius = creature_size.x
 			actor_capsule.height = creature_size.y
 		actor_capsule.margin = 0.005
@@ -8288,13 +8289,6 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		avatar.name = "OriginalActor"
 		avatar.scale = Vector3.ONE * game_units_to_meters * actor_height_scale
 		actor_root.add_child(avatar)
-		var skeleton := creature_skeleton
-		if not is_creature:
-			var skeleton_metadata: Dictionary = assets.nif_metadata_cache.get(PLAYER_SKELETON.to_lower(), {})
-			skeleton = ActorFactory.build_skeleton(skeleton_metadata.get("nodes", []))
-		if skeleton == null:
-			_discard_pending_npc(actor_root)
-			continue
 		avatar.add_child(skeleton)
 		var face_meshes: Array[MeshInstance3D] = []
 		var assembled: Dictionary = {}
@@ -8353,7 +8347,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"base_form_id": int(reference.get("base_form_id", 0)),
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"creature": is_creature,
-			"skeleton_model_path": str(npc.get("model_path", "")) if is_creature else PLAYER_SKELETON,
+			"skeleton_model_path": skeleton_path,
 			"creature_attack_damage": float(npc.get("attack_damage", 0)) if is_creature else 0.0,
 			"creature_attack_reach": float(npc.get("attack_reach", 0.0)) if is_creature else 0.0,
 			# The folder the actor's clips come from: a creature has its own next to its skeleton.
