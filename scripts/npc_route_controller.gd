@@ -33,6 +33,9 @@ const YIELD_STUCK_GIVE_UP_S := 0.6
 const YIELD_REQUEST_COOLDOWN_S := 1.0
 const ROUTE_BLOCKED_REPORT_S := 0.8
 const NPC_NAVIGATION_LAYERS := 3
+## Navigation-mesh corners are sampled from walkable polygons, not authored actor destinations. A capsule cannot always
+## put its centre within the generic 8 cm route tolerance of a corner, so allow it to pass within roughly its radius.
+const NAVMESH_WAYPOINT_ARRIVAL_M := 0.22
 
 ## Emitted once when the route reaches its last waypoint and does not loop.
 signal route_finished
@@ -484,7 +487,9 @@ func _physics_process(delta: float) -> void:
 		var offset := waypoints[waypoint_index] - global_position
 		offset.y = 0.0
 		var waypoint_arrival_distance := arrival_distance
-		if not loops_route and waypoint_index == waypoints.size() - 1:
+		if not follow_authored_route_height and waypoint_index < waypoints.size() - 1:
+			waypoint_arrival_distance = maxf(waypoint_arrival_distance, NAVMESH_WAYPOINT_ARRIVAL_M)
+		elif not loops_route and waypoint_index == waypoints.size() - 1:
 			waypoint_arrival_distance = final_arrival_distance
 		if offset.length() <= waypoint_arrival_distance:
 			if is_hop_waypoint(waypoint_index):

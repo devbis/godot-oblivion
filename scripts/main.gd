@@ -1478,10 +1478,64 @@ func _quest_world_command(command: String, target: String, arguments: Array) -> 
 			return null
 		"getdetected":
 			return _quest_actor_detects_target(target, str(arguments[0]) if not arguments.is_empty() else "")
+		"getincell":
+			return _quest_reference_is_in_cell(target, str(arguments[0]) if not arguments.is_empty() else "")
 	return null
 
 const NPC_DETECTION_RANGE_M := 20.0
 var _quest_detection_log_states: Dictionary = {}
+var _quest_cell_log_states: Dictionary = {}
+
+func _quest_reference_is_in_cell(reference_name: String, cell_editor_id: String) -> Variant:
+	if data_reader == null or reference_name.strip_edges().is_empty() or cell_editor_id.strip_edges().is_empty():
+		return null
+	var wanted_cell: Dictionary = data_reader.find_cell(cell_editor_id)
+	var wanted_cell_id := int(wanted_cell.get("form_id", 0))
+	if wanted_cell_id <= 0:
+		_log_quest_cell_query(reference_name, cell_editor_id, 0, "unknown target cell")
+		return null
+	var reference_id := int(data_reader.find_form_id_by_editor_id(reference_name))
+	var wanted_reference := reference_name.strip_edges().to_lower()
+	var actual_cell_id := 0
+	for relocated_id: Variant in _relocated_actors:
+		var relocated: Dictionary = _relocated_actors[relocated_id]
+		var relocated_reference: Dictionary = relocated.get("reference", {})
+		if str(relocated_reference.get("reference_name", "")).strip_edges().to_lower() == wanted_reference:
+			reference_id = int(relocated_id)
+			actual_cell_id = int(relocated.get("cell_form_id", 0))
+			break
+	if actual_cell_id <= 0:
+		for reference_value: Variant in current_cell.get("references", []):
+			var reference: Dictionary = reference_value
+			if str(reference.get("reference_name", "")).strip_edges().to_lower() == wanted_reference:
+				reference_id = int(reference.get("form_id", reference_id))
+				actual_cell_id = int(current_cell.get("form_id", 0))
+				break
+	for actor: Dictionary in _npc_actors:
+		if str(actor.get("reference_name", "")).strip_edges().to_lower() == wanted_reference:
+			reference_id = int(actor.get("reference_id", reference_id))
+			actual_cell_id = int(current_cell.get("form_id", 0))
+			break
+	if reference_id <= 0:
+		_log_quest_cell_query(reference_name, cell_editor_id, 0, "reference is not indexed")
+		return null
+	if actual_cell_id <= 0:
+		actual_cell_id = int(data_reader.find_reference_cell(reference_id))
+	var result := 1.0 if actual_cell_id == wanted_cell_id else 0.0
+	_log_quest_cell_query(reference_name, cell_editor_id, actual_cell_id, "yes" if result > 0.5 else "no")
+	return result
+
+func _log_quest_cell_query(reference_name: String, cell_editor_id: String, actual_cell_id: int, verdict: String) -> void:
+	var key := "%08X:%s:%s" % [
+		int(current_cell.get("form_id", 0)), reference_name.strip_edges().to_lower(), cell_editor_id.strip_edges().to_lower()
+	]
+	var state := "%s:%08X" % [verdict, actual_cell_id]
+	if str(_quest_cell_log_states.get(key, "")) == state:
+		return
+	_quest_cell_log_states[key] = state
+	print("OpenOB quest: GetInCell %s in %s: %s (cell 0x%08X)" % [
+		reference_name, cell_editor_id, verdict, actual_cell_id
+	])
 
 func _quest_actor_detects_target(observer_name: String, target_name: String) -> Variant:
 	var observer: Dictionary = {}
@@ -1906,6 +1960,43 @@ const CROSS_CELL_SEARCH_LIMIT := 40
 ## reference moved to where its package ended). They are absent from the cell they left and appear in that one.
 var _relocated_actors: Dictionary = {}
 
+## The player can leave a cell while NPCs are still following a player-targeted package or walking toward the same
+## connecting door. Preserve those actors at the door's destination so their package can resume in the next cell.
+func _carry_actors_through_player_door(door: Dictionary, target_cell_id: int, destination: PackedFloat32Array) -> void:
+	if destination.size() < 3:
+		return
+	var door_form_id := int(door.get("form_id", 0))
+	var source_cell_id := int(current_cell.get("form_id", 0))
+	var target_rotation: PackedFloat32Array = door.get("teleport_rotation", PackedFloat32Array())
+	for actor: Dictionary in _npc_actors:
+		if bool(actor.get("dead", false)):
+			continue
+		var actor_root := actor.get("root") as Node3D
+		if not is_instance_valid(actor_root) or bool(actor_root.get("inactive")):
+			continue
+		var package: Dictionary = actor.get("package", {})
+		var package_follows_player := int(package.get("target_type", -1)) == AI_PACKAGE_TARGET_REFERENCE \
+			and int(package.get("target_form_id", 0)) == PLAYER_REFERENCE_FORM_ID
+		var crossing: Dictionary = actor.get("cross_cell", {})
+		var route_uses_this_door := int(crossing.get("door_form_id", 0)) == door_form_id
+		if not package_follows_player and not route_uses_this_door:
+			continue
+		var reference_id := int(actor.get("reference_id", 0))
+		var placed_reference := _reference_in_cell(source_cell_id, reference_id)
+		if placed_reference.is_empty():
+			continue
+		var moved_reference := placed_reference.duplicate(true)
+		moved_reference["position"] = destination.duplicate()
+		if target_rotation.size() >= 3:
+			moved_reference["rotation"] = target_rotation.duplicate()
+		_relocated_actors[reference_id] = {"cell_form_id": target_cell_id, "reference": moved_reference}
+		print("OpenOB cell crossing: %s follows its %s package through door 0x%08X to cell 0x%08X" % [
+			str(actor.get("reference_name", "NPC")),
+			"player-targeted" if package_follows_player else "cross-cell",
+			door_form_id,
+			target_cell_id,
+		])
+
 ## The first door of the current cell on the way to the cell the destination reference lies in ({} when none leads there).
 func _door_toward_destination_cell(destination_form_id: int) -> Dictionary:
 	var destination_cell := int(data_reader.find_reference_cell(destination_form_id))
@@ -2170,7 +2261,7 @@ func _placed_reference_by_form_id(form_id: int) -> Dictionary:
 	return {}
 
 
-## An active Ambush package aimed at the player starts the eligible NPC greeting at its authored target distance.
+## An active Ambush or Find package aimed at the player starts the eligible NPC greeting at its authored target distance.
 ## Scripted Say/SayTo actions only speak and direct the speaker's gaze; they do not open the dialogue session.
 func _try_npc_initiated_dialogues() -> void:
 	if _world_loading or _inventory_open or _dialogue_active or _dialogue_exit_transition \
@@ -2178,7 +2269,8 @@ func _try_npc_initiated_dialogues() -> void:
 		return
 	for actor: Dictionary in _npc_actors:
 		var package: Dictionary = actor.get("package", {})
-		if package.is_empty() or int(package.get("package_type", -1)) != AI_PACKAGE_TYPE_AMBUSH:
+		var package_type := int(package.get("package_type", -1))
+		if package.is_empty() or package_type not in [AI_PACKAGE_TYPE_AMBUSH, AI_PACKAGE_TYPE_FIND]:
 			continue
 		var package_id := int(package.get("form_id", 0))
 		if package_id <= 0 \
@@ -10338,6 +10430,7 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 	_deferred_world_generation += 1
 	_npc_stream_enabled = false
 	player.set_physics_process(false)
+	_carry_actors_through_player_door(reference, target_id, destination)
 	_clear_cell_actors()
 	player.global_position = destination_position
 	current_cell = target
