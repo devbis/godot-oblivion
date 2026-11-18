@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -73,6 +74,7 @@ struct ItemStats {
     std::int32_t value = 0;
     float weight = 0.0f;
     std::uint16_t armor_rating = 0; // ARMO only, in hundredths
+    bool heavy_armor = false;
     std::uint32_t health = 0;       // ARMO and WEAP condition
 };
 
@@ -245,6 +247,20 @@ struct BirthsignRecord {
     std::uint32_t form_id = 0;
     std::string editor_id;
     std::string name;
+    std::vector<std::uint32_t> spell_form_ids;
+};
+
+struct CharacterClassRecord {
+    std::array<std::uint32_t, 2> favored_attributes{};
+    std::uint32_t specialization = 0;
+    std::array<std::uint32_t, 7> major_skills{};
+    bool playable = false;
+};
+
+struct SkillRecord {
+    std::uint32_t governing_attribute = 0;
+    std::uint32_t specialization = 0;
+    std::array<float, 2> use_values{};
 };
 
 struct NpcBaseRecord {
@@ -257,6 +273,8 @@ struct NpcBaseRecord {
     std::uint16_t base_magicka = 0;
     std::uint16_t base_fatigue = 0;
     std::int16_t level_or_offset = 0;
+    std::uint16_t minimum_level = 0;
+    std::uint16_t maximum_level = 0;
     std::uint32_t base_health = 0;
     std::array<std::uint8_t, 21> skills{};
     std::array<std::uint8_t, 8> attributes{};
@@ -293,6 +311,8 @@ struct CreatureBaseRecord {
     std::uint16_t base_magicka = 0;
     std::uint16_t base_fatigue = 0;
     std::int16_t level_or_offset = 0;
+    std::uint16_t minimum_level = 0;
+    std::uint16_t maximum_level = 0;
     // DATA: 0 animal, 1 creature, 2 daedra, 3 undead, 4 humanoid, 5 horse, 6 giant.
     std::uint8_t creature_type = 0;
     std::uint8_t combat_skill = 0;
@@ -313,6 +333,9 @@ struct CreatureBaseRecord {
 struct RaceFaceGenRecord {
     std::uint32_t form_id = 0;
     std::array<std::int8_t, 21> skill_bonuses{};
+    std::array<std::uint8_t, 8> male_attributes{};
+    std::array<std::uint8_t, 8> female_attributes{};
+    std::vector<std::uint32_t> spell_form_ids;
     float male_height = 1.0f;
     float female_height = 1.0f;
     std::string display_name;
@@ -439,6 +462,9 @@ public:
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
     [[nodiscard]] const std::map<std::uint32_t, BirthsignRecord>& birthsigns() const noexcept { return birthsign_by_id_; }
+    [[nodiscard]] const std::map<std::uint32_t, CharacterClassRecord>& character_classes() const noexcept { return character_class_by_id_; }
+    [[nodiscard]] const std::map<std::uint32_t, SkillRecord>& skills() const noexcept { return skill_by_actor_value_; }
+    [[nodiscard]] bool is_sleep_furniture(std::uint32_t id) const { return sleep_furniture_.contains(id); }
     [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const;
     [[nodiscard]] const EffectShaderRecord* find_effect_shader(std::uint32_t form_id) const;
     [[nodiscard]] const LightData* find_light(std::uint32_t form_id) const;
@@ -508,6 +534,9 @@ private:
     std::map<std::uint32_t, CombatStyleRecord> combat_style_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
     std::map<std::uint32_t, BirthsignRecord> birthsign_by_id_;
+    std::map<std::uint32_t, CharacterClassRecord> character_class_by_id_;
+    std::map<std::uint32_t, SkillRecord> skill_by_actor_value_;
+    std::set<std::uint32_t> sleep_furniture_;
     std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
     std::map<std::uint32_t, ContainerRecord> container_by_id_;
     std::map<std::uint32_t, LeveledListRecord> leveled_list_by_id_;

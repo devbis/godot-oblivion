@@ -487,6 +487,8 @@ public:
         result["base_magicka"] = creature->base_magicka;
         result["base_fatigue"] = creature->base_fatigue;
         result["level_or_offset"] = creature->level_or_offset;
+        result["minimum_level"] = creature->minimum_level;
+        result["maximum_level"] = creature->maximum_level;
         result["creature_type"] = creature->creature_type;
         result["combat_skill"] = creature->combat_skill;
         result["base_health"] = creature->base_health;
@@ -508,6 +510,9 @@ public:
         PackedInt64Array ai_packages;
         for (const auto package_id : creature->ai_package_form_ids) ai_packages.push_back(static_cast<int64_t>(package_id));
         result["ai_package_form_ids"] = ai_packages;
+        PackedInt64Array spell_ids;
+        for (const auto id : creature->spell_form_ids) spell_ids.push_back(id);
+        result["spell_form_ids"] = spell_ids;
         Array inventory;
         for (const auto& item : creature->inventory) {
             Dictionary entry;
@@ -537,6 +542,8 @@ public:
         result["base_magicka"] = npc->base_magicka;
         result["base_fatigue"] = npc->base_fatigue;
         result["level_or_offset"] = npc->level_or_offset;
+        result["minimum_level"] = npc->minimum_level;
+        result["maximum_level"] = npc->maximum_level;
         result["base_health"] = npc->base_health;
         result["has_actor_values"] = npc->has_actor_values;
         result["aggression"] = npc->aggression;
@@ -562,6 +569,15 @@ public:
         }
         result["racial_skill_bonuses"] = racial_skill_bonuses;
         const bool female = (npc->flags & 0x000001) != 0;
+        PackedInt64Array racial_attributes;
+        PackedInt64Array racial_spell_ids;
+        if (race) {
+            for (const auto value : female ? race->female_attributes : race->male_attributes)
+                racial_attributes.push_back(value);
+            for (const auto id : race->spell_form_ids) racial_spell_ids.push_back(id);
+        }
+        result["racial_attributes"] = racial_attributes;
+        result["racial_spell_form_ids"] = racial_spell_ids;
         result["female"] = female;
         result["race_form_id"] = static_cast<int64_t>(npc->race_form_id);
         result["race_height_scale"] = race ? (female ? race->female_height : race->male_height) : 1.0f;
@@ -863,6 +879,7 @@ public:
         result["value"] = stats->value;
         result["weight"] = stats->weight;
         result["armor_rating"] = static_cast<int64_t>(stats->armor_rating);
+        result["heavy_armor"] = stats->heavy_armor;
         result["health"] = static_cast<int64_t>(stats->health);
         return result;
     }
@@ -1039,9 +1056,64 @@ public:
             item["form_id"] = static_cast<int64_t>(form_id);
             item["editor_id"] = as_string(birthsign.editor_id);
             item["name"] = as_string(birthsign.name);
+            PackedInt64Array spells;
+            for (const auto id : birthsign.spell_form_ids) spells.push_back(id);
+            item["spell_form_ids"] = spells;
             result.push_back(item);
         }
         return result;
+    }
+
+    Dictionary get_character_class(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto id = form_id_arg(form_id);
+        const auto& classes = data_->character_classes();
+        const auto found = classes.find(id);
+        if (found == classes.end()) return {};
+        const auto& character_class = found->second;
+        Dictionary result;
+        if (const auto* name = data_->find_record_display_name(id)) result["name"] = as_string(*name);
+        result["specialization"] = character_class.specialization;
+        PackedInt64Array favored_attributes;
+        for (const auto index : character_class.favored_attributes) favored_attributes.push_back(index);
+        result["favored_attributes"] = favored_attributes;
+        PackedInt64Array major_skills;
+        for (const auto actor_value : character_class.major_skills) {
+            if (actor_value >= 12 && actor_value <= 32) major_skills.push_back(actor_value - 12);
+        }
+        result["major_skills"] = major_skills;
+        return result;
+    }
+
+    Dictionary get_character_skills() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        Dictionary result;
+        if (!data_) return result;
+        for (const auto& [actor_value, record] : data_->skills()) {
+            Dictionary skill;
+            skill["attribute"] = record.governing_attribute;
+            skill["specialization"] = record.specialization;
+            skill["use_primary"] = record.use_values[0];
+            skill["use_secondary"] = record.use_values[1];
+            result[static_cast<int64_t>(actor_value - 12)] = skill;
+        }
+        return result;
+    }
+
+    PackedInt64Array list_playable_classes() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        PackedInt64Array result;
+        if (!data_) return result;
+        for (const auto& [id, record] : data_->character_classes()) {
+            if (record.playable) result.push_back(id);
+        }
+        return result;
+    }
+
+    bool is_sleep_furniture(int64_t form_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return data_ && data_->is_sleep_furniture(form_id_arg(form_id));
     }
 
     String find_record_icon_path(int64_t form_id) const {
@@ -1474,6 +1546,10 @@ protected:
         ClassDB::bind_method(D_METHOD("find_record_type", "form_id"), &OblivionData::find_record_type);
         ClassDB::bind_method(D_METHOD("find_record_display_name", "form_id"), &OblivionData::find_record_display_name);
         ClassDB::bind_method(D_METHOD("list_birthsigns"), &OblivionData::list_birthsigns);
+        ClassDB::bind_method(D_METHOD("get_character_class", "form_id"), &OblivionData::get_character_class);
+        ClassDB::bind_method(D_METHOD("get_character_skills"), &OblivionData::get_character_skills);
+        ClassDB::bind_method(D_METHOD("list_playable_classes"), &OblivionData::list_playable_classes);
+        ClassDB::bind_method(D_METHOD("is_sleep_furniture", "form_id"), &OblivionData::is_sleep_furniture);
         ClassDB::bind_method(D_METHOD("find_record_icon_path", "form_id"), &OblivionData::find_record_icon_path);
         ClassDB::bind_method(D_METHOD("list_assets", "prefix"), &OblivionData::list_assets);
         ClassDB::bind_method(D_METHOD("read_asset", "asset_path"), &OblivionData::read_asset);
@@ -1649,7 +1725,8 @@ public:
                                    -> std::optional<oblivion::ScriptValue> {
                 const auto lowered_command = lower_ascii(command);
                 if (lowered_command == "getopenstate" || lowered_command == "getdetected"
-                    || lowered_command == "getincell" || lowered_command == "getcurrenttime") {
+                    || lowered_command == "getincell" || lowered_command == "getcurrenttime"
+                    || lowered_command == "getlevel" || lowered_command == "getav" || lowered_command == "getbaseav") {
                     Array godot_arguments;
                     for (const auto& argument : arguments) {
                         godot_arguments.push_back(argument.is_text ? Variant(utf8_text(argument.text))
@@ -1875,6 +1952,14 @@ public:
             && read_pair(magicka, "max", snapshot.base_magicka)
             && read_pair(fatigue, "current", snapshot.fatigue)
             && read_pair(fatigue, "max", snapshot.base_fatigue);
+        snapshot.level = static_cast<int>(values.get("level", 1));
+        const auto read_values = [](const Dictionary& source, std::map<std::string, double>& destination) {
+            const Array keys = source.keys();
+            for (int64_t i = 0; i < keys.size(); ++i)
+                destination.emplace(utf8_value(String(keys[i])), static_cast<double>(source.get(keys[i], 0.0)));
+        };
+        read_values(values.get("current_values", Dictionary()), snapshot.current_values);
+        read_values(values.get("base_values", Dictionary()), snapshot.base_values);
         world_->set_answer([snapshot](std::string_view command, const oblivion::ScriptValue* target,
                                       const std::vector<oblivion::ScriptValue>& arguments) {
             return oblivion::answer_player_actor_values(command, target, arguments, snapshot);

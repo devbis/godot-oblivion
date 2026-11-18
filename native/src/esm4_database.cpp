@@ -146,6 +146,7 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
         std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"), std::string_view("CREA"),
         std::string_view("RACE"), std::string_view("BSGN"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
+        std::string_view("CLAS"), std::string_view("SKIL"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
         std::string_view("WRLD"), std::string_view("CLMT"), std::string_view("WTHR"), std::string_view("REGN"),
         std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
@@ -179,6 +180,9 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     combat_style_by_id_.clear();
     spell_by_id_.clear();
     birthsign_by_id_.clear();
+    character_class_by_id_.clear();
+    skill_by_actor_value_.clear();
+    sleep_furniture_.clear();
     weapon_by_id_.clear();
     container_by_id_.clear();
     leveled_list_by_id_.clear();
@@ -718,6 +722,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
     bool is_birthsign = type == "BSGN";
+    const bool is_character_class = type == "CLAS";
+    const bool is_skill = type == "SKIL";
+    BirthsignRecord birthsign;
     bool is_magic_effect = type == "MGEF";
     bool is_effect_shader = type == "EFSH";
     bool is_outfit = type == "OTFT";
@@ -833,7 +840,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_birthsign || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item || is_global || is_climate || is_weather)
+            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_birthsign || is_character_class || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item || is_global || is_climate || is_weather)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -851,7 +858,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_race) {
             race_face_gen.display_name = lower_ascii(read_zstring(value, subrecord_size));
             record_display_name_by_id_[form_id] = race_face_gen.display_name;
-        } else if (tag == "FULL" && is_birthsign) {
+        } else if (tag == "FULL" && (is_birthsign || is_character_class || type == "FURN")) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
         } else if (tag == "FULL" && is_creature) {
@@ -860,6 +867,26 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && (is_item_model || is_spell || is_container)) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
+        } else if (tag == "DATA" && is_character_class && subrecord_size >= 40) {
+            auto& character_class = character_class_by_id_[form_id];
+            character_class.favored_attributes = {u32(value), u32(value + 4)};
+            character_class.specialization = u32(value + 8);
+            for (std::size_t i = 0; i < character_class.major_skills.size(); ++i)
+                character_class.major_skills[i] = u32(value + 12 + i * 4);
+            character_class.playable = subrecord_size >= 44 && (u32(value + 40) & 1u) != 0;
+        } else if (tag == "DATA" && is_skill && subrecord_size >= 20) {
+            const auto actor_value = u32(value);
+            if (actor_value >= 12 && actor_value <= 32)
+                skill_by_actor_value_[actor_value] = {u32(value + 4), u32(value + 8), {f32(value + 12), f32(value + 16)}};
+        } else if (tag == "SPLO" && is_birthsign && subrecord_size >= 4) {
+            birthsign.spell_form_ids.push_back(u32(value));
+        } else if (tag == "SPLO" && is_race && subrecord_size >= 4) {
+            race_face_gen.spell_form_ids.push_back(u32(value));
+        } else if (tag == "ATTR" && is_race && subrecord_size >= 16) {
+            std::copy_n(value, 8, race_face_gen.male_attributes.begin());
+            std::copy_n(value + 8, 8, race_face_gen.female_attributes.begin());
+        } else if (tag == "MNAM" && type == "FURN" && subrecord_size >= 4) {
+            if ((u32(value) & 0x80000000u) != 0) sleep_furniture_.insert(form_id);
         } else if (tag == "DATA" && is_cell && subrecord_size >= 1) {
             const std::uint16_t cell_flags = subrecord_size >= 2 ? u16(value) : value[0];
             cell.interior = (cell_flags & 0x0001) != 0;
@@ -1096,6 +1123,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             if (subrecord_size >= 6) creature.base_magicka = u16(value + 4);
             if (subrecord_size >= 8) creature.base_fatigue = u16(value + 6);
             if (subrecord_size >= 12) creature.level_or_offset = static_cast<std::int16_t>(u16(value + 10));
+            if (subrecord_size >= 14) creature.minimum_level = u16(value + 12);
+            if (subrecord_size >= 16) creature.maximum_level = u16(value + 14);
         } else if (tag == "DATA" && is_creature && subrecord_size >= 16) {
             creature.creature_type = value[0];
             creature.combat_skill = value[1];
@@ -1195,6 +1224,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             item_stats_by_id_[form_id].value = static_cast<std::int32_t>(u32(value));
         } else if (tag == "BMDT" && (type == "ARMO" || type == "CLOT") && subrecord_size >= 2) {
             item_biped_slots_by_id_[form_id] = u16(value);
+            if (type == "ARMO" && subrecord_size >= 4)
+                item_stats_by_id_[form_id].heavy_armor = (u32(value) & 0x00800000u) != 0;
         } else if (tag == "INAM" && is_outfit && subrecord_size >= 4) {
             outfit.item_form_ids.push_back(u32(value));
         } else if (tag == "SCRI" && is_npc_base && subrecord_size >= 4) {
@@ -1210,6 +1241,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 npc.base_fatigue = u16(value + 6);
                 npc.level_or_offset = static_cast<std::int16_t>(u16(value + 10));
             }
+            if (subrecord_size >= 14) npc.minimum_level = u16(value + 12);
+            if (subrecord_size >= 16) npc.maximum_level = u16(value + 14);
         } else if (tag == "RNAM" && is_npc_base && subrecord_size >= 4) {
             npc.race_form_id = u32(value);
         } else if (tag == "ZNAM" && is_npc_base && subrecord_size >= 4) {
@@ -1564,7 +1597,6 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     if (is_spell)
         spell_by_id_[form_id] = std::move(spell);
     if (is_birthsign) {
-        BirthsignRecord birthsign;
         birthsign.form_id = form_id;
         birthsign.editor_id = base_editor_id;
         if (const auto name = record_display_name_by_id_.find(form_id); name != record_display_name_by_id_.end())

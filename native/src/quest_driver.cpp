@@ -1188,14 +1188,20 @@ void QuestWorld::begin(std::string_view editor_id, QuestTick& tick, const Distan
 std::optional<ScriptValue> answer_player_actor_values(std::string_view command, const ScriptValue* target,
                                                       const std::vector<ScriptValue>& arguments,
                                                       const PlayerActorValueSnapshot& values) {
-    if ((command != "getav" && command != "getbaseav") || !target || !target->is_text || lower(target->text) != "player")
+    if (!values.available || !target || !target->is_text || lower(target->text) != "player")
         return std::nullopt;
-    if (!values.available || arguments.empty() || !arguments[0].is_text) return std::nullopt;
-    const auto value = lower(arguments[0].text);
+    if (command == "getlevel") return ScriptValue::from_number(values.level);
+    if ((command != "getav" && command != "getbaseav") || arguments.empty() || !arguments[0].is_text)
+        return std::nullopt;
+    auto value = lower(arguments[0].text);
+    std::erase(value, ' ');
     const bool base = command == "getbaseav";
     if (value == "health") return ScriptValue::from_number(base ? values.base_health : values.health);
     if (value == "magicka") return ScriptValue::from_number(base ? values.base_magicka : values.magicka);
     if (value == "fatigue") return ScriptValue::from_number(base ? values.base_fatigue : values.fatigue);
+    const auto& skills_and_attributes = base ? values.base_values : values.current_values;
+    if (const auto found = skills_and_attributes.find(value); found != skills_and_attributes.end())
+        return ScriptValue::from_number(found->second);
     return std::nullopt;
 }
 

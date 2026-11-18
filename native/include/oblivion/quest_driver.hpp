@@ -161,6 +161,9 @@ struct PlayerActorValueSnapshot {
     double base_magicka = 0.0;
     double fatigue = 0.0;
     double base_fatigue = 0.0;
+    int level = 1;
+    std::map<std::string, double> current_values;
+    std::map<std::string, double> base_values;
 };
 
 std::optional<ScriptValue> answer_player_actor_values(std::string_view command, const ScriptValue* target,

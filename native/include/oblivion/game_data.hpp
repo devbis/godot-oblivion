@@ -32,6 +32,11 @@ public:
     [[nodiscard]] const std::map<std::uint32_t, BirthsignRecord>& birthsigns() const noexcept {
         return esm_.birthsigns();
     }
+    [[nodiscard]] const std::map<std::uint32_t, CharacterClassRecord>& character_classes() const noexcept {
+        return esm_.character_classes();
+    }
+    [[nodiscard]] const std::map<std::uint32_t, SkillRecord>& skills() const noexcept { return esm_.skills(); }
+    [[nodiscard]] bool is_sleep_furniture(std::uint32_t id) const { return esm_.is_sleep_furniture(id); }
     [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const {
         return esm_.find_magic_effect(effect_code);
     }
