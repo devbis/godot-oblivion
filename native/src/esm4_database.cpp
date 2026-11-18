@@ -224,17 +224,22 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     for (std::size_t index = 0; index < cells_.size(); ++index)
         if (!cells_[index].editor_id.empty())
             cell_by_editor_id_.try_emplace(lower_ascii(cells_[index].editor_id), index);
+    const auto texture_path_for = [this](std::uint32_t id) -> std::string {
+        const auto texture = land_texture_path_by_id_.find(id);
+        if (texture == land_texture_path_by_id_.end()) return {};
+        auto path = texture->second;
+        std::replace(path.begin(), path.end(), '\\', '/');
+        return path.find('/') == std::string::npos ? "textures/landscape/" + path : path;
+    };
     for (auto& cell : cells_) {
         if (const auto water = worldspace_water_level_by_id_.find(cell.worldspace_form_id);
             water != worldspace_water_level_by_id_.end()) {
             cell.has_worldspace_water_level = true;
             cell.worldspace_water_height = water->second;
         }
-        if (const auto texture = land_texture_path_by_id_.find(cell.land_texture_form_id);
-            texture != land_texture_path_by_id_.end())
-            cell.land_texture_path = texture->second.find('/') == std::string::npos
-                ? "textures/landscape/" + texture->second : texture->second;
+        cell.land_texture_path = texture_path_for(cell.land_texture_form_id);
         for (auto& layer : cell.land_texture_layers) {
+            layer.texture_path = texture_path_for(layer.texture_form_id);
             if (const auto material = land_texture_material_by_id_.find(layer.texture_form_id);
                 material != land_texture_material_by_id_.end())
                 layer.havok_material = material->second;
@@ -979,7 +984,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             for (std::size_t offset = 0; offset < subrecord_size; offset += 8) {
                 const auto position = u16(value + offset);
                 if (position >= layer.alpha.size()) continue;
-                layer.alpha[position] = std::clamp(f32(value + offset + 4), 0.0f, 1.0f);
+                // Oblivion.exe also accepts VTXT weights stored as percentages.
+                const auto weight = f32(value + offset + 4);
+                layer.alpha[position] = std::clamp(weight > 1.0f ? weight / 100.0f : weight, 0.0f, 1.0f);
             }
             active_land_alpha_layer.reset();
         } else if (tag == "MODL" && (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || is_container)) {

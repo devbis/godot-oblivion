@@ -99,6 +99,7 @@ struct LandTextureLayer {
     bool alpha_layer = false;
     std::vector<float> alpha;
     std::int32_t havok_material = -1;
+    std::string texture_path;
 };
 
 // LVLI: items chosen by the level of the looter.

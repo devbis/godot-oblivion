@@ -59,6 +59,7 @@ Array land_texture_layers_to_array(const std::vector<oblivion::LandTextureLayer>
     for (const auto& layer : layers) {
         Dictionary item;
         item["texture_form_id"] = static_cast<int64_t>(layer.texture_form_id);
+        item["texture_path"] = String::utf8(layer.texture_path.c_str());
         item["quadrant"] = layer.quadrant;
         item["layer"] = layer.layer;
         item["alpha_layer"] = layer.alpha_layer;

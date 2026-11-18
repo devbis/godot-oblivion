@@ -16,6 +16,7 @@ const DerivedResourceCache := preload("res://scripts/derived_resource_cache.gd")
 const ActorFactory := preload("res://scripts/actor_factory.gd")
 const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
 const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
+const ExteriorLandMaterials := preload("res://scripts/exterior_land_materials.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
@@ -308,6 +309,8 @@ var _cell_material: StandardMaterial3D
 var _interior_environment: Environment
 var _exterior_environment: Environment
 var _land_mesh_cache: Dictionary = {}
+var _land_materials := ExteriorLandMaterials.new()
+var _land_region: Dictionary = {}
 var _land_collision_cache: Dictionary = {}
 var _tree_mesh_cache: Dictionary = {}
 var _tree_material_cache: Dictionary = {}
@@ -2590,6 +2593,16 @@ func _load_cell_geometry(
 	var terrain_cells: Array = cell.get("land_cells", [])
 	if terrain_cells.is_empty() and cell.has("land"):
 		terrain_cells.push_back(cell.get("land"))
+	var worldspace := int(cell.get("worldspace_form_id", 0))
+	if is_exterior and clear_existing and not terrain_cells.is_empty():
+		var region := await _land_materials.prepare_region(
+			terrain_cells, assets,
+			func() -> bool: return generation == _cell_load_generation,
+			get_tree()
+		)
+		if generation != _cell_load_generation:
+			return false
+		_land_region = region
 	for land_value: Variant in terrain_cells:
 		if is_exterior and Time.get_ticks_usec() - load_slice_started >= EXTERIOR_LOAD_SLICE_USEC:
 			await get_tree().process_frame
@@ -2607,7 +2620,7 @@ func _load_cell_geometry(
 			continue
 		var batch_far_terrain := is_exterior and min_distance > 0.0
 		var land_result: Dictionary = await _add_land_cell(
-			land, generation, exterior_terrain_batches, batch_far_terrain
+			land, worldspace, generation, exterior_terrain_batches, batch_far_terrain
 		)
 		if bool(land_result.get("rendered", false)) and not bool(land_result.get("batched", false)):
 			instance_count += 1
@@ -3038,6 +3051,7 @@ func _begin_exterior_terrain_load(is_exterior: bool, keep_previous: bool) -> voi
 
 func _add_land_cell(
 	land: Dictionary,
+	worldspace: int,
 	generation: int,
 	terrain_batches: Dictionary,
 	batch_far_terrain: bool
@@ -3062,15 +3076,29 @@ func _add_land_cell(
 		_land_mesh_cache[mesh_key] = mesh
 	var texture_path := str(land.get("texture_path", ""))
 	if texture_path.is_empty():
-		texture_path = "textures/landscape/terrainhddirt01.dds"
+		texture_path = ExteriorLandMaterials.DEFAULT_TEXTURE
+	var cell_size := EXTERIOR_CELL_SIZE * game_units_to_meters
+	var material: Material
+	var batch_texture := texture_path
+	if is_instance_valid(_exterior_terrain_root):
+		var lod_path := _land_materials.lod_path(land, worldspace, assets)
+		material = await _land_materials.region_material(land, lod_path, cell_size, assets, _land_region)
+		if generation != _cell_load_generation:
+			return {}
+		if material != null:
+			batch_texture = lod_path
+	if material == null:
+		material = await assets.material_for_texture(texture_path)
+		if generation != _cell_load_generation:
+			return {}
 	if batch_far_terrain:
 		var batch_grid_x := floori(float(grid_x) / float(EXTERIOR_TERRAIN_BATCH_CELLS)) * EXTERIOR_TERRAIN_BATCH_CELLS
 		var batch_grid_y := floori(float(grid_y) / float(EXTERIOR_TERRAIN_BATCH_CELLS)) * EXTERIOR_TERRAIN_BATCH_CELLS
-		var batch_key := "%s|%d,%d" % [texture_path.to_lower(), batch_grid_x, batch_grid_y]
+		var batch_key := "%s|%d,%d" % [batch_texture.to_lower(), batch_grid_x, batch_grid_y]
 		var terrain_batch: Dictionary = terrain_batches.get(batch_key, {})
 		if terrain_batch.is_empty():
 			terrain_batch = {
-				"texture_path": texture_path,
+				"material": material,
 				"grid_x": batch_grid_x,
 				"grid_y": batch_grid_y,
 				"tiles": [],
@@ -3092,9 +3120,7 @@ func _add_land_cell(
 	var instance := MeshInstance3D.new()
 	instance.name = "Terrain_%d_%d" % [grid_x, grid_y]
 	instance.mesh = mesh
-	instance.material_override = await assets.material_for_texture(texture_path)
-	if generation >= 0 and generation != _cell_load_generation:
-		return {}
+	instance.material_override = material
 	instance.scale = Vector3.ONE * game_units_to_meters
 	instance.position = position
 	var terrain_root := _exterior_terrain_root if is_instance_valid(_exterior_terrain_root) else cell_visual_root
@@ -3132,14 +3158,10 @@ func _instantiate_exterior_terrain_batches(terrain_batches: Dictionary, generati
 		var combined_mesh := surface.commit() as ArrayMesh
 		if combined_mesh == null:
 			continue
-		var texture_path := str(batch.get("texture_path", ""))
-		var material := await assets.material_for_texture(texture_path)
-		if generation != _cell_load_generation:
-			return instance_count
 		var instance := MeshInstance3D.new()
 		instance.name = "TerrainBatch_%d_%d" % [int(batch.get("grid_x", 0)), int(batch.get("grid_y", 0))]
 		instance.mesh = combined_mesh
-		instance.material_override = material
+		instance.material_override = batch.material
 		instance.scale = Vector3.ONE * game_units_to_meters
 		instance.position = Vector3(
 			float(batch.get("grid_x", 0)) * EXTERIOR_CELL_SIZE,
@@ -3258,7 +3280,7 @@ func _build_land_mesh(heights: PackedFloat32Array, step := 1) -> ArrayMesh:
 			var bottom_right := _land_mesh_index(corners[2], heights, vertices, uvs, vertex_indices)
 			var bottom_left := _land_mesh_index(corners[3], heights, vertices, uvs, vertex_indices)
 			if step == 1 or (x > 0 and y > 0 and x + step < 32 and y + step < 32):
-				indices.append_array([top_left, top_right, bottom_left, top_right, bottom_right, bottom_left])
+				indices.append_array([top_left, bottom_left, top_right, top_right, bottom_left, bottom_right])
 				continue
 			# Keep all original height samples along cell borders so neighboring LODs meet.
 			var ring: Array[int] = []
@@ -3276,7 +3298,7 @@ func _build_land_mesh(heights: PackedFloat32Array, step := 1) -> ArrayMesh:
 			var half_step := step >> 1
 			var center := _land_mesh_index(Vector2i(x + half_step, y + half_step), heights, vertices, uvs, vertex_indices)
 			for side in range(ring.size()):
-				indices.append_array([center, ring[side], ring[(side + 1) % ring.size()]])
+				indices.append_array([center, ring[(side + 1) % ring.size()], ring[side]])
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
