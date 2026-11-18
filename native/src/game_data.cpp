@@ -127,10 +127,13 @@ void GameData::open(const std::filesystem::path& data_directory, LoadProfile pro
     const auto discovered_archive_count = bsa_paths.size();
     if (visual_runtime) {
         // Runtime audio and dialogue are streamed from the original archives alongside visual assets.
-        constexpr std::array<std::string_view, 3> visual_archives = {
+        // Some Oblivion.esm models reference assets shipped in the expansion archives.
+        constexpr std::array<std::string_view, 5> visual_archives = {
             "oblivion - meshes.bsa",
             "oblivion - textures - compressed.bsa",
             "oblivion - misc.bsa",
+            "dlcshiveringisles - meshes.bsa",
+            "dlcshiveringisles - textures.bsa",
         };
         std::erase_if(bsa_paths, [&visual_archives](const auto& path) {
             const auto filename = lower_ascii(path.filename().string());

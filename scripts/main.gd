@@ -285,6 +285,7 @@ var _reported_bridge_lines: Dictionary = {}
 var cell_visual_root: Node3D
 var _outgoing_cell_visual_root: Node3D
 var _flickering_lights: Array[OmniLight3D] = []
+var _upright_fire_sprite_meshes: Dictionary = {}
 var _nif_flipbook_instances: Array[Dictionary] = []
 var _nif_flipbook_texture_cache: Dictionary = {}
 var _cell_load_generation := 0
@@ -2643,6 +2644,7 @@ func _load_cell_geometry(
 		instance_count += terrain_batch_instances
 	if clear_existing and _add_water_region(cell.get("water_cells", [])):
 		instance_count += 1
+	var authored_light_positions := _authored_light_positions(cell)
 	load_slice_started = Time.get_ticks_usec()
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
@@ -2674,12 +2676,7 @@ func _load_cell_geometry(
 			var light_editor_id := str(reference.get("base_editor_id", "")).to_lower()
 			var uses_fire_flicker := (light_flags & 0x48) != 0
 			if uses_fire_flicker:
-				light.light_energy = 1.0
-				light.set_meta("flicker_base_energy", light.light_energy)
-				light.set_meta("flicker_base_range", light.omni_range)
-				light.set_meta("flicker_phase", randf_range(0.0, TAU))
-				light.set_meta("flicker_rate", 3.2 if (light_flags & 0x40) != 0 else 7.0)
-				_flickering_lights.push_back(light)
+				_register_flickering_light(light, 3.2 if (light_flags & 0x40) != 0 else 7.0)
 			if not is_exterior and light_editor_id.begins_with("dodaylight"):
 				await _add_window_light_beam(reference, reference_transform, generation)
 				if generation != _cell_load_generation:
@@ -2755,7 +2752,12 @@ func _load_cell_geometry(
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
 		_add_nif_particles(physics_metadata, reference_transform, model_path)
-		if not await _add_nif_attached_effects(physics_metadata, reference_transform, model_path, generation):
+		if not _actor_reference_disabled(reference):
+			_add_local_fire_light(physics_metadata, reference_transform, authored_light_positions)
+		if not await _add_nif_attached_effects(
+			physics_metadata, reference_transform, model_path, generation, authored_light_positions,
+			not _actor_reference_disabled(reference)
+		):
 			return false
 		var animation_sequences: Array = physics_metadata.get("animations", [])
 		var has_nif_animations := not animation_sequences.is_empty()
@@ -9519,7 +9521,9 @@ func _add_nif_attached_effects(
 	host_metadata: Dictionary,
 	reference_transform: Transform3D,
 	host_model_path: String,
-	generation: int
+	generation: int,
+	authored_light_positions: PackedVector3Array,
+	is_enabled: bool
 ) -> bool:
 	var host_model_key := host_model_path.strip_edges().to_lower().replace("\\", "/")
 	for node_value: Variant in host_metadata.get("nodes", []):
@@ -9578,7 +9582,60 @@ func _add_nif_attached_effects(
 			if not await _install_nif_texture_flipbook(instance, mesh_entry, effect_metadata, generation):
 				return false
 		_add_nif_particles(effect_metadata, reference_transform * socket_transform, effect_model_path)
+		if is_enabled:
+			_add_local_fire_light(effect_metadata, reference_transform * socket_transform, authored_light_positions)
 	return true
+
+func _authored_light_positions(cell: Dictionary) -> PackedVector3Array:
+	var positions := PackedVector3Array()
+	for reference: Dictionary in cell.get("references", []):
+		if float(reference.get("light_radius", 0.0)) > 0.0 \
+				and (int(reference.get("light_flags", 0)) & 0x24) == 0 and not _actor_reference_disabled(reference):
+			positions.push_back(_reference_origin(reference))
+	return positions
+
+func _add_local_fire_light(metadata: Dictionary, transform: Transform3D, authored_lights: PackedVector3Array) -> void:
+	if not _has_fire_particle_emitters(metadata):
+		return
+	for node: Dictionary in metadata.get("nodes", []):
+		if str(node.get("name", "")).to_lower() != "attachlight":
+			continue
+		var offset: Vector3 = node.get("global_translation", Vector3.ZERO)
+		var position := transform * offset
+		for authored_position: Vector3 in authored_lights:
+			if authored_position.distance_squared_to(position) < 6.25:
+				return
+		var light := OmniLight3D.new()
+		light.name = "FireLight"
+		light.position = position
+		light.light_color = Color(1.0, 0.57, 0.28)
+		for emitter: Dictionary in metadata.get("particle_emitters", []):
+			if str(emitter.get("texture_path", "")).to_lower().contains("whiteflame"):
+				light.light_color = Color(0.82, 0.91, 1.0)
+				break
+		light.omni_range = clampf(transform.basis.get_scale().x / game_units_to_meters * 4.0, 1.0, 10.0)
+		light.light_energy = 1.65
+		cell_visual_root.add_child(light)
+		_register_flickering_light(light, 7.0)
+		return
+
+func _upright_fire_sprite(mesh: ArrayMesh) -> ArrayMesh:
+	if _upright_fire_sprite_meshes.has(mesh):
+		return _upright_fire_sprite_meshes[mesh]
+	var size := mesh.get_aabb().size
+	if size.y >= size.z * 0.1:
+		return mesh
+	# In these NIFs the billboard's rest plane is XZ. Godot billboards face
+	# along local Z, so convert the vertices to XY around the authored pivot.
+	var upright := ArrayMesh.new()
+	var rotation := Transform3D(Basis(Vector3.RIGHT, PI * 0.5), Vector3.ZERO)
+	for index in range(mesh.get_surface_count()):
+		var surface := SurfaceTool.new()
+		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+		surface.append_from(mesh, index, rotation)
+		surface.commit(upright)
+	_upright_fire_sprite_meshes[mesh] = upright
+	return upright
 
 func _has_fire_particle_emitters(metadata: Dictionary) -> bool:
 	for emitter_value: Variant in metadata.get("particle_emitters", []):
@@ -9647,12 +9704,10 @@ func _install_nif_texture_flipbook(
 	material.albedo_texture = frames[0] as Texture2D
 	var fire_lod_sprite := _has_fire_particle_emitters(metadata)
 	if fire_lod_sprite:
-		material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		instance.mesh = _upright_fire_sprite(instance.mesh as ArrayMesh)
+		material.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
 		material.billboard_keep_scale = true
-		material.emission_enabled = true
-		material.emission = Color.WHITE
-		material.emission_texture = frames[0] as Texture2D
-		material.emission_energy_multiplier = 1.5
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		instance.visibility_range_begin = FIRE_VISUAL_LOD_DISTANCE
 		instance.visibility_range_begin_margin = FIRE_VISUAL_LOD_FADE
 		instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
@@ -9670,7 +9725,6 @@ func _install_nif_texture_flipbook(
 		"flags": int(flipbook.get("flags", 0)),
 		"elapsed": 0.0,
 		"frame_index": 0,
-		"fire_lod": fire_lod_sprite,
 	})
 	return true
 
@@ -9713,8 +9767,6 @@ func _update_nif_flipbooks(delta: float) -> void:
 		animation["frame_index"] = frame_index
 		var texture := frames[frame_index] as Texture2D
 		material.albedo_texture = texture
-		if bool(animation.get("fire_lod", false)):
-			material.emission_texture = texture
 
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
@@ -10578,6 +10630,13 @@ func _sample_quaternion_keys(keys: PackedFloat32Array, time: float) -> Quaternio
 
 func _sample_scalar_keys(keys: PackedFloat32Array, time: float) -> float:
 	return AnimationSampling.scalar(keys, time)
+
+func _register_flickering_light(light: OmniLight3D, rate: float) -> void:
+	light.set_meta("flicker_base_energy", light.light_energy)
+	light.set_meta("flicker_base_range", light.omni_range)
+	light.set_meta("flicker_phase", randf_range(0.0, TAU))
+	light.set_meta("flicker_rate", rate)
+	_flickering_lights.push_back(light)
 
 func _update_flickering_lights(delta: float) -> void:
 	for index in range(_flickering_lights.size() - 1, -1, -1):
