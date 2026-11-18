@@ -6598,9 +6598,13 @@ func _set_effect_shader_alpha(value: float, material: ShaderMaterial, parameter:
 func _restore_effect_shader_overlays(overlays: Array, effect_material: Material) -> void:
 	for overlay_value: Variant in overlays:
 		var entry: Dictionary = overlay_value
-		var mesh := entry.get("mesh") as MeshInstance3D
-		if is_instance_valid(mesh) and mesh.material_overlay == effect_material:
-			mesh.material_overlay = entry.get("previous") as Material
+		var mesh_value: Variant = entry.get("mesh")
+		if not is_instance_valid(mesh_value):
+			continue
+		var mesh := mesh_value as MeshInstance3D
+		if mesh != null and mesh.material_overlay == effect_material:
+			var previous_value: Variant = entry.get("previous")
+			mesh.material_overlay = previous_value as Material if is_instance_valid(previous_value) else null
 
 func _bound_effect_shader_duration(shader: Dictionary) -> float:
 	return maxf(
