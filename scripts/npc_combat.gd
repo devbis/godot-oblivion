@@ -722,8 +722,9 @@ func kill_actor(actor: Dictionary, run_death_events := true) -> void:
 	actor.erase("combat_anim")
 	_forced.erase(reference_id)
 	_provoked.erase(reference_id)
-	_set_weapon_drawn(actor, false)
 	host.call("deactivate_npc_bound_equipment", reference_id)
+	host.call("_drop_npc_weapon_on_death", actor)
+	_set_weapon_drawn(actor, false)
 	_begin_knockdown(actor)
 	ActorRagdoll.start(actor, host.get("player") as PhysicsBody3D)
 	if is_instance_valid(root):

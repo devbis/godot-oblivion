@@ -75,10 +75,9 @@ func assemble_npc_model(
 			covered_body_slots |= equipment_slots
 			covered_head_slots |= equipment_slots & 0x0003
 	var face_meshes: Array[MeshInstance3D] = []
+	var body_parts: Array[Dictionary] = []
 	for body_part: Dictionary in _npc_body_part_entries(npc, is_female):
-		if (int(body_part.get("biped_slot", 0)) & covered_body_slots) != 0:
-			continue
-		await add_actor_model(
+		var body_meshes := await add_actor_model(
 			avatar,
 			skeleton,
 			str(body_part.get("model_path", "")),
@@ -92,6 +91,10 @@ func assemble_npc_model(
 		)
 		if not is_current.call():
 			return {}
+		var body_slots := int(body_part.get("biped_slot", 0))
+		for body_mesh: MeshInstance3D in body_meshes:
+			body_mesh.visible = (body_slots & covered_body_slots) == 0
+		body_parts.push_back({"slots": body_slots, "meshes": body_meshes})
 	var head_meshes: Array[MeshInstance3D] = await add_actor_model(
 		avatar,
 		skeleton,
@@ -136,19 +139,20 @@ func assemble_npc_model(
 		for face_mesh: MeshInstance3D in face_meshes:
 			face_mesh.visible = false
 	var hair_meshes: Array[MeshInstance3D] = []
-	if (covered_head_slots & (BIPED_SLOT_HEAD | BIPED_SLOT_HAIR)) == 0:
-		var hair_form_id := int(npc.get("hair_form_id", 0))
-		var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
-		if hair_path.is_empty():
-			hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
-		var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
-		var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
-		hair_meshes = await add_actor_model(
-			avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
-			"", "", "", not hair_is_model_space
-		)
-		if not is_current.call():
-			return {}
+	var hair_form_id := int(npc.get("hair_form_id", 0))
+	var hair_path := str(data_reader.find_item_model_path(hair_form_id, is_female)) if hair_form_id != 0 else ""
+	if hair_path.is_empty():
+		hair_path = "Characters/Imperial/female/hair01.nif" if is_female else "Characters/Imperial/male/hair01.nif"
+	var hair_color: PackedByteArray = npc.get("hair_color", PackedByteArray())
+	var hair_is_model_space := hair_path.to_lower().replace("\\", "/").contains("/imperial/")
+	hair_meshes = await add_actor_model(
+		avatar, skeleton, hair_path, "Bip01 Head", hair_color, {}, hair_is_model_space,
+		"", "", "", not hair_is_model_space
+	)
+	if not is_current.call():
+		return {}
+	for hair_mesh: MeshInstance3D in hair_meshes:
+		hair_mesh.visible = (covered_head_slots & (BIPED_SLOT_HEAD | BIPED_SLOT_HAIR)) == 0
 	var weapon_attached := false
 	var weapon_form_id := 0
 	var weapon_meshes: Array[MeshInstance3D] = []
@@ -238,7 +242,7 @@ func assemble_npc_model(
 			bound_armor_meshes.append_array(item_meshes)
 			bound_armor_ids.push_back(item_form_id)
 	return {
-		"face_meshes": face_meshes, "hair_meshes": hair_meshes,
+		"face_meshes": face_meshes, "hair_meshes": hair_meshes, "body_parts": body_parts,
 		"face_covered_by_helmet": face_covered_by_helmet,
 		"attached_item_names": attached_item_names,
 		"weapon_form_id": weapon_form_id, "weapon_meshes": weapon_meshes,

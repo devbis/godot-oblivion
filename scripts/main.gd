@@ -62,6 +62,7 @@ const COMBAT_DAMAGE_SETTINGS := {
 ## Executable defaults used by combat when the installed ESM does not override them.
 const NPC_COMBAT_SETTINGS := {
 	"iActorLuckSkillBase": -20.0, "iNPCBasePerLevelHealthMult": 4.0, "iLowLevelNPCMaxLevel": 3.0,
+	"iDeathDropWeaponChance": 100.0,
 	"fLowLevelNPCBaseHealthMult": 0.4,
 	"iArmorWeightHelmet": 5.0, "iArmorWeightCuirass": 30.0, "iArmorWeightGreaves": 15.0,
 	"iArmorWeightGauntlets": 5.0, "iArmorWeightBoots": 20.0, "iArmorWeightShield": 15.0,
@@ -4372,7 +4373,7 @@ func _remove_duplicate_polygon_end(polygon: PackedVector3Array) -> void:
 	if polygon.size() > 1 and polygon[0].distance_squared_to(polygon[polygon.size() - 1]) <= 0.00000001:
 		polygon.remove_at(polygon.size() - 1)
 
-func _create_pickup_target_area(reference_id: int, reference_transform: Transform3D, meshes: Array) -> Area3D:
+func _create_pickup_target_area(reference_id: int, reference_transform: Transform3D, meshes: Array, parent: Node3D = null) -> Area3D:
 	var model_bounds := AABB()
 	var has_bounds := false
 	for mesh_entry_value: Variant in meshes:
@@ -4405,7 +4406,10 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 	collision.shape = shape
 	collision.position = model_bounds.get_center()
 	area.add_child(collision)
-	cell_visual_root.add_child(area)
+	if parent == null:
+		cell_visual_root.add_child(area)
+	else:
+		parent.add_child(area)
 	return area
 
 func _should_collide_model(model_path: String) -> bool:
@@ -6165,15 +6169,21 @@ func _loot_store_for(target: Dictionary) -> Dictionary:
 		var actor: Dictionary = target.get("actor", {})
 		var inventory: Dictionary = actor.get("starting_inventory", {})
 		store = inventory.duplicate()
-		var outfit_id := int(actor.get("default_outfit_form_id", 0))
-		if outfit_id != 0:
-			for item_value: Variant in data_reader.get_outfit_items(outfit_id):
-				var item_id := int(item_value)
-				if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
-					store[item_id] = 1
-		var weapon_id := int(actor.get("weapon_form_id", 0))
-		if weapon_id > 0 and not store.has(weapon_id):
-			store[weapon_id] = 1
+		# Only the actor's inventory is loot. Outfit entries are appearance equipment and
+		# are not automatically placed in a corpse's inventory.
+		for form_value: Variant in store.keys():
+			var form_id := int(form_value)
+			if str(data_reader.find_record_type(form_id)) in ["ARMO", "CLOT"]:
+				var item_stats: Dictionary = data_reader.find_item_stats(form_id)
+				if not bool(item_stats.get("playable", true)):
+					store.erase(form_id)
+		var dropped_weapon_id := int(actor.get("weapon_dropped_on_death", 0))
+		if dropped_weapon_id > 0 and store.has(dropped_weapon_id):
+			var left := int(store[dropped_weapon_id]) - 1
+			if left > 0:
+				store[dropped_weapon_id] = left
+			else:
+				store.erase(dropped_weapon_id)
 	_loot_contents[reference_id] = store
 	return store
 
@@ -6255,15 +6265,63 @@ func _refresh_loot_panel() -> void:
 
 func _loot_take_item(form_id: int) -> void:
 	var amount := 1 if Input.is_key_pressed(KEY_SHIFT) else int(_loot_store.get(form_id, 0))
-	if LootInventory.transfer(_loot_store, _player_inventory, form_id, amount) > 0:
+	var transferred := LootInventory.transfer(_loot_store, _player_inventory, form_id, amount)
+	if transferred > 0:
+		_remove_looted_npc_equipment(form_id)
 		_refresh_inventory_hud()
 
 func _loot_take_all() -> void:
 	if _loot_target.is_empty():
 		return
 	for form_id: int in _loot_store.keys():
-		LootInventory.transfer(_loot_store, _player_inventory, form_id, int(_loot_store[form_id]))
+		if LootInventory.transfer(_loot_store, _player_inventory, form_id, int(_loot_store[form_id])) > 0:
+			_remove_looted_npc_equipment(form_id)
 	_refresh_inventory_hud()
+
+func _remove_looted_npc_equipment(form_id: int) -> void:
+	if str(_loot_target.get("kind", "")) != "corpse":
+		return
+	var actor: Dictionary = _loot_target.get("actor", {})
+	var worn: Array = actor.get("worn_equipment", [])
+	var remaining: Array[Dictionary] = []
+	for entry_value: Variant in worn:
+		var entry: Dictionary = entry_value
+		if int(entry.get("form_id", 0)) == form_id:
+			for mesh_value: Variant in entry.get("meshes", []):
+				var mesh := mesh_value as MeshInstance3D
+				if is_instance_valid(mesh):
+					mesh.queue_free()
+		else:
+			remaining.push_back(entry)
+	actor["worn_equipment"] = remaining
+	var covered_slots := 0
+	for entry: Dictionary in remaining:
+		covered_slots |= int(entry.get("slots", 0))
+	for part_value: Variant in actor.get("body_parts", []):
+		var part: Dictionary = part_value
+		var visible := (int(part.get("slots", 0)) & covered_slots) == 0
+		for mesh_value: Variant in part.get("meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.visible = visible
+	var head_covered := (covered_slots & 0x0001) != 0
+	var hair_covered := (covered_slots & 0x0003) != 0
+	for mesh_value: Variant in actor.get("face_meshes", []):
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = not head_covered
+	for mesh_value: Variant in actor.get("hair_meshes", []):
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh):
+			mesh.visible = not hair_covered
+	if int(actor.get("weapon_form_id", 0)) == form_id:
+		for mesh_value: Variant in actor.get("weapon_meshes", []):
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.queue_free()
+		actor["weapon_meshes"] = []
+		actor["weapon_form_id"] = 0
+		actor["weapon_record"] = {}
 
 ## Takes the item off if it is worn: its meshes go, the body parts it covered show again.
 func _unequip_player_item(form_id: int) -> void:
@@ -6350,6 +6408,79 @@ func _drop_inventory_item(form_id: int) -> void:
 		"target_area": _create_pickup_target_area(reference_id, item_transform, meshes),
 	}
 	_show_interaction_toast("Dropped %s" % item_name)
+
+## Oblivion's iDeathDropWeaponChance controls whether an NPC's equipped weapon becomes a world item.
+func _drop_npc_weapon_on_death(actor: Dictionary) -> void:
+	var chance := clampf(float(_player_game_settings.get("iDeathDropWeaponChance", 100.0)), 0.0, 100.0)
+	if chance <= 0.0 or randf() * 100.0 >= chance:
+		return
+	var form_id := int(actor.get("weapon_form_id", 0))
+	var source_meshes: Array = actor.get("weapon_meshes", [])
+	if form_id <= 0 or source_meshes.is_empty():
+		return
+	var first_mesh := source_meshes[0] as MeshInstance3D
+	if not is_instance_valid(first_mesh) or first_mesh.mesh == null:
+		return
+	_drop_serial += 1
+	var reference_id := DROPPED_ITEM_REFERENCE_BASE + _drop_serial
+	var drop_transform := first_mesh.global_transform
+	var body := RigidBody3D.new()
+	body.name = "DroppedNPCWeapon_%08X" % form_id
+	body.collision_layer = 16
+	body.collision_mask = 1 | 2 | 16
+	body.mass = 2.0
+	body.global_transform = drop_transform
+	cell_visual_root.add_child(body)
+	var item_meshes: Array = []
+	var bounds := AABB()
+	var has_bounds := false
+	for source_value: Variant in source_meshes:
+		var source := source_value as MeshInstance3D
+		if not is_instance_valid(source) or source.mesh == null:
+			continue
+		var instance := MeshInstance3D.new()
+		instance.mesh = source.mesh
+		instance.material_override = source.material_override
+		instance.transform = body.global_transform.affine_inverse() * source.global_transform
+		instance.set_meta("reference_id", reference_id)
+		body.add_child(instance)
+		item_meshes.push_back(instance)
+		var mesh_bounds := source.mesh.get_aabb()
+		var transformed := AABB(instance.transform * mesh_bounds.position, mesh_bounds.size * instance.transform.basis.get_scale())
+		bounds = transformed if not has_bounds else bounds.merge(transformed)
+		has_bounds = true
+	if item_meshes.is_empty():
+		body.queue_free()
+		return
+	var collision := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(maxf(bounds.size.x, 0.08), maxf(bounds.size.y, 0.08), maxf(bounds.size.z, 0.08))
+	collision.shape = box
+	collision.position = bounds.get_center()
+	body.add_child(collision)
+	var area_meshes: Array = []
+	for instance: MeshInstance3D in item_meshes:
+		area_meshes.push_back({"mesh": instance.mesh})
+	var target_area := _create_pickup_target_area(reference_id, Transform3D.IDENTITY, area_meshes, body)
+	if target_area != null:
+		var area_shape := target_area.get_child(0) as CollisionShape3D
+		if is_instance_valid(area_shape):
+			area_shape.position = bounds.get_center()
+	_placed_items[reference_id] = {
+		"reference_id": reference_id, "base_form_id": form_id,
+		"record_type": str(data_reader.find_record_type(form_id)),
+		"editor_id": str(data_reader.find_editor_id(form_id)),
+		"display_name": _record_display_name(form_id), "position": drop_transform.origin,
+		"mesh_instances": item_meshes, "physics_root": body, "target_area": target_area,
+	}
+	actor["weapon_dropped_on_death"] = form_id
+	for source_value: Variant in source_meshes:
+		var source := source_value as MeshInstance3D
+		if is_instance_valid(source):
+			source.queue_free()
+	actor["weapon_meshes"] = []
+	actor["weapon_form_id"] = 0
+	actor["weapon_record"] = {}
 
 func _show_interaction_toast(message: String) -> void:
 	_interaction_toast_text = message
@@ -8674,6 +8805,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"skeleton": skeleton,
 			"face_meshes": face_meshes,
 			"hair_meshes": assembled.get("hair_meshes", []),
+			"body_parts": assembled.get("body_parts", []),
 			"face_expression": initial_expression,
 			"face_expression_weight": 0.7,
 			"face_expression_previous": "",

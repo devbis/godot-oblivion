@@ -75,6 +75,7 @@ struct ItemStats {
     float weight = 0.0f;
     std::uint16_t armor_rating = 0; // ARMO only, in hundredths
     bool heavy_armor = false;
+    bool playable = true; // BMDT Non-Playable flag (armor/clothing only)
     std::uint32_t health = 0;       // ARMO and WEAP condition
 };
 

@@ -880,6 +880,7 @@ public:
         result["weight"] = stats->weight;
         result["armor_rating"] = static_cast<int64_t>(stats->armor_rating);
         result["heavy_armor"] = stats->heavy_armor;
+        result["playable"] = stats->playable;
         result["health"] = static_cast<int64_t>(stats->health);
         return result;
     }

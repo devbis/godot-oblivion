@@ -1224,6 +1224,8 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             item_stats_by_id_[form_id].value = static_cast<std::int32_t>(u32(value));
         } else if (tag == "BMDT" && (type == "ARMO" || type == "CLOT") && subrecord_size >= 2) {
             item_biped_slots_by_id_[form_id] = u16(value);
+            if (subrecord_size >= 4)
+                item_stats_by_id_[form_id].playable = (u32(value) & 0x00400000u) == 0;
             if (type == "ARMO" && subrecord_size >= 4)
                 item_stats_by_id_[form_id].heavy_armor = (u32(value) & 0x00800000u) != 0;
         } else if (tag == "INAM" && is_outfit && subrecord_size >= 4) {
