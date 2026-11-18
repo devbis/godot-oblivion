@@ -224,21 +224,24 @@ const AIM_RAY_LENGTH_M := 120.0
 const MELEE_BASE_REACH_M := 1.6
 const MELEE_PUSH_IMPULSE := 4.0
 const EXTERIOR_CELL_SIZE := 4096.0
-const EXTERIOR_STREAM_RADIUS := 9
+const EXTERIOR_STREAM_RADIUS := 12
 const EXTERIOR_STATIC_REFERENCE_RADIUS := 6
 const EXTERIOR_TREE_REFERENCE_RADIUS := 9
 const EXTERIOR_RELOAD_GRID_DISTANCE := 5
 const EXTERIOR_REFERENCE_RENDER_DISTANCE := 220.0
+const EXTERIOR_REFERENCE_CULL_MARGIN := 20.0
 const EXTERIOR_TREE_RENDER_DISTANCE := 380.0
 const EXTERIOR_TREE_NEAR_DISTANCE := 42.0
-const EXTERIOR_COLLISION_DISTANCE := 65.0
-const EXTERIOR_COLLISION_UNLOAD_DISTANCE := 84.0
-const EXTERIOR_TERRAIN_COLLISION_DISTANCE := 65.0
-const EXTERIOR_TERRAIN_COLLISION_UNLOAD_DISTANCE := 84.0
+const EXTERIOR_COLLISION_DISTANCE := 35.0
+const EXTERIOR_COLLISION_UNLOAD_DISTANCE := 48.0
+const EXTERIOR_TERRAIN_COLLISION_DISTANCE := 45.0
+const EXTERIOR_TERRAIN_COLLISION_UNLOAD_DISTANCE := 60.0
 const EXTERIOR_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.01
-const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.08
-const EXTERIOR_CAMERA_FAR := 430.0
+const EXTERIOR_TERRAIN_BATCH_CELLS := 4
+const EXTERIOR_OBJECT_BATCH_SIZE_METERS := EXTERIOR_CELL_SIZE * 0.5
+const EXTERIOR_CAMERA_FAR := 900.0
 const EXTERIOR_SHADOW_DISTANCE := 28.0
+const EXTERIOR_LOAD_SLICE_USEC := 4000
 const STARTUP_NEAR_REFERENCE_DISTANCE := 18.0
 const STARTUP_NEAR_TERRAIN_DISTANCE := 86.0
 const NPC_NEAR_LOAD_DISTANCE := 18.0
@@ -308,7 +311,15 @@ var _land_mesh_cache: Dictionary = {}
 var _land_collision_cache: Dictionary = {}
 var _tree_mesh_cache: Dictionary = {}
 var _water_material: StandardMaterial3D
+var _exterior_terrain_root: Node3D
+var _outgoing_exterior_terrain: Node3D
 var _world_loading := true
+var _performance_sample_active := false
+var _performance_sample_started_usec := 0
+var _performance_sample_last_frame_usec := 0
+var _performance_sample_frames := 0
+var _performance_sample_total_frames := 0
+var _performance_sample_max_frame_ms := 0.0
 var _interact_ready := true
 var _player_skeleton: Skeleton3D
 var _player_avatar: Node3D
@@ -515,11 +526,13 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		_interior_environment.ambient_light_color = _interior_environment.ambient_light_color.lerp(Color(0.24, 0.24, 0.24), 0.35)
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
 	key_light.visible = is_exterior
+	key_light.directional_shadow_max_distance = EXTERIOR_SHADOW_DISTANCE
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	if camera != null:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
+	_update_performance_sample()
 	if _birthsign_menu_active:
 		return
 	_update_flickering_lights(_delta)
@@ -710,7 +723,9 @@ func _load_game_data() -> void:
 	await _load_cell_geometry(
 		current_cell, 0.0,
 		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
-		true
+		true,
+		0.0,
+		STARTUP_NEAR_REFERENCE_DISTANCE if not bool(current_cell.get("interior", true)) else -1.0
 	)
 	await _place_player_on_ground(_player_start_position)
 	player.set_physics_process(true)
@@ -718,8 +733,42 @@ func _load_game_data() -> void:
 	_npc_stream_enabled = false
 	face_view_button.disabled = false
 	player.capture_mouse()
+	if not sewer_exit_spawn.is_empty():
+		_start_performance_sample()
 	_start_deferred_cell_loading()
 	_log_runtime_spawn_positions()
+
+func _start_performance_sample() -> void:
+	_performance_sample_active = true
+	_performance_sample_started_usec = Time.get_ticks_usec()
+	_performance_sample_last_frame_usec = _performance_sample_started_usec
+	print("OpenOB performance: sampling exterior frame time in 5-second windows")
+
+func _update_performance_sample() -> void:
+	if not _performance_sample_active:
+		return
+	var now_usec := Time.get_ticks_usec()
+	var frame_ms := float(now_usec - _performance_sample_last_frame_usec) / 1000.0
+	_performance_sample_last_frame_usec = now_usec
+	_performance_sample_frames += 1
+	_performance_sample_total_frames += 1
+	_performance_sample_max_frame_ms = maxf(_performance_sample_max_frame_ms, frame_ms)
+	var elapsed_usec := now_usec - _performance_sample_started_usec
+	if elapsed_usec < 5_000_000:
+		return
+	var fps := float(_performance_sample_frames) * 1_000_000.0 / float(elapsed_usec)
+	print("OpenOB performance: cell=(%d,%d) loading=%s frames=%d fps=%.1f avg_frame_ms=%.2f max_frame_ms=%.2f draw_calls=%d render_primitives=%d total_frames=%d" % [
+		int(current_cell.get("grid_x", 0)), int(current_cell.get("grid_y", 0)),
+		_world_loading or (not bool(current_cell.get("interior", true)) and not _exterior_terrain_collision_stream_enabled),
+		_performance_sample_frames, fps, 1000.0 / fps, _performance_sample_max_frame_ms,
+		int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
+		int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)),
+		_performance_sample_total_frames,
+	])
+	_performance_sample_started_usec = now_usec
+	_performance_sample_frames = 0
+	_performance_sample_max_frame_ms = 0.0
+
 func _initialize_player_game_state() -> void:
 	var player_form_id := int(data_reader.find_form_id_by_editor_id("Player"))
 	if player_form_id <= 0:
@@ -1603,6 +1652,8 @@ func door_lock_level(reference: Dictionary) -> int:
 ## every physics tick, and scanning every reference each time is wasteful.
 var _reference_index_cell: Dictionary = {}
 var _reference_index: Dictionary = {}
+var _npc_candidate_cell: Dictionary = {}
+var _npc_candidates: Array = []
 
 func _reference_origin_index() -> Dictionary:
 	if is_same(_reference_index_cell, current_cell) and not _reference_index.is_empty():
@@ -2477,15 +2528,22 @@ func _load_cell_geometry(
 	cell: Dictionary,
 	min_distance: float = 0.0,
 	max_distance: float = INF,
-	clear_existing: bool = true
+	clear_existing: bool = true,
+	min_reference_distance: float = -1.0,
+	max_reference_distance: float = -1.0,
+	keep_exterior_terrain: bool = false
 ) -> bool:
 	_cell_load_generation += 1
 	var generation := _cell_load_generation
+	var reference_min := min_distance if min_reference_distance < 0.0 else min_reference_distance
+	var reference_max := max_distance if max_reference_distance < 0.0 else max_reference_distance
 	if clear_existing:
 		_cell_geometry_partition_origin = player.global_position
 	var partition_origin := _cell_geometry_partition_origin
 	_set_cell_environment(cell)
+	var is_exterior := not bool(cell.get("interior", true))
 	if clear_existing:
+		_begin_exterior_terrain_load(is_exterior, keep_exterior_terrain)
 		_crushing_log_bodies.clear()
 		physics_grabber.release_without_throw()
 		_exterior_collision_stream_enabled = false
@@ -2522,11 +2580,15 @@ func _load_cell_geometry(
 	var exterior_batches: Dictionary = {}
 	var exterior_batch_materials: Dictionary = {}
 	var exterior_tree_batches: Dictionary = {}
-	var is_exterior := not bool(cell.get("interior", true))
+	var exterior_terrain_batches: Dictionary = {}
+	var load_slice_started := Time.get_ticks_usec()
 	var terrain_cells: Array = cell.get("land_cells", [])
 	if terrain_cells.is_empty() and cell.has("land"):
 		terrain_cells.push_back(cell.get("land"))
 	for land_value: Variant in terrain_cells:
+		if is_exterior and Time.get_ticks_usec() - load_slice_started >= EXTERIOR_LOAD_SLICE_USEC:
+			await get_tree().process_frame
+			load_slice_started = Time.get_ticks_usec()
 		if generation != _cell_load_generation:
 			return false
 		var land: Dictionary = land_value
@@ -2535,24 +2597,46 @@ func _load_cell_geometry(
 			0.0,
 			-(float(land.get("grid_y", 0)) + 0.5) * EXTERIOR_CELL_SIZE
 		) * game_units_to_meters
-		var land_distance := land_position.distance_to(partition_origin)
+		var land_distance := Vector2(land_position.x - partition_origin.x, land_position.z - partition_origin.z).length()
 		if (min_distance > 0.0 and land_distance <= min_distance) or land_distance > max_distance:
 			continue
-		var land_result: Dictionary = await _add_land_cell(land, generation)
-		if bool(land_result.get("rendered", false)):
+		var batch_far_terrain := is_exterior and min_distance > 0.0
+		var land_result: Dictionary = await _add_land_cell(
+			land, generation, exterior_terrain_batches, batch_far_terrain
+		)
+		if bool(land_result.get("rendered", false)) and not bool(land_result.get("batched", false)):
 			instance_count += 1
 		if bool(land_result.get("collider", false)):
 			collision_count += 1
 	if generation != _cell_load_generation:
 		return false
+	if not exterior_terrain_batches.is_empty():
+		var terrain_batch_instances := await _instantiate_exterior_terrain_batches(exterior_terrain_batches, generation)
+		if generation != _cell_load_generation:
+			return false
+		instance_count += terrain_batch_instances
 	if clear_existing and _add_water_region(cell.get("water_cells", [])):
 		instance_count += 1
+	if is_exterior and not clear_existing and is_instance_valid(_outgoing_exterior_terrain):
+		_outgoing_exterior_terrain.hide()
+		_outgoing_exterior_terrain.queue_free()
+		_outgoing_exterior_terrain = null
+		_exterior_terrain_root.show()
+	load_slice_started = Time.get_ticks_usec()
 	for reference: Dictionary in cell.references:
 		if generation != _cell_load_generation:
 			return false
+		if is_exterior and Time.get_ticks_usec() - load_slice_started >= EXTERIOR_LOAD_SLICE_USEC:
+			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
+				cell.get("display_name", "exterior"), reference_count, instance_count
+			]
+			await get_tree().process_frame
+			if generation != _cell_load_generation:
+				return false
+			load_slice_started = Time.get_ticks_usec()
 		var reference_transform := _reference_transform(reference)
 		var reference_distance := reference_transform.origin.distance_to(partition_origin)
-		if (min_distance > 0.0 and reference_distance <= min_distance) or reference_distance > max_distance:
+		if (reference_min > 0.0 and reference_distance <= reference_min) or reference_distance > reference_max:
 			continue
 		var player_distance := reference_transform.origin.distance_to(player.global_position)
 		var light_radius := float(reference.get("light_radius", 0.0))
@@ -2620,6 +2704,7 @@ func _load_cell_geometry(
 					),
 					"transforms": [],
 					"cast_shadow": false,
+					"tree_billboard": true,
 				}
 				exterior_tree_batches[tree_key] = tree_batch
 			var tree_transform := reference_transform
@@ -2685,7 +2770,7 @@ func _load_cell_geometry(
 			if not physics_result.is_empty():
 				instance_count += int(physics_result.get("mesh_count", 0))
 				collision_count += int(physics_result.get("body_count", 0))
-				if reference_count % 8 == 0:
+				if not is_exterior and reference_count % 8 == 0:
 					await get_tree().process_frame
 				continue
 		var should_collide := (
@@ -2778,6 +2863,9 @@ func _load_cell_geometry(
 				)
 				if generation != _cell_load_generation:
 					return false
+				if is_exterior:
+					instance.visibility_range_end = EXTERIOR_REFERENCE_RENDER_DISTANCE
+					instance.visibility_range_end_margin = EXTERIOR_REFERENCE_CULL_MARGIN
 				if not await _install_nif_texture_flipbook(instance, mesh_entry, physics_metadata, generation):
 					return false
 				if animate_reference:
@@ -2839,14 +2927,20 @@ func _load_cell_geometry(
 				collision_count += animated_collision_count
 			elif _add_reference_collider(int(reference.get("form_id", 0)), reference_transform, model_path, is_exterior):
 				collision_count += 1
-		if reference_count % 8 == 0:
+		if not is_exterior and reference_count % 8 == 0:
 			status_label.text = "Loading %s: %d placed NIF references, %d visible meshes…" % [
 				cell.get("editor_id", "cell"), reference_count, instance_count
 			]
 			await get_tree().process_frame
 
+	load_slice_started = Time.get_ticks_usec()
 	for batches: Dictionary in [exterior_batches, exterior_tree_batches]:
 		for batch_key: String in batches:
+			if Time.get_ticks_usec() - load_slice_started >= EXTERIOR_LOAD_SLICE_USEC:
+				await get_tree().process_frame
+				if generation != _cell_load_generation:
+					return false
+				load_slice_started = Time.get_ticks_usec()
 			var batch: Dictionary = batches[batch_key]
 			var transforms: Array = batch.transforms
 			if transforms.is_empty():
@@ -2855,19 +2949,36 @@ func _load_cell_geometry(
 			multimesh.transform_format = MultiMesh.TRANSFORM_3D
 			multimesh.mesh = batch.mesh
 			multimesh.instance_count = transforms.size()
+			var mesh_bounds: AABB = batch.mesh.get_aabb()
+			var use_billboard_bounds := bool(batch.get("tree_billboard", false))
+			if use_billboard_bounds:
+				# A camera facing quad turns about its trunk. Include every horizontal orientation.
+				var radius := maxf(mesh_bounds.size.x, mesh_bounds.size.z) * 0.5
+				mesh_bounds = AABB(
+					Vector3(-radius, mesh_bounds.position.y, -radius),
+					Vector3(radius * 2.0, mesh_bounds.size.y, radius * 2.0)
+				)
+			var bounds := (transforms[0] as Transform3D) * mesh_bounds
 			for transform_index in range(transforms.size()):
-				multimesh.set_instance_transform(transform_index, transforms[transform_index])
-			multimesh.custom_aabb = AABB(
-				Vector3(-20.0, -100.0, -20.0),
-				Vector3(EXTERIOR_OBJECT_BATCH_SIZE_METERS + 40.0, 200.0, EXTERIOR_OBJECT_BATCH_SIZE_METERS + 40.0)
-			)
+				var instance_transform: Transform3D = transforms[transform_index]
+				multimesh.set_instance_transform(transform_index, instance_transform)
+				bounds = bounds.merge(instance_transform * mesh_bounds)
+			multimesh.custom_aabb = bounds
 			var batch_instance := MultiMeshInstance3D.new()
 			batch_instance.name = "ExteriorBatch_" + str(batch.mesh_name).replace(":", "_")
 			batch_instance.multimesh = multimesh
 			batch_instance.material_override = batch.material
 			batch_instance.position = batch.origin
-			if not bool(batch.get("cast_shadow", true)) or batch.origin.distance_to(player.global_position) > EXTERIOR_SHADOW_DISTANCE:
+			var batch_center: Vector3 = batch.origin + Vector3(
+				EXTERIOR_OBJECT_BATCH_SIZE_METERS * 0.5, 0.0, EXTERIOR_OBJECT_BATCH_SIZE_METERS * 0.5
+			)
+			var batch_shadow_range := EXTERIOR_SHADOW_DISTANCE + EXTERIOR_OBJECT_BATCH_SIZE_METERS * 0.7072
+			if not bool(batch.get("cast_shadow", true)) or batch_center.distance_to(player.global_position) > batch_shadow_range:
 				batch_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			if not use_billboard_bounds:
+				var batch_radius := EXTERIOR_OBJECT_BATCH_SIZE_METERS * 0.7072
+				batch_instance.visibility_range_end = EXTERIOR_REFERENCE_RENDER_DISTANCE + batch_radius
+				batch_instance.visibility_range_end_margin = EXTERIOR_REFERENCE_CULL_MARGIN
 			cell_visual_root.add_child(batch_instance)
 			instance_count += 1
 
@@ -2898,13 +3009,37 @@ func _load_cell_geometry(
 	_aimed_target = InteractionTargeting.empty_snapshot()
 	_update_hud()
 	_refresh_inventory_hud()
-	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d meshes, %d generated colliders, %d terrain tiles; culled %d distant references, skipped %d gates" % [
-		cell_label, reference_count, tree_reference_count, instance_count, collision_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
+	print("OpenOB displayed %s: %d NIF references, %d tree billboards, %d object batches, %d tree batches, %d meshes, %d generated colliders, %d terrain tiles; culled %d distant references, skipped %d gates" % [
+		cell_label, reference_count, tree_reference_count, exterior_batches.size(), exterior_tree_batches.size(),
+		instance_count, collision_count, terrain_cells.size(), culled_reference_count, skipped_gate_count
 	])
 	print("OpenOB indexed %d nearby-pickup candidates in %s" % [_placed_items.size(), str(cell.get("editor_id", "cell"))])
 	return true
 
-func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
+func _begin_exterior_terrain_load(is_exterior: bool, keep_previous: bool) -> void:
+	if is_instance_valid(_exterior_terrain_root):
+		if keep_previous and not is_instance_valid(_outgoing_exterior_terrain):
+			_outgoing_exterior_terrain = _exterior_terrain_root
+		else:
+			_exterior_terrain_root.hide()
+			_exterior_terrain_root.queue_free()
+		_exterior_terrain_root = null
+	if not keep_previous and is_instance_valid(_outgoing_exterior_terrain):
+		_outgoing_exterior_terrain.hide()
+		_outgoing_exterior_terrain.queue_free()
+		_outgoing_exterior_terrain = null
+	if is_exterior:
+		_exterior_terrain_root = Node3D.new()
+		_exterior_terrain_root.name = "ExteriorTerrain"
+		_exterior_terrain_root.visible = not is_instance_valid(_outgoing_exterior_terrain)
+		add_child(_exterior_terrain_root)
+
+func _add_land_cell(
+	land: Dictionary,
+	generation: int,
+	terrain_batches: Dictionary,
+	batch_far_terrain: bool
+) -> Dictionary:
 	var heights: PackedFloat32Array = land.get("heights", PackedFloat32Array())
 	if heights.size() != 33 * 33:
 		return {}
@@ -2912,8 +3047,10 @@ func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 	var grid_y := int(land.get("grid_y", 0))
 	var position := Vector3(grid_x * EXTERIOR_CELL_SIZE, 0.0, -grid_y * EXTERIOR_CELL_SIZE) * game_units_to_meters
 	var terrain_center := position + Vector3(EXTERIOR_BATCH_SIZE_METERS * 0.5, 0.0, -EXTERIOR_BATCH_SIZE_METERS * 0.5)
-	var terrain_distance := terrain_center.distance_to(player.global_position)
-	var detail_step := 1 if terrain_distance <= 110.0 else 2 if terrain_distance <= 220.0 else 4
+	var terrain_distance := Vector2(
+		terrain_center.x - _cell_geometry_partition_origin.x, terrain_center.z - _cell_geometry_partition_origin.z
+	).length()
+	var detail_step := 1 if terrain_distance <= 110.0 else 2 if terrain_distance <= 220.0 else 4 if terrain_distance <= 330.0 else 8
 	var mesh_key := "%d,%d,%d" % [grid_x, grid_y, detail_step]
 	var mesh := _land_mesh_cache.get(mesh_key) as ArrayMesh
 	if mesh == null:
@@ -2921,22 +3058,97 @@ func _add_land_cell(land: Dictionary, generation: int = -1) -> Dictionary:
 		if mesh == null:
 			return {}
 		_land_mesh_cache[mesh_key] = mesh
-	var instance := MeshInstance3D.new()
-	instance.name = "Terrain_%d_%d" % [grid_x, grid_y]
-	instance.mesh = mesh
 	var texture_path := str(land.get("texture_path", ""))
 	if texture_path.is_empty():
 		texture_path = "textures/landscape/terrainhddirt01.dds"
+	if batch_far_terrain:
+		var batch_grid_x := floori(float(grid_x) / float(EXTERIOR_TERRAIN_BATCH_CELLS)) * EXTERIOR_TERRAIN_BATCH_CELLS
+		var batch_grid_y := floori(float(grid_y) / float(EXTERIOR_TERRAIN_BATCH_CELLS)) * EXTERIOR_TERRAIN_BATCH_CELLS
+		var batch_key := "%s|%d,%d" % [texture_path.to_lower(), batch_grid_x, batch_grid_y]
+		var terrain_batch: Dictionary = terrain_batches.get(batch_key, {})
+		if terrain_batch.is_empty():
+			terrain_batch = {
+				"texture_path": texture_path,
+				"grid_x": batch_grid_x,
+				"grid_y": batch_grid_y,
+				"tiles": [],
+			}
+		var tile_translation := Vector3(
+			float(grid_x - batch_grid_x) * EXTERIOR_CELL_SIZE,
+			0.0,
+			-float(grid_y - batch_grid_y) * EXTERIOR_CELL_SIZE
+		)
+		(terrain_batch["tiles"] as Array).push_back({
+			"mesh": mesh,
+			"transform": Transform3D(Basis.IDENTITY, tile_translation),
+		})
+		terrain_batches[batch_key] = terrain_batch
+		var collider_created := false
+		if _terrain_cell_edge_distance(grid_x, grid_y, player.global_position) <= EXTERIOR_TERRAIN_COLLISION_DISTANCE:
+			collider_created = _add_terrain_cell_collider(land)
+		return {"rendered": true, "batched": true, "collider": collider_created}
+	var instance := MeshInstance3D.new()
+	instance.name = "Terrain_%d_%d" % [grid_x, grid_y]
+	instance.mesh = mesh
 	instance.material_override = await assets.material_for_texture(texture_path)
 	if generation >= 0 and generation != _cell_load_generation:
 		return {}
 	instance.scale = Vector3.ONE * game_units_to_meters
 	instance.position = position
-	cell_visual_root.add_child(instance)
+	var terrain_root := _exterior_terrain_root if is_instance_valid(_exterior_terrain_root) else cell_visual_root
+	terrain_root.add_child(instance)
 
 	if _terrain_cell_edge_distance(grid_x, grid_y, player.global_position) > EXTERIOR_TERRAIN_COLLISION_DISTANCE:
 		return {"rendered": true, "collider": false}
 	return {"rendered": true, "collider": _add_terrain_cell_collider(land)}
+
+func _instantiate_exterior_terrain_batches(terrain_batches: Dictionary, generation: int) -> int:
+	var instance_count := 0
+	var merged_tile_count := 0
+	var load_slice_started := Time.get_ticks_usec()
+	for batch_key_value: Variant in terrain_batches.keys():
+		if Time.get_ticks_usec() - load_slice_started >= EXTERIOR_LOAD_SLICE_USEC:
+			await get_tree().process_frame
+			load_slice_started = Time.get_ticks_usec()
+		if generation != _cell_load_generation:
+			return instance_count
+		var batch: Dictionary = terrain_batches[batch_key_value]
+		var surface := SurfaceTool.new()
+		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var has_geometry := false
+		var tiles: Array = batch.get("tiles", [])
+		for tile_value: Variant in tiles:
+			var tile: Dictionary = tile_value
+			var mesh := tile.get("mesh") as ArrayMesh
+			if mesh == null or mesh.get_surface_count() == 0:
+				continue
+			surface.append_from(mesh, 0, tile.get("transform", Transform3D.IDENTITY))
+			has_geometry = true
+		if not has_geometry:
+			continue
+		surface.index()
+		var combined_mesh := surface.commit() as ArrayMesh
+		if combined_mesh == null:
+			continue
+		var texture_path := str(batch.get("texture_path", ""))
+		var material := await assets.material_for_texture(texture_path)
+		if generation != _cell_load_generation:
+			return instance_count
+		var instance := MeshInstance3D.new()
+		instance.name = "TerrainBatch_%d_%d" % [int(batch.get("grid_x", 0)), int(batch.get("grid_y", 0))]
+		instance.mesh = combined_mesh
+		instance.material_override = material
+		instance.scale = Vector3.ONE * game_units_to_meters
+		instance.position = Vector3(
+			float(batch.get("grid_x", 0)) * EXTERIOR_CELL_SIZE,
+			0.0,
+			-float(batch.get("grid_y", 0)) * EXTERIOR_CELL_SIZE
+		) * game_units_to_meters
+		_exterior_terrain_root.add_child(instance)
+		instance_count += 1
+		merged_tile_count += tiles.size()
+	print("OpenOB terrain: merged %d distant cells into %d textured meshes" % [merged_tile_count, instance_count])
+	return instance_count
 
 func _terrain_cell_edge_distance(grid_x: int, grid_y: int, world_position: Vector3) -> float:
 	var cell_size_meters := EXTERIOR_CELL_SIZE * game_units_to_meters
@@ -3029,33 +3241,63 @@ func _update_exterior_terrain_collision_streaming() -> void:
 		_add_terrain_cell_collider(land)
 
 func _build_land_mesh(heights: PackedFloat32Array, step := 1) -> ArrayMesh:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	var vertex_indices := {}
 	for y in range(0, 32, step):
 		for x in range(0, 32, step):
-			var top_left := _land_vertex(x, y, heights)
-			var top_right := _land_vertex(x + step, y, heights)
-			var bottom_left := _land_vertex(x, y + step, heights)
-			var bottom_right := _land_vertex(x + step, y + step, heights)
-			var uv_top_left := Vector2(float(x) * 12.0 / 32.0, float(y) * 12.0 / 32.0)
-			var uv_top_right := Vector2(float(x + step) * 12.0 / 32.0, float(y) * 12.0 / 32.0)
-			var uv_bottom_left := Vector2(float(x) * 12.0 / 32.0, float(y + step) * 12.0 / 32.0)
-			var uv_bottom_right := Vector2(float(x + step) * 12.0 / 32.0, float(y + step) * 12.0 / 32.0)
-			surface.set_uv(uv_top_left)
-			surface.add_vertex(top_left)
-			surface.set_uv(uv_top_right)
-			surface.add_vertex(top_right)
-			surface.set_uv(uv_bottom_left)
-			surface.add_vertex(bottom_left)
-			surface.set_uv(uv_top_right)
-			surface.add_vertex(top_right)
-			surface.set_uv(uv_bottom_right)
-			surface.add_vertex(bottom_right)
-			surface.set_uv(uv_bottom_left)
-			surface.add_vertex(bottom_left)
-	surface.index()
+			var corners := [
+				Vector2i(x, y), Vector2i(x + step, y),
+				Vector2i(x + step, y + step), Vector2i(x, y + step),
+			]
+			var top_left := _land_mesh_index(corners[0], heights, vertices, uvs, vertex_indices)
+			var top_right := _land_mesh_index(corners[1], heights, vertices, uvs, vertex_indices)
+			var bottom_right := _land_mesh_index(corners[2], heights, vertices, uvs, vertex_indices)
+			var bottom_left := _land_mesh_index(corners[3], heights, vertices, uvs, vertex_indices)
+			if step == 1 or (x > 0 and y > 0 and x + step < 32 and y + step < 32):
+				indices.append_array([top_left, top_right, bottom_left, top_right, bottom_right, bottom_left])
+				continue
+			# Keep all original height samples along cell borders so neighboring LODs meet.
+			var ring: Array[int] = []
+			for side in range(4):
+				var from: Vector2i = corners[side]
+				var to: Vector2i = corners[(side + 1) % 4]
+				var on_border := (
+					(from.x == to.x and from.x in [0, 32])
+					or (from.y == to.y and from.y in [0, 32])
+				)
+				var segments := step if on_border else 1
+				var increment := (to - from) / segments
+				for segment in range(segments):
+					ring.push_back(_land_mesh_index(from + increment * segment, heights, vertices, uvs, vertex_indices))
+			var half_step := step >> 1
+			var center := _land_mesh_index(Vector2i(x + half_step, y + half_step), heights, vertices, uvs, vertex_indices)
+			for side in range(ring.size()):
+				indices.append_array([center, ring[side], ring[(side + 1) % ring.size()]])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var surface := SurfaceTool.new()
+	surface.create_from(mesh, 0)
 	surface.generate_normals()
-	return surface.commit() as ArrayMesh
+	return surface.commit()
+
+func _land_mesh_index(
+	point: Vector2i, heights: PackedFloat32Array, vertices: PackedVector3Array,
+	uvs: PackedVector2Array, vertex_indices: Dictionary
+) -> int:
+	if vertex_indices.has(point):
+		return int(vertex_indices[point])
+	var index := vertices.size()
+	vertices.push_back(_land_vertex(point.x, point.y, heights))
+	uvs.push_back(Vector2(point) * (12.0 / 32.0))
+	vertex_indices[point] = index
+	return index
 
 func _land_vertex(x: int, y: int, heights: PackedFloat32Array) -> Vector3:
 	return Vector3(float(x) * 128.0, heights[y * 33 + x], -float(y) * 128.0)
@@ -3102,7 +3344,8 @@ func _add_water_region(water_cells: Array) -> bool:
 			float(height_key) / 100.0,
 			-(min_y + float(depth) * 0.5) * EXTERIOR_CELL_SIZE
 		) * game_units_to_meters
-		cell_visual_root.add_child(instance)
+		var terrain_root := _exterior_terrain_root if is_instance_valid(_exterior_terrain_root) else cell_visual_root
+		terrain_root.add_child(instance)
 	return true
 
 func _sync_actor_water_surfaces() -> void:
@@ -3202,8 +3445,9 @@ func _stream_exterior_if_needed() -> void:
 	player.set_physics_process(false)
 	_clear_cell_actors()
 	current_cell = exterior_region
-	await _load_cell_geometry(current_cell, 0.0, STARTUP_NEAR_TERRAIN_DISTANCE, true)
-	await _place_player_on_ground(player.global_position)
+	await _load_cell_geometry(
+		current_cell, 0.0, STARTUP_NEAR_TERRAIN_DISTANCE, true, 0.0, STARTUP_NEAR_REFERENCE_DISTANCE, true
+	)
 	player.set_physics_process(true)
 	_world_loading = false
 	_start_deferred_cell_loading()
@@ -4439,8 +4683,15 @@ func _load_deferred_cell_assets(generation: int, cell: Dictionary) -> void:
 	var is_exterior := not bool(cell.get("interior", true))
 	var near_distance := STARTUP_NEAR_REFERENCE_DISTANCE if not is_exterior else STARTUP_NEAR_TERRAIN_DISTANCE
 	var far_distance := INF if not is_exterior else EXTERIOR_CAMERA_FAR
+	var near_reference_distance := near_distance
+	var far_reference_distance := far_distance
+	if is_exterior:
+		near_reference_distance = STARTUP_NEAR_REFERENCE_DISTANCE
+		far_reference_distance = EXTERIOR_TREE_RENDER_DISTANCE
 	status_label.text = "Loading nearby %s…" % str(cell.get("display_name", cell.get("editor_id", "cell")))
-	var geometry_complete: bool = await _load_cell_geometry(cell, near_distance, far_distance, false)
+	var geometry_complete: bool = await _load_cell_geometry(
+		cell, near_distance, far_distance, false, near_reference_distance, far_reference_distance
+	)
 	if not geometry_complete or generation != _deferred_world_generation:
 		return
 	_exterior_collision_stream_enabled = is_exterior
@@ -8169,10 +8420,13 @@ func _update_npc_streaming() -> void:
 	var visible_distance := 110.0 if is_exterior else NPC_VISIBLE_LOAD_DISTANCE
 	var selected_reference_id := -1
 	var selected_priority := INF
-	for reference_value: Variant in current_cell.get("references", []):
-		var reference: Dictionary = reference_value
-		if not _is_actor_reference(reference):
-			continue
+	if not is_same(current_cell, _npc_candidate_cell):
+		_npc_candidate_cell = current_cell
+		_npc_candidates.clear()
+		for reference: Dictionary in current_cell.get("references", []):
+			if _is_actor_reference(reference):
+				_npc_candidates.push_back(reference)
+	for reference: Dictionary in _npc_candidates:
 		var reference_id := int(reference.get("form_id", 0))
 		if _npc_loaded_reference_ids.has(reference_id) or _actor_reference_disabled(reference):
 			continue
@@ -10438,7 +10692,9 @@ func _transition_to_linked_cell(reference: Dictionary) -> void:
 	await _load_cell_geometry(
 		current_cell, 0.0,
 		STARTUP_NEAR_REFERENCE_DISTANCE if bool(current_cell.get("interior", true)) else STARTUP_NEAR_TERRAIN_DISTANCE,
-		true
+		true,
+		0.0,
+		STARTUP_NEAR_REFERENCE_DISTANCE if not bool(current_cell.get("interior", true)) else -1.0
 	)
 	await _place_player_on_ground(destination_position)
 	var destination_rotation: PackedFloat32Array = reference.get("teleport_rotation", PackedFloat32Array())
