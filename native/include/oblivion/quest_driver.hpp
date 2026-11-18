@@ -25,6 +25,7 @@ struct DialogueContext {
     std::uint32_t listener_base = 0;
     std::uint32_t speaker_race = 0;
     std::uint32_t listener_race = 0;
+    std::uint32_t listener_birthsign = 0;
     bool speaker_female = false;
     bool listener_female = false;
     // The idle manager asks about one actor: its base is both speaker and listener. `current_package` is the package
@@ -242,6 +243,8 @@ public:
         listener_race_ = race;
         listener_female_ = female;
     }
+    void set_listener_birthsign(std::uint32_t birthsign) { listener_birthsign_ = birthsign; }
+    std::uint32_t listener_birthsign() const { return listener_birthsign_; }
 
     // The value of a GLOB record, for conditions compared against a global (CTDA "use global"). Nullopt: unknown,
     // and the condition counts as false.
@@ -320,6 +323,7 @@ private:
     SpeechLength speech_length_;
     std::map<std::string, std::uint32_t> reference_bases_;  // lowercase reference name -> NPC base
     std::uint32_t listener_race_ = 0;
+    std::uint32_t listener_birthsign_ = 0;
     bool listener_female_ = false;
     std::vector<std::unique_ptr<QuestDriver>> drivers_;
     std::vector<std::unique_ptr<ActorState>> actors_;

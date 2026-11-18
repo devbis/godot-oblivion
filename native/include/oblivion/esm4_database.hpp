@@ -240,6 +240,12 @@ struct SpellRecord {
     std::vector<SpellEffectRecord> effects;
 };
 
+struct BirthsignRecord {
+    std::uint32_t form_id = 0;
+    std::string editor_id;
+    std::string name;
+};
+
 struct NpcBaseRecord {
     std::uint32_t form_id = 0;
     std::uint32_t script_form_id = 0;  // SCRI: the script attached to every actor of this base
@@ -402,6 +408,7 @@ public:
     [[nodiscard]] const CreatureBaseRecord* find_creature_base(std::uint32_t form_id) const;
     [[nodiscard]] const CombatStyleRecord* find_combat_style(std::uint32_t form_id) const;
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
+    [[nodiscard]] const std::map<std::uint32_t, BirthsignRecord>& birthsigns() const noexcept { return birthsign_by_id_; }
     [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const;
     [[nodiscard]] const EffectShaderRecord* find_effect_shader(std::uint32_t form_id) const;
     [[nodiscard]] const LightData* find_light(std::uint32_t form_id) const;
@@ -467,6 +474,7 @@ private:
     std::map<std::uint32_t, CreatureBaseRecord> creature_by_id_;
     std::map<std::uint32_t, CombatStyleRecord> combat_style_by_id_;
     std::map<std::uint32_t, SpellRecord> spell_by_id_;
+    std::map<std::uint32_t, BirthsignRecord> birthsign_by_id_;
     std::map<std::uint32_t, WeaponRecord> weapon_by_id_;
     std::map<std::uint32_t, ContainerRecord> container_by_id_;
     std::map<std::uint32_t, LeveledListRecord> leveled_list_by_id_;

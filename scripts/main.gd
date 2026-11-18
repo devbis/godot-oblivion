@@ -412,6 +412,13 @@ var _dialogue_speaker_form_id := 0
 var _dialogue_listener_form_id := 0
 var _dialogue_listener_race := ""
 var _dialogue_listener_female := false
+var _birthsign_menu_active := false
+var _birthsign_menu_layer: CanvasLayer
+var _birthsign_menu_list: VBoxContainer
+var _birthsign_previous_tree_paused := false
+var _birthsign_previous_player_physics := false
+var _birthsign_previous_mouse_mode := Input.MOUSE_MODE_CAPTURED
+var _player_birthsign_form_id := 0
 var _dialogue_line_generation := 0
 var _player_first_person_mode := false
 var _active_animation := ""
@@ -442,6 +449,7 @@ func _ready() -> void:
 	player.process_mode = Node.PROCESS_MODE_PAUSABLE
 	_setup_targeting()
 	_setup_dialogue_presentation()
+	_setup_birthsign_menu()
 	_setup_loot_panel()
 	physics_grabber.configure(player, self)
 	player.gameplay_frame.connect(_on_player_gameplay_frame)
@@ -512,6 +520,8 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
 func _process(_delta: float) -> void:
+	if _birthsign_menu_active:
+		return
 	_update_flickering_lights(_delta)
 	_update_nif_flipbooks(_delta)
 	if not _inventory_open:
@@ -577,6 +587,8 @@ func _process(_delta: float) -> void:
 ## Camera input runs after the interface had its turn: a click on the inventory or on the Face and Fly buttons is theirs,
 ## and only an event no control took (a click on the world, the mouse motion that looks around) reaches the camera.
 func _unhandled_input(event: InputEvent) -> void:
+	if _birthsign_menu_active:
+		return
 	if _dialogue_exit_transition:
 		return
 	if _dialogue_active:
@@ -888,6 +900,8 @@ func _log_runtime_spawn_positions() -> void:
 	])
 
 func _physics_process(delta: float) -> void:
+	if _birthsign_menu_active:
+		return
 	for log_body: RigidBody3D in _crushing_log_bodies:
 		if is_instance_valid(log_body) and not log_body.freeze:
 			log_body.set_meta("preimpact_velocity", log_body.linear_velocity)
@@ -913,6 +927,8 @@ func _physics_process(delta: float) -> void:
 	)
 	for line: String in _apply_driver_result(result):
 		print("OpenOB quest: " + line)
+	if _birthsign_menu_active:
+		return
 	if _needs_route_refresh(result):
 		_refresh_npc_routes()
 	_try_npc_initiated_dialogues()
@@ -1407,6 +1423,10 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	var actions_to_apply: Array[Dictionary] = []
 	for action_value: Variant in result.get("actions", []):
 		var action: Dictionary = action_value
+		if str(action.get("command", "")).to_lower() == "showbirthsignmenu":
+			_show_birthsign_menu()
+			report.push_back("opens birthsign selection")
+			continue
 		if _dialogue_active or _dialogue_exit_transition:
 			_pending_dialogue_actions.push_back(action.duplicate(true))
 			var command := str(action.get("command", "")).to_lower()
@@ -4803,6 +4823,120 @@ func _setup_dialogue_presentation() -> void:
 	_scripted_dialogue_subtitle_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	_scripted_dialogue_subtitle_label.add_theme_constant_override("outline_size", 4)
 	scripted_content.add_child(_scripted_dialogue_subtitle_label)
+
+
+func _setup_birthsign_menu() -> void:
+	_birthsign_menu_layer = CanvasLayer.new()
+	_birthsign_menu_layer.name = "BirthsignMenuLayer"
+	_birthsign_menu_layer.layer = 12
+	_birthsign_menu_layer.visible = false
+	add_child(_birthsign_menu_layer)
+	var overlay := Control.new()
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_birthsign_menu_layer.add_child(overlay)
+	var shade := ColorRect.new()
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.0, 0.0, 0.0, 0.76)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	overlay.add_child(shade)
+	var panel := PanelContainer.new()
+	panel.name = "BirthsignMenuPanel"
+	panel.anchor_left = 0.5
+	panel.anchor_top = 0.5
+	panel.anchor_right = 0.5
+	panel.anchor_bottom = 0.5
+	panel.offset_left = -260.0
+	panel.offset_top = -290.0
+	panel.offset_right = 260.0
+	panel.offset_bottom = 290.0
+	overlay.add_child(panel)
+	var margin := MarginContainer.new()
+	for side in ["left", "top", "right", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 16)
+	panel.add_child(margin)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 8)
+	margin.add_child(content)
+	var title := Label.new()
+	title.text = "Choose your Birthsign"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 24)
+	content.add_child(title)
+	var instruction := Label.new()
+	instruction.text = "Select a sign to continue."
+	instruction.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(instruction)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	content.add_child(scroll)
+	_birthsign_menu_list = VBoxContainer.new()
+	_birthsign_menu_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_birthsign_menu_list.add_theme_constant_override("separation", 4)
+	scroll.add_child(_birthsign_menu_list)
+
+
+func _show_birthsign_menu() -> void:
+	if _birthsign_menu_active:
+		return
+	if data_reader == null or not data_reader.has_method("list_birthsigns"):
+		push_error("OpenOB character: birthsign records are unavailable")
+		return
+	var signs: Array = data_reader.list_birthsigns()
+	if signs.is_empty():
+		push_error("OpenOB character: Oblivion.esm contains no indexed birthsign records")
+		return
+	signs.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		return str(left.get("name", "")).nocasecmp_to(str(right.get("name", ""))) < 0
+	)
+	for child in _birthsign_menu_list.get_children():
+		child.queue_free()
+	for sign_value: Variant in signs:
+		var sign: Dictionary = sign_value
+		var form_id := int(sign.get("form_id", 0))
+		var name := str(sign.get("name", sign.get("editor_id", "Birthsign")))
+		if form_id <= 0:
+			continue
+		var button := Button.new()
+		button.text = name
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		button.custom_minimum_size = Vector2(0.0, 38.0)
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.pressed.connect(_select_player_birthsign.bind(form_id, name))
+		_birthsign_menu_list.add_child(button)
+	if _birthsign_menu_list.get_child_count() == 0:
+		push_error("OpenOB character: birthsign records have no valid FormIDs")
+		return
+	_birthsign_previous_tree_paused = get_tree().paused
+	_birthsign_previous_mouse_mode = Input.mouse_mode
+	_birthsign_previous_player_physics = is_instance_valid(player) and player.is_physics_processing()
+	_birthsign_menu_active = true
+	_birthsign_menu_layer.visible = true
+	if is_instance_valid(player):
+		player.release_mouse()
+		player.set_physics_process(false)
+	get_tree().paused = true
+	var first_option := _birthsign_menu_list.get_child(0) as Control
+	if is_instance_valid(first_option):
+		first_option.grab_focus()
+
+
+func _select_player_birthsign(form_id: int, name: String) -> void:
+	if not _birthsign_menu_active or form_id <= 0:
+		return
+	_player_birthsign_form_id = form_id
+	_player_base_record["birthsign_form_id"] = form_id
+	if quest_world != null and quest_world.has_method("set_listener_birthsign"):
+		quest_world.set_listener_birthsign(form_id)
+	print("OpenOB character: selected birthsign %s (0x%08X)" % [name, form_id])
+	_birthsign_menu_layer.visible = false
+	_birthsign_menu_active = false
+	get_tree().paused = _birthsign_previous_tree_paused
+	if is_instance_valid(player):
+		player.set_physics_process(_birthsign_previous_player_physics)
+	Input.mouse_mode = _birthsign_previous_mouse_mode
+	if quest_world != null:
+		_refresh_npc_routes()
 
 
 func _dialogue_player_identity() -> Dictionary:

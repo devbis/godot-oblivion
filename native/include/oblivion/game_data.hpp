@@ -29,6 +29,9 @@ public:
         return esm_.find_combat_style(form_id);
     }
     [[nodiscard]] const SpellRecord* find_spell(std::uint32_t form_id) const;
+    [[nodiscard]] const std::map<std::uint32_t, BirthsignRecord>& birthsigns() const noexcept {
+        return esm_.birthsigns();
+    }
     [[nodiscard]] const MagicEffectRecord* find_magic_effect(std::string_view effect_code) const {
         return esm_.find_magic_effect(effect_code);
     }

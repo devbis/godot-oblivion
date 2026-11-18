@@ -982,6 +982,20 @@ public:
         return display_name ? as_string(*display_name) : String{};
     }
 
+    Array list_birthsigns() const {
+        Array result;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return result;
+        for (const auto& [form_id, birthsign] : data_->birthsigns()) {
+            Dictionary item;
+            item["form_id"] = static_cast<int64_t>(form_id);
+            item["editor_id"] = as_string(birthsign.editor_id);
+            item["name"] = as_string(birthsign.name);
+            result.push_back(item);
+        }
+        return result;
+    }
+
     String find_record_icon_path(int64_t form_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!data_) return {};
@@ -1404,6 +1418,7 @@ protected:
         ClassDB::bind_method(D_METHOD("find_editor_id", "form_id"), &OblivionData::find_editor_id);
         ClassDB::bind_method(D_METHOD("find_record_type", "form_id"), &OblivionData::find_record_type);
         ClassDB::bind_method(D_METHOD("find_record_display_name", "form_id"), &OblivionData::find_record_display_name);
+        ClassDB::bind_method(D_METHOD("list_birthsigns"), &OblivionData::list_birthsigns);
         ClassDB::bind_method(D_METHOD("find_record_icon_path", "form_id"), &OblivionData::find_record_icon_path);
         ClassDB::bind_method(D_METHOD("list_assets", "prefix"), &OblivionData::list_assets);
         ClassDB::bind_method(D_METHOD("read_asset", "asset_path"), &OblivionData::read_asset);
@@ -1655,6 +1670,10 @@ public:
         world_->set_listener(game ? game->find_form_id_by_editor_id(utf8_value(race_editor_id)) : 0u, female);
     }
 
+    void set_listener_birthsign(int64_t birthsign_form_id) {
+        if (world_) world_->set_listener_birthsign(form_id_arg(birthsign_form_id));
+    }
+
     Dictionary begin_dialogue(int64_t speaker_base, int64_t listener_base, const String& listener_race,
                               bool listener_female, const Callable& distance) {
         if (!game_ || !world_) return {};
@@ -1859,6 +1878,8 @@ public:
                              &OblivionQuestWorld::run_object_event, DEFVAL(String()), DEFVAL(String()));
         ClassDB::bind_method(D_METHOD("get_variable", "quest_editor_id", "variable"), &OblivionQuestWorld::get_variable);
         ClassDB::bind_method(D_METHOD("set_listener", "race_editor_id", "female"), &OblivionQuestWorld::set_listener);
+        ClassDB::bind_method(D_METHOD("set_listener_birthsign", "birthsign_form_id"),
+                             &OblivionQuestWorld::set_listener_birthsign);
         ClassDB::bind_method(D_METHOD("begin_dialogue", "speaker_base", "listener_base", "listener_race", "listener_female", "distance"),
                              &OblivionQuestWorld::begin_dialogue);
         ClassDB::bind_method(D_METHOD("available_dialog_topics", "speaker_base", "listener_base", "listener_race", "listener_female"),
@@ -1911,6 +1932,7 @@ private:
         context.listener_base = form_id_arg(listener_base);
         context.listener_race = game_ ? game_->find_form_id_by_editor_id(utf8_value(listener_race)) : 0u;
         context.listener_female = listener_female;
+        context.listener_birthsign = world_ ? world_->listener_birthsign() : 0u;
         if (game_) {
             if (const auto* speaker = game_->find_npc_base(context.speaker_base)) {
                 context.speaker_race = speaker->race_form_id;

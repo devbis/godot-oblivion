@@ -40,6 +40,7 @@ std::string condition_function_name(std::uint16_t function_index) {
     case 130: return "GetPCIsRace";
     case 131: return "GetPCIsSex";
     case 161: return "GetIsCurrentPackage";
+    case 224: return "GetIsPlayerBirthsign";
     default: return "condition";
     }
 }

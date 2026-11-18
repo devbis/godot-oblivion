@@ -350,8 +350,11 @@ public:
             constexpr std::uint16_t kGetIsSex = 70;  // param 0 male, 1 female
             constexpr std::uint16_t kGetPCIsRace = 130;
             constexpr std::uint16_t kGetPCIsSex = 131;  // param 0 male, 1 female
+            constexpr std::uint16_t kGetIsPlayerBirthsign = 224;
             if (function_index == kGetPCIsRace) return parameter1 == dialogue_->listener_race ? 1.0 : 0.0;
             if (function_index == kGetPCIsSex) return (parameter1 != 0) == dialogue_->listener_female ? 1.0 : 0.0;
+            if (function_index == kGetIsPlayerBirthsign)
+                return parameter1 == dialogue_->listener_birthsign ? 1.0 : 0.0;
             if (function_index == kGetIsID || function_index == kGetIsRace || function_index == kGetIsSex) {
                 if (run_on > 1) return std::nullopt;
                 const bool is_listener = run_on == 1;
@@ -873,6 +876,7 @@ double QuestWorld::say(std::string_view topic_editor_id, std::uint32_t speaker, 
     context.listener_base = listener;
     context.listener_race = listener_race_;
     context.listener_female = listener_female_;
+    context.listener_birthsign = listener_birthsign_;
     if (actor_traits_ && speaker != 0) {
         if (const auto traits = actor_traits_(speaker)) {
             context.speaker_race = traits->first;
@@ -932,6 +936,7 @@ double QuestWorld::speech_duration(std::string_view topic_editor_id, std::uint32
     context.listener_base = listener;
     context.listener_race = listener_race_;
     context.listener_female = listener_female_;
+    context.listener_birthsign = listener_birthsign_;
     if (actor_traits_ && speaker != 0) {
         if (const auto traits = actor_traits_(speaker)) {
             context.speaker_race = traits->first;

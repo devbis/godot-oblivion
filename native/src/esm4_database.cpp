@@ -145,7 +145,7 @@ bool is_runtime_visual_record(std::string_view type) {
     static constexpr std::array relevant_types = {
         std::string_view("CELL"), std::string_view("REFR"), std::string_view("ACHR"),
         std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"), std::string_view("CREA"),
-        std::string_view("RACE"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
+        std::string_view("RACE"), std::string_view("BSGN"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
         std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
@@ -177,6 +177,7 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     npc_by_id_.clear();
     combat_style_by_id_.clear();
     spell_by_id_.clear();
+    birthsign_by_id_.clear();
     weapon_by_id_.clear();
     container_by_id_.clear();
     leveled_list_by_id_.clear();
@@ -671,6 +672,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     const bool is_combat_style = type == "CSTY";
     bool is_race = type == "RACE";
     bool is_spell = type == "SPEL";
+    bool is_birthsign = type == "BSGN";
     bool is_magic_effect = type == "MGEF";
     bool is_effect_shader = type == "EFSH";
     bool is_outfit = type == "OTFT";
@@ -778,7 +780,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
+            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_birthsign || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -796,6 +798,9 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_race) {
             race_face_gen.display_name = lower_ascii(read_zstring(value, subrecord_size));
             record_display_name_by_id_[form_id] = race_face_gen.display_name;
+        } else if (tag == "FULL" && is_birthsign) {
+            const auto display_name = read_zstring(value, subrecord_size);
+            if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
         } else if (tag == "FULL" && is_creature) {
             creature.name = read_zstring(value, subrecord_size);
             record_display_name_by_id_[form_id] = creature.name;
@@ -1469,6 +1474,15 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         combat_style_by_id_[form_id] = std::move(combat_style);
     if (is_spell)
         spell_by_id_[form_id] = std::move(spell);
+    if (is_birthsign) {
+        BirthsignRecord birthsign;
+        birthsign.form_id = form_id;
+        birthsign.editor_id = base_editor_id;
+        if (const auto name = record_display_name_by_id_.find(form_id); name != record_display_name_by_id_.end())
+            birthsign.name = name->second;
+        if (birthsign.name.empty()) birthsign.name = birthsign.editor_id;
+        birthsign_by_id_[form_id] = std::move(birthsign);
+    }
     if (is_magic_effect && !base_editor_id.empty())
         magic_effect_by_code_[lower_ascii(base_editor_id)] = magic_effect;
     if (is_effect_shader)
