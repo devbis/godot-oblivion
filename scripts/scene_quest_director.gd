@@ -191,15 +191,16 @@ func build_navigation_tiles() -> void:
 			var geometry := NavigationMeshSourceGeometryData3D.new()
 			geometry.add_faces(tile, Transform3D.IDENTITY)
 			var nav_mesh := NavigationMesh.new()
-			nav_mesh.agent_radius = 0.18
-			var player_collision := scene.player.get_node_or_null("CollisionShape3D") as CollisionShape3D
-			var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
-			if player_capsule != null:
-				nav_mesh.agent_height = player_capsule.height
-			nav_mesh.agent_max_climb = 0.4
-			nav_mesh.agent_max_slope = 55.0
 			nav_mesh.cell_size = 0.2
 			nav_mesh.cell_height = 0.2
+			# Recast rounds these dimensions up to whole voxels when baking.
+			nav_mesh.agent_radius = nav_mesh.cell_size
+			var player_collision := scene.player.get_node_or_null("CollisionShape3D") as CollisionShape3D
+			var player_capsule := player_collision.shape as CapsuleShape3D if player_collision != null else null
+			var agent_height := player_capsule.height if player_capsule != null else nav_mesh.agent_height
+			nav_mesh.agent_height = ceilf(agent_height / nav_mesh.cell_height) * nav_mesh.cell_height
+			nav_mesh.agent_max_climb = 0.4
+			nav_mesh.agent_max_slope = 55.0
 			NavigationServer3D.bake_from_source_geometry_data(nav_mesh, geometry)
 			polygon_count += nav_mesh.get_polygon_count()
 			var region := NavigationRegion3D.new()
