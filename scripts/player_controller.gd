@@ -12,10 +12,15 @@ const SWIM_BUOYANCY_RESPONSE := 2.8
 ## original executable analysis and in-game comparison establish them.
 
 signal gameplay_frame(delta_seconds: float, running: bool, jumped: bool)
+signal combat_dodged(direction: Vector2)
 
 @export var walk_speed_mps := 2.0
 @export var run_speed_mps := 3.4
 @export var jump_speed_mps := 4.7
+var can_combat_dodge := false
+var combat_dodge_speed_mps := 0.0
+var _dodge_velocity := Vector3.ZERO
+var _dodge_time := 0.0
 @export var gravity_mps2 := 9.8
 @export_range(0.0, 0.6, 0.01) var max_step_height_m := 0.40
 @export_range(35.0, 75.0, 1.0) var max_walkable_slope_degrees := 55.0
@@ -148,11 +153,13 @@ func release_mouse() -> void:
 func set_controls_suspended(suspended: bool) -> void:
 	controls_suspended = suspended
 	if suspended:
+		_dodge_time = 0.0
 		velocity = Vector3.ZERO
 
 func set_knocked_down(value: bool) -> void:
 	knocked_down = value
 	if value:
+		_dodge_time = 0.0
 		is_swimming = false
 
 ## The loaded cell supplies a water surface height in world metres, or -INF when this actor is outside water.
@@ -319,6 +326,7 @@ func _physics_process(delta: float) -> void:
 	_update_crouch(delta)
 	_update_swimming_state()
 	if is_swimming:
+		_dodge_time = 0.0
 		_update_swimming(delta)
 		gameplay_frame.emit(delta, false, false)
 		return
@@ -326,21 +334,31 @@ func _physics_process(delta: float) -> void:
 	# While a step is in progress the capsule rolls over a tread's rounded nose,
 	# where it is not on the floor yet. Gravity is held off so it can finish the step,
 	# but a jump still starts from there.
+	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var camera_basis := Basis(Vector3.UP, rotation.y)
+	var direction := (camera_basis * Vector3(input.x, 0.0, input.y)).normalized()
 	var did_jump := false
-	if Input.is_action_just_pressed("jump") and (is_on_floor() or _stepper.is_stepping()):
+	_dodge_time = maxf(0.0, _dodge_time - delta)
+	if _dodge_time <= 0.0 and Input.is_action_just_pressed("jump") and (is_on_floor() or _stepper.is_stepping()):
 		_stepper.cancel()
-		velocity.y = jump_speed_mps
-		did_jump = true
+		if can_combat_dodge and combat_dodge_speed_mps > 0.0 and direction != Vector3.ZERO \
+				and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and not is_crouching:
+			_dodge_velocity = direction * combat_dodge_speed_mps
+			_dodge_time = 0.28
+			combat_dodged.emit(input)
+		elif jump_speed_mps > 0.0 and not is_crouching:
+			velocity.y = jump_speed_mps
+			did_jump = true
 	elif _stepper.is_stepping():
 		velocity.y = 0.0
 	elif not is_on_floor():
 		velocity.y -= gravity_mps2 * delta
 
-	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
-	var camera_basis := Basis(Vector3.UP, rotation.y)
-	var direction := (camera_basis * Vector3(input.x, 0.0, input.y)).normalized()
 	var speed := (run_speed_mps if Input.is_action_pressed("run") else walk_speed_mps) * (crouch_speed_scale if is_crouching else 1.0)
-	if direction:
+	if _dodge_time > 0.0:
+		velocity.x = _dodge_velocity.x
+		velocity.z = _dodge_velocity.z
+	elif direction or speed <= 0.0:
 		velocity.x = direction.x * speed
 		velocity.z = direction.z * speed
 	else:
@@ -499,7 +517,7 @@ func _push_contacted_chains(requested_velocity: Vector3) -> void:
 		var push_speed := maxf(0.0, -horizontal_velocity.dot(horizontal_normal))
 		if push_speed <= 0.05:
 			continue
-		var force := -horizontal_normal * chain_push_force_newtons * clampf(push_speed / run_speed_mps, 0.0, 1.0)
+		var force := -horizontal_normal * chain_push_force_newtons * clampf(push_speed / maxf(run_speed_mps, 0.01), 0.0, 1.0)
 		var contact_offset := collision.get_position() - chain.global_position
 		chain.apply_force(force, contact_offset)
 

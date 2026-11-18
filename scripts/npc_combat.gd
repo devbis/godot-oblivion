@@ -29,14 +29,12 @@ const DODGE_DEFAULT_CHANCE := 75.0
 const DODGE_DEFAULT_LEFT_RIGHT_CHANCE := 50.0
 const BLOCK_DEFAULT_CHANCE := 30.0
 const DODGE_REACTION_WINDOW_S := 0.3
-const DODGE_DISTANCE_M := 0.45
 const DODGE_MOVEMENT_DURATION_S := 0.3
 const PLAYER_ATTACK_DODGE_RANGE_M := 3.0
 ## How far past its reach a swing still lands, and how a block cuts the damage of a hit from the front.
 const HIT_REACH_SLACK_M := 0.5
 ## A melee blow does not reach a target this far above or below the attacker, however close it is on the floor plan.
 const MELEE_VERTICAL_REACH_M := 1.8
-const BLOCKED_DAMAGE_SHARE := 0.3
 const POWER_ATTACK_CHANCE_SETTING := "iAIDefaultPowerAttackChance"
 const POWER_ATTACK_DEFAULT_CHANCE := 25.0
 const POWER_ATTACK_MIN_ENGAGE_DISTANCE_SETTING := "fCombatMinEngageDistance"
@@ -80,23 +78,9 @@ const SKILL_BLOCK := 3
 const SKILL_HAND_TO_HAND := 5
 ## WEAP type -> the skill a blow uses: blades, blunt weapons and staves, bows (Marksman, 16).
 const WEAPON_SKILLS := {0: 2, 1: 2, 2: 4, 3: 4, 4: 4, 5: 16}
-## Armor (Oblivion.exe FUN_00547370, FUN_0060e580): each worn piece rates `max(1, floor(skill x (fArmorRatingBase + (
-## fArmorRatingMax - fArmorRatingBase) x armor / 100))) x condition`, the skill being the Light or Heavy Armor skill with
-## the luck term (FUN_00547b90) and the pieces summing to at most fMaxArmorRating. Light or heavy is told by the piece's
-## weight against the iArmorWeight setting of its slot. The rating is the percent of a blow it takes off.
 const SKILL_HEAVY_ARMOR := 6
 const SKILL_LIGHT_ARMOR := 15
 const ATTRIBUTE_LUCK := 7
-const ARMOR_RATING_BASE_DEFAULT := 0.35
-const ARMOR_RATING_MAX_DEFAULT := 1.0
-const LUCK_SKILL_MULT_DEFAULT := 0.4
-const LUCK_SKILL_BASE_DEFAULT := -20.0
-const MAX_ARMOR_RATING_DEFAULT := 85.0
-## Biped slot bit -> the iArmorWeight setting and default weight above which a piece in it is heavy armor.
-const ARMOR_SLOT_WEIGHTS := {
-	0x1: ["iArmorWeightHelmet", 5.0], 0x4: ["iArmorWeightCuirass", 30.0], 0x8: ["iArmorWeightGreaves", 15.0],
-	0x10: ["iArmorWeightGauntlets", 5.0], 0x20: ["iArmorWeightBoots", 20.0], 0x2000: ["iArmorWeightShield", 15.0],
-}
 const ALLY_HELP_RADIUS_M := 25.0
 const CHASE_HOP_MAX_M := 8.0
 const CHASE_HOP_LANDING_OFFSET_M := 1.2
@@ -178,6 +162,8 @@ func update(delta: float) -> void:
 		if bool(actor.get("dead", false)):
 			continue
 		_advance_actor_fatigue(actor, root, delta)
+		if _advance_spell_control(actor, root, player, delta):
+			continue
 		if str(actor.get("knockdown_state", "")) in ["falling", "downed", "getting_up"]:
 			continue
 		var hit_lock_remaining := maxf(0.0, float(actor.get("hit_attack_lock_remaining", 0.0)) - delta)
@@ -242,6 +228,9 @@ func _on_scripted_errand(actor: Dictionary) -> bool:
 		and int(host.call("_package_destination_form_id", package)) not in [0, int(host.get("PLAYER_REFERENCE_FORM_ID"))]
 
 func _sees_player(root: Node3D, player: CollisionObject3D) -> bool:
+	var player_values: RefCounted = host.get("_player_actor_values")
+	if player == host.get("player") and player_values.ability("INVI") > 0.0:
+		return false
 	var camera: Camera3D = player.get("camera")
 	var to := camera.global_position if camera != null else player.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
 	var from := root.global_position + Vector3.UP * SIGHT_EYE_HEIGHT_M
@@ -295,6 +284,8 @@ func _attribute_value(actor: Dictionary, index: int) -> float:
 
 func _skill_value(actor: Dictionary, index: int) -> float:
 	var skills: PackedInt64Array = actor.get("skills", PackedInt64Array())
+	if _is_creature(actor) and skills.is_empty():
+		return clampf(float(actor.get("creature_combat_skill", 0.0)), 0.0, 100.0)
 	return minf(float(skills[index]) if skills.size() > index else 30.0, 100.0)
 
 ## Luck affects combat effectiveness, but not the skill rank used to unlock perks.
@@ -326,7 +317,7 @@ func _fatigue_damage_modifier(actor: Dictionary) -> float:
 ##   condition x weapon damage x fDamageWeaponMult x (skill base + skill mult x skill/100)
 ##   x (strength base + strength mult x strength/100) x fatigue x power attack bonus
 ## Bare hands (FUN_00547280): hand health min + t x (max - min), t = strength x skill x fatigue terms, at most 1.
-func _hit_damage(actor: Dictionary, power: bool) -> float:
+func _hit_damage(actor: Dictionary, power: bool, clip := "") -> float:
 	var record: Dictionary = actor.get("weapon_record", {})
 	var strength := _attribute_value(actor, ATTRIBUTE_STRENGTH)
 	var fatigue_modifier := _fatigue_damage_modifier(actor)
@@ -347,22 +338,21 @@ func _hit_damage(actor: Dictionary, power: bool) -> float:
 	damage *= _setting("fDamageSkillBase") + _setting("fDamageSkillMult") * skill * 0.01
 	damage *= _setting("fDamageStrengthBase") + _setting("fDamageStrengthMult") * strength * 0.01
 	damage *= fatigue_modifier
-	return damage * (_setting("fDamagePowerAttackBonus") if power else 1.0)
+	return damage * (_power_attack_bonus(clip) if power else 1.0)
+
+func _power_attack_bonus(clip: String) -> float:
+	if clip.contains("forward"):
+		return _setting("fDamagePowerAttackForwardBonus")
+	if clip.contains("back"):
+		return _setting("fDamagePowerAttackBackBonus")
+	if clip.contains("left") or clip.contains("right"):
+		return _setting("fDamagePowerAttackSideBonus")
+	return _setting("fDamagePowerAttackStandBonus")
 
 ## Use the same Oblivion damage path for the player's melee and bow hits as NPC attacks.
-func player_hit_damage(power := false) -> float:
-	var player_base: Dictionary = host.get("_player_base_record")
-	if player_base.is_empty() or not bool(player_base.get("has_actor_values", false)):
-		return 0.0
-	var actor_values: RefCounted = host.get("_player_actor_values")
-	var vitals: Dictionary = actor_values.call("snapshot") if is_instance_valid(actor_values) else {}
-	var player_actor := {
-		"weapon_record": host.get("_player_weapon_record"),
-		"attributes": player_base.get("attributes", PackedInt64Array()),
-		"skills": player_base.get("skills", PackedInt64Array()),
-		"fatigue": vitals.get("fatigue", {}),
-	}
-	return _hit_damage(player_actor, power)
+func player_hit_damage(power := false, clip := "") -> float:
+	var actor: Dictionary = host.call("_player_combat_values")
+	return _hit_damage(actor, power, clip)
 
 ## The fatigue a bare-handed blow takes off the target (FUN_00547280); a weapon or a claw takes health only.
 func _hit_fatigue_damage(attacker: Dictionary, damage: float) -> float:
@@ -377,48 +367,64 @@ func player_hit_fatigue_damage(health_damage: float) -> float:
 		return health_damage * _setting("fHandFatigueDamageMult") + _setting("fHandFatigueDamageBase")
 	return 0.0
 
-## The player's armor rating: the worn pieces' ratings summed and capped (FUN_0060e580).
-func player_armor_rating() -> float:
+func _armor_ids(actor: Dictionary) -> PackedInt64Array:
+	var ids := PackedInt64Array()
+	var replaced_slots := 0
+	if bool(actor.get("bound_gear_active", false)):
+		ids.append_array(actor.get("bound_armor_ids", PackedInt64Array()))
+		replaced_slots = int(actor.get("bound_gear_slots", 0))
+	for piece: Dictionary in actor.get("worn_equipment", []):
+		if (int(piece.get("slots", 0)) & replaced_slots) == 0:
+			ids.push_back(int(piece.get("form_id", 0)))
+	return ids
+
+## Oblivion.exe FUN_00547370 and FUN_0060e580 use the worn armor skill and Luck.
+func _armor_rating(actor: Dictionary, item_ids: PackedInt64Array) -> float:
 	var reader: Object = host.get("data_reader")
-	var player_base: Dictionary = host.get("_player_base_record")
-	if reader == null or player_base.is_empty():
-		return 0.0
-	var skills: PackedInt64Array = player_base.get("skills", PackedInt64Array())
-	var attributes: PackedInt64Array = player_base.get("attributes", PackedInt64Array())
-	var luck := float(attributes[ATTRIBUTE_LUCK]) if attributes.size() > ATTRIBUTE_LUCK else 50.0
-	var armor_base := _setting_or("fArmorRatingBase", ARMOR_RATING_BASE_DEFAULT)
-	var armor_max := _setting_or("fArmorRatingMax", ARMOR_RATING_MAX_DEFAULT)
-	var total := 0.0
-	for form_id_value: Variant in (host.get("_player_equipment") as Dictionary).keys():
-		var form_id := int(form_id_value)
-		if str(reader.find_record_type(form_id)) != "ARMO":
-			continue
+	var abilities: Dictionary = actor.get("abilities", {})
+	var total := float(abilities.get("SHLD", 0.0))
+	var armor_base := _setting_or("fArmorRatingBase", 0.35)
+	var armor_max := _setting_or("fArmorRatingMax", 1.0)
+	for form_id: int in item_ids:
 		var stats: Dictionary = reader.find_item_stats(form_id)
 		var armor := float(stats.get("armor_rating", 0)) / 100.0
 		if armor <= 0.0:
 			continue
-		var slots := int(reader.get_item_biped_slots(form_id))
-		var heavy := false
-		for slot_bit: int in ARMOR_SLOT_WEIGHTS:
-			if (slots & slot_bit) != 0:
-				var entry: Array = ARMOR_SLOT_WEIGHTS[slot_bit]
-				heavy = float(stats.get("weight", 0.0)) > _setting_or(str(entry[0]), float(entry[1]))
-				break
-		var skill_index := SKILL_HEAVY_ARMOR if heavy else SKILL_LIGHT_ARMOR
-		var skill := float(skills[skill_index]) if skills.size() > skill_index else 0.0
-		var effective_skill := clampf(
-			skill + luck * _setting_or("fActorLuckSkillMult", LUCK_SKILL_MULT_DEFAULT)
-				+ _setting_or("iActorLuckSkillBase", LUCK_SKILL_BASE_DEFAULT), 0.0, 100.0
-		)
+		var skill_index := SKILL_HEAVY_ARMOR if bool(stats.get("heavy_armor", false)) else SKILL_LIGHT_ARMOR
+		var effective_skill := _effective_combat_skill(actor, skill_index)
 		total += maxf(1.0, floorf(effective_skill * (armor_base + (armor_max - armor_base) * armor / 100.0)))
-	return minf(total, _setting_or("fMaxArmorRating", MAX_ARMOR_RATING_DEFAULT))
+	return minf(total, _setting_or("fMaxArmorRating", 85.0))
 
-func _attack_fatigue_cost(actor: Dictionary) -> float:
-	if _weapon_type(actor) < 0:
-		return FATIGUE_ATTACK_COST
+func player_armor_rating() -> float:
+	var actor: Dictionary = host.call("_player_combat_values")
+	return _armor_rating(actor, PackedInt64Array((host.get("_player_equipment") as Dictionary).keys()))
+
+## Oblivion.exe FUN_005474a0: Block and Luck, equipment type and current Fatigue.
+func _block_damage_share(actor: Dictionary, item_ids: PackedInt64Array) -> float:
+	var reader: Object = host.get("data_reader")
+	var multiplier := _setting("fBlockAmountHandToHandMult") if _weapon_type(actor) < 0 else _setting("fBlockAmountWeaponMult")
+	for id: int in item_ids:
+		if (int(reader.get_item_biped_slots(id)) & 0x2000) != 0:
+			multiplier = 1.0
+			break
+	var block := (_setting("fBlockSkillBase") + _effective_combat_skill(actor, SKILL_BLOCK) * 0.01
+		* _setting("fBlockSkillMult")) * multiplier * _fatigue_damage_modifier(actor)
+	return 1.0 - clampf(block, 0.0, _setting("fBlockMax"))
+
+## FUN_00547590 takes the block skill and the amount of damage absorbed.
+func _block_fatigue_cost(actor: Dictionary, absorbed_damage: float) -> float:
+	if _skill_value(actor, SKILL_BLOCK) >= _setting("iSkillApprenticeMin"):
+		return 0.0
+	return maxf(0.0, _setting("fFatigueBlockBase") + absorbed_damage * _setting("fFatigueBlockMult")
+		+ _setting("fFatigueBlockSkillBase") + _skill_value(actor, SKILL_BLOCK) * _setting("fFatigueBlockSkillMult"))
+
+func _attack_fatigue_cost(actor: Dictionary, power: bool) -> float:
 	var settings: Dictionary = host.get("_player_game_settings")
-	return float(settings.get(FATIGUE_ATTACK_WEAPON_BASE_SETTING, FATIGUE_ATTACK_COST)) \
-		+ _damage(actor) * float(settings.get(FATIGUE_ATTACK_WEAPON_MULT_SETTING, 0.0))
+	var cost := FATIGUE_ATTACK_COST
+	if _weapon_type(actor) >= 0:
+		cost = float(settings.get(FATIGUE_ATTACK_WEAPON_BASE_SETTING, FATIGUE_ATTACK_COST)) \
+			+ _damage(actor) * float(settings.get(FATIGUE_ATTACK_WEAPON_MULT_SETTING, 0.0))
+	return cost * (float(settings.get("fPowerAttackFatiguePenalty", 5.0)) if power else 1.0)
 
 func receive_player_hit(
 	reference_id: int, source_position: Vector3, fatigue_damage: float, allow_block := false,
@@ -433,9 +439,9 @@ func receive_player_hit(
 		return false
 	provoke(reference_id)
 	var blocked := allow_block and _actor_blocks_hit(actor, source_position)
-	var applied_health_damage := maxf(0.0, health_damage)
-	if blocked:
-		applied_health_damage *= BLOCKED_DAMAGE_SHARE
+	var armor_ids := _armor_ids(actor)
+	var damage_share := _block_damage_share(actor, armor_ids) if blocked else 1.0
+	var applied_health_damage := maxf(0.0, health_damage) * damage_share * (1.0 - _armor_rating(actor, armor_ids) * 0.01)
 	if applied_health_damage > 0.0:
 		var health: Dictionary = actor.get("health", {})
 		if not health.is_empty():
@@ -454,7 +460,9 @@ func receive_player_hit(
 			if bool(actor.get("dead", false)):
 				_call_allies(actor, _player_attacker())
 				return blocked
-	var received_fatigue := fatigue_damage * BLOCKED_DAMAGE_SHARE if blocked else fatigue_damage
+	var received_fatigue := fatigue_damage * damage_share
+	if blocked:
+		received_fatigue += _block_fatigue_cost(actor, health_damage * (1.0 - damage_share))
 	var fight_back_target := 0 if not _calmed.has(reference_id) else -1
 	_react_to_hit(actor, source_position, received_fatigue, fight_back_target, _player_base_form_id(), blocked)
 	_call_allies(actor, _player_attacker())
@@ -500,16 +508,55 @@ func add_player_spell_effects(reference_id: int, effects: Array, range_type: int
 		var effect: Dictionary = value
 		if int(effect.get("range_type", -1)) != range_type:
 			continue
-		if str(effect.get("code", "")) not in ["FIDG", "FRDG", "SHDG", "DGHE"]:
-			continue
-		var magnitude := maxf(0.0, float(effect.get("magnitude", 0)))
+		var code := str(effect.get("code", ""))
+		var magnitude := maxf(0.0, float(effect.get("magnitude", 0))) * _magic_damage_multiplier(actor, code)
 		var flags := int(effect.get("magic_effect_flags", 0))
 		var duration := 0.0 if (flags & (1 << 7)) != 0 else float(effect.get("duration", 0))
-		if duration <= 0.0:
-			_apply_spell_health_damage(actor, magnitude)
-		else:
-			active.push_back({"rate": magnitude, "remaining": duration})
+		match code:
+			"FIDG", "FRDG", "SHDG", "DGHE":
+				if duration <= 0.0:
+					_apply_spell_health_damage(actor, magnitude)
+				else:
+					active.push_back({"rate": magnitude, "remaining": duration})
+			"PARA":
+				if _magic_damage_multiplier(actor, code) > 0.0:
+					actor["paralyzed_seconds"] = maxf(float(actor.get("paralyzed_seconds", 0)), duration)
+			"TURN":
+				if int(actor.get("creature_type", -1)) == 3 and float(actor.get("level", 1)) <= magnitude:
+					actor["turn_seconds"] = maxf(float(actor.get("turn_seconds", 0)), duration)
 	actor["spell_damage"] = active
+
+func _magic_damage_multiplier(actor: Dictionary, code: String) -> float:
+	var effects: Dictionary = actor.get("abilities", {})
+	var multiplier := maxf(0.0, 1.0 + 0.01 * (float(effects.get("WKMA", 0)) - float(effects.get("RSMA", 0))))
+	var element: Array = {"FIDG": ["WKFI", "RSFI"], "FRDG": ["WKFR", "RSFR"],
+		"SHDG": ["WKSH", "RSSH"], "PARA": ["", "RSPA"]}.get(code, [])
+	if not element.is_empty():
+		multiplier *= maxf(0.0, 1.0 + 0.01 * (float(effects.get(element[0], 0)) - float(effects.get(element[1], 0))))
+	return multiplier
+
+func _advance_spell_control(actor: Dictionary, root: Node3D, player: Node3D, delta: float) -> bool:
+	var paralyzed := float(actor.get("paralyzed_seconds", 0.0))
+	var turned := float(actor.get("turn_seconds", 0.0))
+	if paralyzed <= 0.0 and turned <= 0.0:
+		return false
+	actor["paralyzed_seconds"] = maxf(0.0, paralyzed - delta)
+	actor["turn_seconds"] = maxf(0.0, turned - delta)
+	if actor.has("combat"):
+		_end_combat(actor)
+		_stop_route(root)
+	if paralyzed > 0.0:
+		_stop_route(root)
+	elif not bool(root.get("is_walking")):
+		var away := root.global_position - player.global_position
+		away.y = 0.0
+		var path: PackedVector3Array = host.get("director").call("navigation_path",
+			root.global_position, root.global_position + away.normalized() * 5.0,
+			host.call("_actor_collision_radius", root), false, 0.0)
+		root.call("configure_route", host.call("_navigation_waypoints", path, float(root.get("run_speed_mps"))), false, 0.0)
+	if delta >= maxf(paralyzed, turned):
+		host.call("_refresh_actor_route", actor)
+	return true
 
 func _advance_spell_damage(actor: Dictionary, delta: float) -> void:
 	var active: Array = actor.get("spell_damage", [])
@@ -540,8 +587,10 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 	var attacker_root := attacker.get("root") as Node3D
 	var attacker_id := int(attacker.get("reference_id", 0))
 	var blocked := is_instance_valid(attacker_root) and _actor_blocks_hit(victim, attacker_root.global_position)
-	if blocked:
-		damage *= BLOCKED_DAMAGE_SHARE
+	var armor_ids := _armor_ids(victim)
+	var damage_share := _block_damage_share(victim, armor_ids) if blocked else 1.0
+	var block_cost := _block_fatigue_cost(victim, damage * (1.0 - damage_share)) if blocked else 0.0
+	damage *= damage_share * (1.0 - _armor_rating(victim, armor_ids) * 0.01)
 	var health: Dictionary = victim.get("health", {})
 	if not health.is_empty():
 		var remaining := maxf(0.0, float(health.get("current", 0.0)) - damage)
@@ -562,7 +611,7 @@ func receive_actor_hit(victim: Dictionary, attacker: Dictionary, damage: float) 
 	var fight_back := _aggression(victim) >= AGGRESSION_DEFENDS and not _calmed.has(int(victim.get("reference_id", 0)))
 	var source := attacker_root.global_position if is_instance_valid(attacker_root) else Vector3.ZERO
 	_react_to_hit(
-		victim, source, _hit_fatigue_damage(attacker, damage), attacker_id if fight_back else -1,
+		victim, source, _hit_fatigue_damage(attacker, damage) + block_cost, attacker_id if fight_back else -1,
 		int(attacker.get("base_form_id", 0)), blocked
 	)
 	if blocked:
@@ -1214,7 +1263,8 @@ func _begin_dodge(actor: Dictionary, root: Node3D, combat: Dictionary, clip: Str
 	if str(combat.get("state", "")) == "swing":
 		_interrupt_actor_attack(actor)
 	_stop_route(root)
-	if not bool(root.call("begin_combat_dodge", direction, DODGE_DISTANCE_M, DODGE_MOVEMENT_DURATION_S)):
+	var dodge_distance := float(host.call("_npc_movement_speed", actor, true)) * DODGE_MOVEMENT_DURATION_S
+	if not bool(root.call("begin_combat_dodge", direction, dodge_distance, DODGE_MOVEMENT_DURATION_S)):
 		return false
 	var start_time := float(animation.get("start_time", 0.0))
 	combat["state"] = "dodge"
@@ -1450,7 +1500,7 @@ func _begin_swing(
 	combat.time = float(animation.get("start_time", 0.0))
 	combat.hit_done = false
 	combat.power = clip_key.ends_with("power") and not _is_creature(actor)
-	_apply_actor_fatigue(actor, _attack_fatigue_cost(actor))
+	_apply_actor_fatigue(actor, _attack_fatigue_cost(actor, combat.power))
 	if _actor_fatigue_current(actor) <= 0.0:
 		_begin_knockdown(actor)
 		return
@@ -1495,7 +1545,7 @@ func _land_hit(actor: Dictionary, root: Node3D, player: CollisionObject3D, targe
 	if distance > _reach_m(actor) + HIT_REACH_SLACK_M \
 			or absf(player.global_position.y - root.global_position.y) > MELEE_VERTICAL_REACH_M:
 		return
-	var damage := _hit_damage(actor, bool(combat.get("power", false)))
+	var damage := _hit_damage(actor, bool(combat.get("power", false)), str(combat.get("clip", "")))
 	if target_actor.is_empty():
 		_hurt_player(actor, root, player as CharacterBody3D, damage)
 	else:
@@ -1512,8 +1562,11 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 		view_forward.y = 0.0
 		if from_actor.length() > 0.01 and view_forward.length() > 0.01 and from_actor.normalized().dot(view_forward.normalized()) > 0.3:
 			blocked = true
-			damage *= BLOCKED_DAMAGE_SHARE
-	damage *= 1.0 - player_armor_rating() * 0.01
+	var player_actor: Dictionary = host.call("_player_combat_values")
+	var armor_ids := PackedInt64Array((host.get("_player_equipment") as Dictionary).keys())
+	var damage_share := _block_damage_share(player_actor, armor_ids) if blocked else 1.0
+	var block_cost := _block_fatigue_cost(player_actor, damage * (1.0 - damage_share)) if blocked else 0.0
+	damage *= damage_share * (1.0 - _armor_rating(player_actor, armor_ids) * 0.01)
 	var audio_manager := host.get_node_or_null("/root/AudioManager") as Node
 	if audio_manager != null:
 		if blocked:
@@ -1522,7 +1575,22 @@ func _hurt_player(actor: Dictionary, root: Node3D, player: CharacterBody3D, dama
 			audio_manager.call(
 				"play_weapon_impact", player.global_position + Vector3.UP, _weapon_type(actor), true, player
 			)
-	var fatigue_damage := _hit_fatigue_damage(actor, damage)
+	var fatigue_damage := _hit_fatigue_damage(actor, damage) + block_cost
+	var player_values: RefCounted = host.get("_player_actor_values")
+	var reflected := damage * clampf(float(player_values.ability("REDG")) * 0.01, 0.0, 1.0) if not projectile_hit else 0.0
+	if reflected > 0.0:
+		_apply_spell_health_damage(actor, reflected)
+		damage -= reflected
+	if blocked:
+		host.call("_record_player_skill_use", SKILL_BLOCK)
+	elif damage > 0.0:
+		var armor_skills := {}
+		for id: int in armor_ids:
+			var stats: Dictionary = (host.get("data_reader") as Object).find_item_stats(id)
+			if int(stats.get("armor_rating", 0)) > 0:
+				armor_skills[SKILL_HEAVY_ARMOR if bool(stats.get("heavy_armor", false)) else SKILL_LIGHT_ARMOR] = true
+		for skill: int in armor_skills:
+			host.call("_record_player_skill_use", skill)
 	host.call("_player_take_combat_hit", root, damage, fatigue_damage, blocked, int(actor.get("base_form_id", 0)))
 	if blocked and not projectile_hit:
 		_begin_block_attack(actor)

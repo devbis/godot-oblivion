@@ -148,7 +148,7 @@ func acquire() -> Dictionary:
 		if not activator.is_empty():
 			if hit_distance > activator_range_m:
 				return empty_snapshot()
-			return _snapshot("activator", "activate", reference_id,
+			return _snapshot("activator", str(activator.get("action", "activate")), reference_id,
 				str(activator.get("display_name", activator.get("editor_id", "Object"))), {
 					"reference": activator.get("reference", {}),
 				})

@@ -181,6 +181,7 @@ func assemble_npc_model(
 		attached_item_names.push_back(str(data_reader.find_editor_id(item_form_id)))
 		if item_type in ["ARMO", "CLOT"]:
 			worn_equipment.push_back({
+				"form_id": item_form_id,
 				"slots": int(data_reader.get_item_biped_slots(item_form_id)),
 				"meshes": item_meshes,
 			})
@@ -193,6 +194,7 @@ func assemble_npc_model(
 	var bound_weapon_form_id := 0
 	var bound_weapon_meshes: Array[MeshInstance3D] = []
 	var bound_item_names: Array[String] = []
+	var bound_armor_ids := PackedInt64Array()
 	var bound_gear_slots := 0
 	for item_form_id: int in bound_equipment_ids:
 		var item_type := str(data_reader.find_record_type(item_form_id))
@@ -234,6 +236,7 @@ func assemble_npc_model(
 			bound_weapon_meshes = item_meshes
 		else:
 			bound_armor_meshes.append_array(item_meshes)
+			bound_armor_ids.push_back(item_form_id)
 	return {
 		"face_meshes": face_meshes, "hair_meshes": hair_meshes,
 		"face_covered_by_helmet": face_covered_by_helmet,
@@ -243,6 +246,7 @@ func assemble_npc_model(
 		"bound_magic_effect_codes": _npc_bound_magic_effect_codes(npc),
 		"bound_gear_meshes": bound_gear_meshes,
 		"bound_armor_meshes": bound_armor_meshes,
+		"bound_armor_ids": bound_armor_ids,
 		"bound_gear_slots": bound_gear_slots,
 		"bound_item_names": bound_item_names,
 		"bound_weapon_form_id": bound_weapon_form_id,

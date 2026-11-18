@@ -159,9 +159,7 @@ func _pick_weather(initial: bool = false) -> Dictionary:
 
 func advance(delta: float, position_world: Vector3, units_to_meters: float) -> bool:
 	var game_hours := delta * time_scale / 3600.0
-	game_hour = fposmod(game_hour + game_hours, 24.0)
-	if not _current.is_empty():
-		_advance_weather(delta, game_hours)
+	advance_clock(game_hours, delta)
 	if not _exterior:
 		return false
 	global_position = position_world
@@ -173,6 +171,14 @@ func advance(delta: float, position_world: Vector3, units_to_meters: float) -> b
 		_sky_timer = SKY_UPDATE_PERIOD
 	_apply_sky(units_to_meters)
 	return true
+
+var elapsed_game_hours := 0.0
+
+func advance_clock(hours: float, seconds := 0.0) -> void:
+	elapsed_game_hours += hours
+	game_hour = fposmod(game_hour + hours, 24.0)
+	if not _current.is_empty():
+		_advance_weather(seconds, hours)
 
 
 func _advance_weather(delta: float, game_hours: float) -> void:

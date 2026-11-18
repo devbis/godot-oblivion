@@ -21,6 +21,7 @@ const ExteriorWeather := preload("res://scripts/exterior_weather.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
+const ActorRules := preload("res://scripts/actor_rules.gd")
 const AnimationSampling := preload("res://scripts/animation_sampling.gd")
 const FirstPersonArms := preload("res://scripts/first_person_arms.gd")
 const NpcCombat := preload("res://scripts/npc_combat.gd")
@@ -50,6 +51,8 @@ const COMBAT_DAMAGE_SETTINGS := {
 	"fDamageWeaponMult": 0.5, "fDamageSkillBase": 0.2, "fDamageSkillMult": 1.5,
 	"fDamageStrengthBase": 0.75, "fDamageStrengthMult": 0.5,
 	"fDamageWeaponConditionBase": 0.5, "fDamageWeaponConditionMult": 0.5, "fDamagePowerAttackBonus": 2.5,
+	"fDamagePowerAttackStandBonus": 3.0, "fDamagePowerAttackForwardBonus": 2.5,
+	"fDamagePowerAttackBackBonus": 2.5, "fDamagePowerAttackSideBonus": 2.5,
 	"fHandHealthMin": 1.0, "fHandHealthMax": 20.0, "fHandDamageSkillBase": 0.0, "fHandDamageSkillMult": 1.0,
 	"fHandDamageStrengthBase": 0.0, "fHandDamageStrengthMult": 0.75,
 	"fHandFatigueDamageMult": 0.5, "fHandFatigueDamageBase": 1.0, "fNPCAttributeHealthMult": 0.5,
@@ -379,6 +382,13 @@ var _player_selected_spell_form_id := 0
 var _player_actor_values := PlayerActorValues.new()
 var _player_actor_values_ready := false
 var _player_game_settings: Dictionary = {}
+var _character_skills: Dictionary = {}
+var _player_class_form_id := 0
+var _player_birthsign_spells := PackedInt64Array()
+var _used_player_powers: Dictionary = {}
+var _character_dialog: ConfirmationDialog
+var _player_carried_weight := 0.0
+var _next_skill_level_toast := 0
 var _inventory_open := false
 ## Loot mode is the inventory with a second panel: the contents of the aimed body or container beside the player's own.
 var _loot_target: Dictionary = {}
@@ -471,6 +481,7 @@ func _ready() -> void:
 	_setup_loot_panel()
 	physics_grabber.configure(player, self)
 	player.gameplay_frame.connect(_on_player_gameplay_frame)
+	player.combat_dodged.connect(_on_player_combat_dodge)
 	player.set_physics_process(false)
 	face_view_button.disabled = true
 	face_view_button.pressed.connect(_toggle_face_view)
@@ -795,15 +806,6 @@ func _initialize_player_game_state() -> void:
 		return
 	_player_race_height_scale = maxf(0.1, float(_player_base_record.get("race_height_scale", 1.0)))
 	player.set_race_height_scale(_player_race_height_scale)
-	# During the prison tutorial the player has no chosen class. The NPC record stores
-	# the unmodified starting skills; race bonuses are applied once at initialization.
-	var starting_skills: PackedInt64Array = _player_base_record.get("skills", PackedInt64Array())
-	var race_bonuses: PackedInt64Array = _player_base_record.get("racial_skill_bonuses", PackedInt64Array())
-	if starting_skills.size() == race_bonuses.size():
-		for i in starting_skills.size():
-			starting_skills[i] = clampi(starting_skills[i] + race_bonuses[i], 0, 100)
-		_player_base_record["skills"] = starting_skills
-	_player_actor_values_ready = _player_actor_values.initialize_from_base(_player_base_record)
 	_player_game_settings.clear()
 	for setting_name: String in PLAYER_DYNAMIC_GAME_SETTINGS:
 		_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, 0.0)
@@ -815,21 +817,26 @@ func _initialize_player_game_state() -> void:
 			_player_game_settings[setting_name] = data_reader.get_int_game_setting(setting_name, int(default_value))
 		else:
 			_player_game_settings[setting_name] = data_reader.get_float_game_setting(setting_name, default_value)
-	for setting_name: String in NPC_MOVEMENT_SETTINGS:
-		_player_game_settings[setting_name] = data_reader.get_float_game_setting(
-			setting_name, float(NPC_MOVEMENT_SETTINGS[setting_name])
-		)
+	var actor_settings := NPC_MOVEMENT_SETTINGS.duplicate()
+	actor_settings.merge(ActorRules.LEVEL_SETTINGS)
+	for setting_name: String in actor_settings:
+		var fallback: Variant = actor_settings[setting_name]
+		_player_game_settings[setting_name] = data_reader.get_int_game_setting(setting_name, int(fallback)) \
+			if setting_name.begins_with("i") else data_reader.get_float_game_setting(setting_name, float(fallback))
+	for index in range(1, 11):
+		var setting_name := "iLevelUp%02dMult" % index
+		var defaults := [2, 2, 2, 2, 3, 3, 3, 4, 4, 5]
+		_player_game_settings[setting_name] = data_reader.get_int_game_setting(setting_name, defaults[index - 1])
+	_character_skills = data_reader.get_character_skills()
+	_player_class_form_id = int(_player_base_record.get("class_form_id", 0))
+	var baseline := _player_base_record.duplicate()
+	ActorRules.calculate_base(baseline, {}, _character_skills, 1, _player_game_settings, true)
+	_player_actor_values_ready = _player_actor_values.initialize_from_base(baseline)
 	_player_actor_values.configure_game_settings(_player_game_settings)
+	_player_actor_values.configure_progression(data_reader.get_character_class(_player_class_form_id), _character_skills)
 	if not _player_actor_values_ready:
 		push_warning("The Player base record has no usable health, magicka, and fatigue values; HUD vitals will be hidden")
-	for spell_value: Variant in _player_base_record.get("spell_form_ids", PackedInt64Array()):
-		var spell_form_id := int(spell_value)
-		if spell_form_id > 0 and str(data_reader.find_record_type(spell_form_id)) == "SPEL":
-			if not _player_spell_form_ids.has(spell_form_id):
-				_player_spell_form_ids.push_back(spell_form_id)
-	if not _player_spell_form_ids.is_empty():
-		# The base record's first SPLO is the data-defined initial selection; Q and the inventory select other known spells.
-		_player_selected_spell_form_id = _player_spell_form_ids[0]
+	_refresh_player_character_spells()
 	_refresh_inventory_hud()
 	print("OpenOB player record %s: actor_values=%s known_spells=%d starting_items=%d" % [
 		str(_player_base_record.get("name", "Player")),
@@ -837,6 +844,43 @@ func _initialize_player_game_state() -> void:
 		_player_spell_form_ids.size(),
 		_player_base_record.get("inventory", []).size(),
 	])
+
+func _refresh_player_character_spells() -> void:
+	var spell_ids: PackedInt64Array = _player_base_record.get("spell_form_ids", PackedInt64Array()).duplicate()
+	spell_ids.append_array(_player_base_record.get("racial_spell_form_ids", PackedInt64Array()))
+	spell_ids.append_array(_player_birthsign_spells)
+	_player_spell_form_ids.clear()
+	for spell_id: int in spell_ids:
+		if not _player_spell_form_ids.has(spell_id) and int(data_reader.find_spell(spell_id).get("spell_type", -1)) in [0, 2, 3]:
+			_player_spell_form_ids.push_back(spell_id)
+	if not _player_spell_form_ids.has(_player_selected_spell_form_id):
+		_player_selected_spell_form_id = _player_spell_form_ids[0] if not _player_spell_form_ids.is_empty() else 0
+	_player_actor_values.set_abilities(ActorRules.abilities(data_reader, spell_ids))
+
+func _player_combat_values() -> Dictionary:
+	return {
+		"attributes": _player_actor_values.attributes(),
+		"skills": _player_actor_values.skills(),
+		"fatigue": _player_actor_values.snapshot().get("fatigue", {}),
+		"abilities": {"SHLD": _player_actor_values.ability("SHLD")},
+		"weapon_record": _player_weapon_record if _weapon_drawn else {},
+	}
+
+func _refresh_player_movement() -> void:
+	if not _player_actor_values_ready or not is_instance_valid(player):
+		return
+	var actor := _player_combat_values()
+	actor["encumbrance"] = _player_carried_weight
+	var attributes: PackedInt64Array = actor["attributes"]
+	var maximum_load := float(attributes[0]) * float(_player_game_settings["fActorStrengthEncumbranceMult"])
+	var overloaded := _player_carried_weight > maximum_load
+	player.walk_speed_mps = 0.0 if overloaded else _npc_movement_speed(actor, false)
+	player.run_speed_mps = 0.0 if overloaded else _npc_movement_speed(actor, true)
+	player.crouch_speed_scale = float(_player_game_settings["fMoveSneakMult"])
+	player.jump_speed_mps = 0.0 if overloaded else ActorRules.jump_speed(_player_actor_values.skill(ActorRules.ACROBATICS),
+		player.gravity_mps2, game_units_to_meters, _player_game_settings)
+	player.can_combat_dodge = _player_actor_values.skill(ActorRules.ACROBATICS) >= float(_player_game_settings["iSkillJourneymanMin"])
+	player.combat_dodge_speed_mps = player.run_speed_mps
 
 func _sewer_exit_start_data() -> Dictionary:
 	var sewer_cell: Dictionary = data_reader.find_cell("ImperialSewers03")
@@ -1427,7 +1471,11 @@ func _register_cell_npc_references(cell: Dictionary) -> void:
 func _sync_player_actor_values_to_quest_world() -> void:
 	if quest_world == null or not _player_actor_values_ready:
 		return
-	quest_world.set_player_actor_values(_player_actor_values.snapshot())
+	var values := _player_actor_values.snapshot()
+	values["level"] = _player_actor_values.level
+	values["base_values"] = ActorRules.named_values(_player_actor_values.base_attributes(), _player_actor_values.base_skills())
+	values["current_values"] = ActorRules.named_values(_player_actor_values.attributes(), _player_actor_values.skills())
+	quest_world.set_player_actor_values(values)
 
 ## Names the speaker of each spoken line (its base form is the second argument) before the bridge prints it.
 func _name_speakers(result: Dictionary) -> void:
@@ -1489,13 +1537,17 @@ func _apply_driver_result(result: Dictionary) -> PackedStringArray:
 	var actions_to_apply: Array[Dictionary] = []
 	for action_value: Variant in result.get("actions", []):
 		var action: Dictionary = action_value
-		if str(action.get("command", "")).to_lower() == "showbirthsignmenu":
+		var command := str(action.get("command", "")).to_lower()
+		if command == "showbirthsignmenu":
 			_show_birthsign_menu()
 			report.push_back("opens birthsign selection")
 			continue
+		if command == "showclassmenu":
+			_show_player_class_menu()
+			report.push_back("opens class selection")
+			continue
 		if _dialogue_active or _dialogue_exit_transition:
 			_pending_dialogue_actions.push_back(action.duplicate(true))
-			var command := str(action.get("command", "")).to_lower()
 			var arguments: Array = action.get("arguments", [])
 			if command == "look" and not arguments.is_empty():
 				report.push_back("defers scripted look: %s will look at %s after the dialogue camera returns" % [str(action.get("target", "NPC")), str(arguments[0])])
@@ -1534,6 +1586,22 @@ func _quest_distance(from: String, to: String) -> Variant:
 ## Answers world-state queries made by GameMode scripts during a tick.
 func _quest_world_command(command: String, target: String, arguments: Array) -> Variant:
 	match command.to_lower():
+		"getlevel", "getav", "getbaseav":
+			if target.to_lower() == "player":
+				return null # Answered by the synchronized player snapshot.
+			var actor := _npc_actor_by_reference(target.to_lower())
+			if actor.is_empty():
+				return null
+			if command.to_lower() == "getlevel":
+				return actor.get("level")
+			if arguments.is_empty():
+				return null
+			var base := command.to_lower() == "getbaseav"
+			var key := str(arguments[0]).to_lower().replace(" ", "")
+			if key in ["health", "magicka", "fatigue"]:
+				return (actor.get(key, {}) as Dictionary).get("max" if base else "current")
+			return ActorRules.named_values(actor.get("base_attributes" if base else "attributes", PackedInt64Array()),
+				actor.get("base_skills" if base else "skills", PackedInt64Array())).get(key)
 		"getcurrenttime":
 			return _exterior_weather.game_hour
 		"getopenstate":
@@ -5126,7 +5194,10 @@ func _scripted_activator_reference_by_id(reference_id: int) -> Dictionary:
 		if int(reference.get("form_id", 0)) != reference_id:
 			continue
 		var base_form_id := int(reference.get("base_form_id", 0))
-		if str(data_reader.find_record_type(base_form_id)) == "ACTI" \
+		if data_reader.is_sleep_furniture(base_form_id):
+			var bed_name := _record_display_name(base_form_id)
+			result = {"reference": reference, "display_name": bed_name if not bed_name.is_empty() else "Bed", "action": "sleep"}
+		elif str(data_reader.find_record_type(base_form_id)) == "ACTI" \
 				and int(reference.get("script_form_id", 0)) > 0:
 			var display_name := _record_display_name(base_form_id)
 			if display_name.is_empty():
@@ -5354,6 +5425,13 @@ func _select_player_birthsign(form_id: int, name: String) -> void:
 		return
 	_player_birthsign_form_id = form_id
 	_player_base_record["birthsign_form_id"] = form_id
+	for sign: Dictionary in data_reader.list_birthsigns():
+		if int(sign.get("form_id", 0)) == form_id:
+			_player_birthsign_spells = sign.get("spell_form_ids", PackedInt64Array())
+			break
+	_refresh_player_character_spells()
+	_refresh_inventory_hud()
+	_sync_player_actor_values_to_quest_world()
 	if quest_world != null and quest_world.has_method("set_listener_birthsign"):
 		quest_world.set_listener_birthsign(form_id)
 	print("OpenOB character: selected birthsign %s (0x%08X)" % [name, form_id])
@@ -5365,6 +5443,161 @@ func _select_player_birthsign(form_id: int, name: String) -> void:
 	Input.mouse_mode = _birthsign_previous_mouse_mode
 	if quest_world != null:
 		_refresh_npc_routes()
+
+func _open_character_dialog(title: String, contents: Control) -> ConfirmationDialog:
+	var dialog := ConfirmationDialog.new()
+	dialog.title = title
+	dialog.exclusive = true
+	dialog.process_mode = Node.PROCESS_MODE_ALWAYS
+	dialog.add_child(contents)
+	add_child(dialog)
+	_character_dialog = dialog
+	var was_paused := get_tree().paused
+	var mouse_mode := Input.mouse_mode
+	get_tree().paused = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var finish := func() -> void:
+		if _character_dialog == dialog:
+			dialog.hide()
+			_character_dialog = null
+			get_tree().paused = was_paused
+			Input.mouse_mode = mouse_mode
+			dialog.queue_free()
+	dialog.canceled.connect(finish)
+	dialog.confirmed.connect(finish)
+	dialog.popup_centered()
+	return dialog
+
+func _open_sleep_menu() -> void:
+	if not _player_actor_values_ready or is_instance_valid(_character_dialog):
+		return
+	for actor: Dictionary in _npc_actors:
+		var combat: Dictionary = actor.get("combat", {})
+		if not combat.is_empty() and int(combat.get("target_id", -1)) == 0:
+			_show_interaction_toast("You cannot sleep while enemies are nearby")
+			return
+	var contents := VBoxContainer.new()
+	var hours := SpinBox.new()
+	hours.min_value = 1
+	hours.max_value = 24
+	hours.value = 1
+	hours.suffix = "h"
+	contents.add_child(hours)
+	var dialog := _open_character_dialog("Sleep", contents)
+	dialog.ok_button_text = "Sleep"
+	dialog.confirmed.connect(func() -> void:
+		_exterior_weather.advance_clock(hours.value)
+		_player_actor_values.rest()
+		_sync_player_actor_values_to_quest_world()
+		if _player_actor_values.level_available():
+			_open_level_up_menu.call_deferred()
+	)
+
+func _open_level_up_menu() -> void:
+	if not _player_actor_values.level_available() or is_instance_valid(_character_dialog):
+		return
+	var contents := VBoxContainer.new()
+	var choices: Array[CheckButton] = []
+	var available := 0
+	for i in ActorRules.ATTRIBUTE_NAMES.size():
+		var option := CheckButton.new()
+		var bonus := _player_actor_values.level_bonus(i)
+		option.text = "%s  +%d" % [ActorRules.ATTRIBUTE_NAMES[i], bonus]
+		option.disabled = bonus == 0
+		available += int(bonus > 0)
+		choices.push_back(option)
+		contents.add_child(option)
+	var needed := mini(3, available)
+	var dialog := _open_character_dialog("Level %d · choose %d attributes" % [_player_actor_values.level + 1, needed], contents)
+	var update := func(_pressed: bool) -> void:
+		var count := 0
+		for choice: CheckButton in choices:
+			count += int(choice.button_pressed)
+		dialog.get_ok_button().disabled = count != needed
+	for choice: CheckButton in choices:
+		choice.toggled.connect(update)
+	update.call(false)
+	dialog.confirmed.connect(func() -> void:
+		var selected: Array[int] = []
+		for i in choices.size():
+			if choices[i].button_pressed:
+				selected.push_back(i)
+		if _player_actor_values.level_up(selected):
+			_player_actor_values.rest()
+			_refresh_inventory_hud()
+			_sync_player_actor_values_to_quest_world()
+	)
+
+func _show_player_class_menu() -> void:
+	if is_instance_valid(_character_dialog):
+		return
+	var options := OptionButton.new()
+	var class_ids: PackedInt64Array = data_reader.list_playable_classes()
+	var names: Array[String] = []
+	for id: int in class_ids:
+		names.push_back(_record_display_name(id))
+	var indices := range(class_ids.size())
+	indices.sort_custom(func(a: int, b: int) -> bool: return names[a].nocasecmp_to(names[b]) < 0)
+	for index: int in indices:
+		options.add_item(names[index], class_ids[index])
+	if options.item_count == 0:
+		push_warning("OpenOB character: no playable classes found")
+		options.free()
+		return
+	var dialog := _open_character_dialog("Choose your class", options)
+	dialog.confirmed.connect(func() -> void: _select_player_class(options.get_selected_id()))
+
+func _select_player_class(form_id: int) -> void:
+	if not _player_actor_values_ready or form_id == _player_class_form_id:
+		return
+	var class_data: Dictionary = data_reader.get_character_class(form_id)
+	if class_data.is_empty():
+		return
+	var previous_class: Dictionary = {} if _player_class_form_id == int(_player_base_record.get("class_form_id", 0)) \
+		else data_reader.get_character_class(_player_class_form_id)
+	var previous := _player_base_record.duplicate()
+	var next := _player_base_record.duplicate()
+	ActorRules.calculate_base(previous, previous_class, _character_skills, 1, _player_game_settings, true)
+	ActorRules.calculate_base(next, class_data, _character_skills, 1, _player_game_settings, true)
+	_player_actor_values.change_class(previous, next, class_data)
+	_player_class_form_id = form_id
+	_refresh_inventory_hud()
+	_sync_player_actor_values_to_quest_world()
+
+func _open_character_sheet() -> void:
+	if is_instance_valid(_character_dialog):
+		return
+	var contents := GridContainer.new()
+	contents.columns = 2
+	var attributes := _player_actor_values.attributes()
+	var skills := _player_actor_values.skills()
+	var rows := {
+		"Class": _record_display_name(_player_class_form_id),
+		"Birthsign": _record_display_name(_player_birthsign_form_id) if _player_birthsign_form_id > 0 else "—",
+		"Major skills advanced": "%d / %d" % [_player_actor_values.progress(), int(_player_game_settings["iLevelUpSkillCount"])],
+	}
+	for i in attributes.size():
+		rows[ActorRules.ATTRIBUTE_NAMES[i]] = attributes[i]
+	var class_data: Dictionary = data_reader.get_character_class(_player_class_form_id)
+	var majors: PackedInt64Array = class_data.get("major_skills", PackedInt64Array())
+	for i in skills.size():
+		rows[ActorRules.SKILL_NAMES[i] + (" · major" if majors.has(i) else "")] = skills[i]
+	for key: String in rows:
+		var label := Label.new()
+		label.text = key
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		contents.add_child(label)
+		var value := Label.new()
+		value.text = str(rows[key])
+		value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		contents.add_child(value)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(340, 390)
+	contents.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(contents)
+	var dialog := _open_character_dialog("Character · level %d" % _player_actor_values.level, scroll)
+	dialog.ok_button_text = "Close"
+	dialog.get_cancel_button().hide()
 
 
 func _dialogue_player_identity() -> Dictionary:
@@ -5849,6 +6082,8 @@ func _use_key_if_locked(target: Dictionary) -> bool:
 ## Executes the action of one target snapshot; the HUD displays the same snapshot.
 func _activate_target(target: Dictionary) -> void:
 	match str(target.get("action", "none")):
+		"sleep":
+			_open_sleep_menu()
 		"take":
 			if str(target.get("kind", "")) == "item":
 				var item: Dictionary = _placed_items.get(int(target.get("reference_id", 0)), {})
@@ -6155,10 +6390,18 @@ func _add_inventory_item(form_id: int, amount: int = 1) -> void:
 	_refresh_inventory_hud()
 
 func _refresh_inventory_hud() -> void:
+	_player_carried_weight = LootInventory.total_weight(_player_inventory, data_reader) if data_reader != null else 0.0
+	_refresh_player_movement()
 	var item_count := 0
 	var inventory_form_ids: Array[int] = []
 	for child in inventory_items_container.get_children():
 		child.queue_free()
+	if _player_actor_values_ready:
+		var character_button := Button.new()
+		character_button.text = "Character · level %d" % _player_actor_values.level
+		character_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		character_button.pressed.connect(_open_character_sheet)
+		inventory_items_container.add_child(character_button)
 	for amount_value: Variant in _player_inventory.values():
 		item_count += int(amount_value)
 	for form_id_value: Variant in _player_inventory.keys():
@@ -6200,7 +6443,7 @@ func _refresh_inventory_hud() -> void:
 			inventory_items_container.add_child(spell_button)
 	inventory_label.text = "Inventory: %d items · %d types · %d spells · %.1f wt" % [
 		item_count, _player_inventory.size(), _player_spell_form_ids.size(),
-		LootInventory.total_weight(_player_inventory, data_reader)
+		_player_carried_weight
 	]
 	if not _loot_target.is_empty():
 		_refresh_loot_panel()
@@ -6242,8 +6485,35 @@ func _on_player_gameplay_frame(delta: float, is_running: bool, jumped: bool) -> 
 	if not _player_actor_values_ready:
 		return
 	if jumped:
-		_player_actor_values.apply_jump_cost()
+		_player_actor_values.apply_jump_cost(_player_carried_weight)
+		_record_player_skill_use(ActorRules.ACROBATICS)
+	var swimming: bool = player.is_swimming and Vector2(player.velocity.x, player.velocity.z).length_squared() > 0.01
+	if is_running or swimming:
+		_record_player_skill_use(ActorRules.ATHLETICS, delta, swimming)
 	_player_actor_values.advance_time(delta, is_running)
+
+func _record_player_skill_use(index: int, amount := 1.0, secondary := false) -> void:
+	if not _player_actor_values_ready or not _player_actor_values.record_skill_use(index, amount, secondary):
+		return
+	_refresh_player_movement()
+	if _player_actor_values.level_available() and _next_skill_level_toast <= _player_actor_values.level:
+		_next_skill_level_toast = _player_actor_values.level + 1
+		_show_interaction_toast("Level up available. Sleep in a bed to advance.")
+
+func _on_player_combat_dodge(direction: Vector2) -> void:
+	_player_actor_values.apply_jump_cost(_player_carried_weight)
+	if player.is_first_person or not _player_hit_reaction.is_empty() or not _player_combat_action.is_empty():
+		return
+	var clip := "dodgeback" if direction.y > 0.0 else "dodgeforward"
+	if absf(direction.x) > absf(direction.y):
+		clip = "dodgeright" if direction.x > 0.0 else "dodgeleft"
+	if not _player_animations.has(clip):
+		var source: Array = NPC_MOVEMENT_KFS[clip]
+		await _request_player_reaction_clip(clip, source[0], source[1], false)
+	if _player_animations.has(clip) and _player_combat_action.is_empty():
+		_player_combat_action = clip
+		_player_combat_action_kind = "dodge"
+		_player_active_animation_reset()
 
 func _cast_selected_spell() -> void:
 	if _world_loading or _inventory_open or not _player_actor_values_ready:
@@ -6257,47 +6527,49 @@ func _cast_selected_spell() -> void:
 	if spell.is_empty():
 		_show_interaction_toast("Spell data unavailable")
 		return
-	if int(spell.get("spell_type", -1)) not in [0, 3]:
+	var spell_type := int(spell.get("spell_type", -1))
+	if spell_type not in [0, 2, 3]:
 		_show_interaction_toast("This spell cannot be cast directly")
+		return
+	var is_power := spell_type == 2
+	var now := _exterior_weather.elapsed_game_hours
+	if is_power and now < float(_used_player_powers.get(_player_selected_spell_form_id, -24.0)) + 24.0:
+		_show_interaction_toast("This power can be used once per day")
 		return
 	var effects: Array = spell.get("effects", [])
 	if effects.is_empty():
 		_show_interaction_toast("Spell has no effects")
 		return
-	# Self-range restore effects are applied here; targeted effects are applied on impact.
-	var cast_range := int((effects[0] as Dictionary).get("range_type", 0))
-	if cast_range == 0:
-		for effect_value: Variant in effects:
-			var effect: Dictionary = effect_value
-			var effect_flags := int(effect.get("magic_effect_flags", 0))
-			if int(effect.get("range_type", -1)) != 0 or (effect_flags & (1 << 4)) == 0:
-				_show_interaction_toast("This spell needs a target")
-				return
-			if str(effect.get("code", "")) not in ["REHE", "REMA", "REFA"] or (effect_flags & (1 << 3)) != 0:
-				_show_interaction_toast("This spell effect is not supported yet")
-				return
-	var magicka_cost := _spell_cast_cost(spell)
+	var cast_range := 0
+	for effect: Dictionary in effects:
+		var code := str(effect.get("code", ""))
+		if code not in ["REHE", "REMA", "REFA", "FIDG", "FRDG", "SHDG", "DGHE", "DGFA",
+				"INVI", "REDG", "DSPL", "CUPO", "PARA", "TURN", "OPEN"]:
+			_show_interaction_toast("Spell effect %s is unavailable" % code)
+			return
+		cast_range = maxi(cast_range, int(effect.get("range_type", 0)))
+	var magicka_cost := 0 if is_power else _spell_cast_cost(spell)
 	if not _player_actor_values.spend_magicka(float(magicka_cost)):
 		_show_interaction_toast("Not enough Magicka")
 		return
+	if is_power:
+		_used_player_powers[_player_selected_spell_form_id] = now
+	_player_actor_values.clear_timed_effect("INVI")
 	_play_spell_cast(cast_range, effects)
-	for effect_value: Variant in effects:
-		if cast_range != 0:
-			break
-		var effect: Dictionary = effect_value
-		var effect_flags := int(effect.get("magic_effect_flags", 0))
-		var duration := 1.0 if (effect_flags & (1 << 7)) != 0 else maxf(1.0, float(effect.get("duration", 0)))
-		var restored_amount := float(effect.get("magnitude", 0)) * duration
-		match str(effect.get("code", "")):
-			"REHE":
-				_player_actor_values.restore_health(restored_amount)
-			"REMA":
-				_player_actor_values.restore_magicka(restored_amount)
-			"REFA":
-				_player_actor_values.modify_fatigue(restored_amount)
+	for effect: Dictionary in effects:
+		if int(effect.get("range_type", 0)) != 0:
+			continue
+		var flags := int(effect.get("magic_effect_flags", 0))
+		var duration := 0.0 if (flags & (1 << 7)) != 0 else float(effect.get("duration", 0))
+		_player_actor_values.apply_self_effect(str(effect.get("code", "")), maxf(1.0, float(effect.get("magnitude", 0))), duration)
+	if spell_type == 0:
+		var school := int((effects[0] as Dictionary).get("magic_school", -1))
+		if school >= 0 and school < PlayerActorValues.SCHOOL_SKILL_INDICES.size():
+			_record_player_skill_use(PlayerActorValues.SCHOOL_SKILL_INDICES[school])
 	_sync_player_actor_values_to_quest_world()
 	var spell_name := _record_display_name(_player_selected_spell_form_id)
-	_show_interaction_toast("Cast %s · %d Magicka" % [spell_name, magicka_cost])
+	_show_interaction_toast("Cast %s" % spell_name if is_power else "Cast %s · %d Magicka" % [spell_name, magicka_cost])
+
 
 func _spell_cast_cost(spell: Dictionary) -> int:
 	var effects: Array = spell.get("effects", [])
@@ -6361,6 +6633,7 @@ func _set_weapon_drawn(drawn: bool) -> void:
 	if drawn == _weapon_drawn:
 		return
 	_weapon_drawn = drawn
+	_refresh_player_movement()
 	_player_blocking = false
 	if physics_grabber.is_holding_object():
 		physics_grabber.release_without_throw()
@@ -7547,6 +7820,7 @@ func _player_attack(power_attack := false, power_suffix := "") -> bool:
 func _spend_player_attack_fatigue(power_attack := false) -> void:
 	if not _player_actor_values_ready:
 		return
+	_player_actor_values.clear_timed_effect("INVI")
 	var fatigue_cost := NpcCombat.FATIGUE_ATTACK_COST
 	if _player_weapon_type() >= 0:
 		fatigue_cost = float(_player_game_settings.get("fFatigueAttackWeaponBase", fatigue_cost)) \
@@ -7578,7 +7852,7 @@ func _player_power_attack_animation(power_suffix: String) -> String:
 		var skill_index := int(NpcCombat.WEAPON_SKILLS.get(
 			_player_weapon_type(), NpcCombat.SKILL_HAND_TO_HAND if _player_weapon_type() < 0 else NpcCombat.SKILL_BLADE
 		))
-		var skills: PackedInt64Array = _player_base_record.get("skills", PackedInt64Array())
+		var skills := _player_actor_values.skills()
 		var skill := float(skills[skill_index]) if skills.size() > skill_index else 0.0
 		var setting := str(variant.get("setting", ""))
 		var required_skill := float(_player_game_settings.get(setting, variant.get("default", 0.0)))
@@ -7617,8 +7891,8 @@ func _on_arms_clip_event(event_name: String, clip_kind: String) -> void:
 		_loose_arrow()
 	elif clip_kind == "attack" and event_name == "hit":
 		var attack_state := _arms.current_attack_state() if _arms != null else {}
-		var power_attack := str(attack_state.get("clip", "")).contains("power")
-		if _melee_hit(power_attack):
+		var clip := str(attack_state.get("clip", ""))
+		if _melee_hit(clip.contains("power"), clip):
 			_player_block_attack()
 	elif clip_kind == "cast" and event_name == "hit":
 		_release_pending_cast()
@@ -7652,8 +7926,11 @@ func _launch_projectile(projectile: Node3D, aim: Dictionary, spell_effects: Arra
 		var blocked := _provoke_actor(collider, hit_fatigue_damage, not is_spell, hit_health_damage)
 		if is_spell:
 			_apply_player_spell_to_collider(collider, spell_effects, 2)
-		if projectile_kind == CombatProjectile.Kind.ARROW and not blocked:
-			AudioManager.play_arrow_impact(hit_position)
+		if projectile_kind == CombatProjectile.Kind.ARROW:
+			if collider is CharacterBody3D and collider != player:
+				_record_player_skill_use(16)
+			if not blocked:
+				AudioManager.play_arrow_impact(hit_position)
 	)
 	projectile.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(projectile)
@@ -7669,7 +7946,7 @@ func _loose_arrow() -> void:
 	_launch_projectile(arrow, aim)
 
 ## The swing's "hit" key: pushes the loose physics object the reticle is on, if the weapon reaches it.
-func _melee_hit(power_attack := false) -> bool:
+func _melee_hit(power_attack := false, clip := "") -> bool:
 	var reach := MELEE_BASE_REACH_M * float(_player_weapon_record.get("reach", 1.0))
 	var origin: Vector3
 	var forward: Vector3
@@ -7684,11 +7961,14 @@ func _melee_hit(power_attack := false) -> bool:
 		origin, origin + forward * reach, CombatProjectile.HIT_COLLISION_MASK, [player.get_rid()]
 	)
 	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	var health_damage := _player_hit_health_damage(power_attack)
+	var health_damage := _player_hit_health_damage(power_attack, clip)
 	var blocked := _provoke_actor(hit.get("collider"), _player_hit_fatigue_damage(health_damage), true, health_damage)
 	if not hit.is_empty():
 		var collider: Object = hit.get("collider")
 		var flesh_hit := collider is CharacterBody3D and collider != player
+		if flesh_hit:
+			var skill := int(NpcCombat.WEAPON_SKILLS.get(_player_weapon_type(), NpcCombat.SKILL_HAND_TO_HAND))
+			_record_player_skill_use(skill)
 		var impact_host := collider as Node3D if collider is Node3D else null
 		if not blocked:
 			AudioManager.play_weapon_impact(
@@ -7845,10 +8125,10 @@ func _player_hit_fatigue_damage(health_damage: float) -> float:
 		_npc_combat = NpcCombat.new(self)
 	return _npc_combat.player_hit_fatigue_damage(health_damage)
 
-func _player_hit_health_damage(power_attack := false) -> float:
+func _player_hit_health_damage(power_attack := false, clip := "") -> float:
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
-	return _npc_combat.player_hit_damage(power_attack)
+	return _npc_combat.player_hit_damage(power_attack, clip)
 
 func _provoke_actor(
 	collider: Object, fatigue_damage: float = -1.0, allow_block := false, health_damage := 0.0
@@ -7867,9 +8147,22 @@ func _apply_player_spell_to_collider(collider: Object, effects: Array, range_typ
 	var node := collider as Node
 	if node == null or not node.has_meta("reference_id"):
 		return
+	var reference_id := int(node.get_meta("reference_id"))
+	for effect: Dictionary in effects:
+		if str(effect.get("code", "")) != "OPEN" or int(effect.get("range_type", -1)) != range_type:
+			continue
+		var door := _door_reference_by_id(reference_id)
+		var reference: Dictionary = door.get("reference", {})
+		if reference.is_empty():
+			reference = _container_reference_by_id(reference_id).get("reference", {})
+		if not reference.is_empty():
+			var lock_level := quest_bridge.lock_level(reference, self)
+			if lock_level > 0 and lock_level <= int(effect.get("magnitude", 0)):
+				set_meta("lock_level_%08x" % reference_id, 0)
+				_show_interaction_toast("Unlocked")
 	if _npc_combat == null:
 		_npc_combat = NpcCombat.new(self)
-	_npc_combat.add_player_spell_effects(int(node.get_meta("reference_id")), effects, range_type)
+	_npc_combat.add_player_spell_effects(reference_id, effects, range_type)
 
 func _play_spell_cast(cast_range: int, effects: Array) -> void:
 	if effects.is_empty():
@@ -8160,41 +8453,16 @@ func _creature_capsule_size(skeleton: Skeleton3D, base_scale: float) -> Vector2:
 	var radius := clampf(minf(extent.x, extent.z) * 0.5, 0.1, 0.6)
 	return Vector2(radius, maxf(extent.y + 0.1, radius * 2.0 + 0.02))
 
-func _initial_actor_health(npc: Dictionary, is_creature: bool) -> Dictionary:
-	# A creature, and an NPC whose stats are not auto-calculated, has the health its record states. An auto-calculated NPC's
-	# health is FUN_00547f80 of Oblivion.exe: (int((strength + endurance) x fNPCAttributeHealthMult) + iNPCBasePerLevelHealthMult
-	# x (level - 1)) x a factor rising from fLowLevelNPCBaseHealthMult to 1 over the first iLowLevelNPCMaxLevel levels. Its
-	# per-level share also depends on the class (endurance as a favored attribute, the specialization), which is not read here.
-	var maximum := float(npc.get("base_health", 0.0))
-	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
-	var flags := int(npc.get("flags", 0))
-	if not is_creature and (flags & 0x10) != 0 and attributes.size() > 5:
-		var offset := int(npc.get("level_or_offset", 1))
-		var level := maxi(1, 1 + offset if (flags & 0x80) != 0 else offset)
-		var steps := level - 1
-		var health := float(int(float(attributes[0] + attributes[5]) * float(_player_game_settings.get("fNPCAttributeHealthMult", 0.5)))) \
-			+ float(_player_game_settings.get("iNPCBasePerLevelHealthMult", 4)) * steps
-		var low_level_steps := float(_player_game_settings.get("iLowLevelNPCMaxLevel", 3))
-		if steps < low_level_steps:
-			var low_mult := float(_player_game_settings.get("fLowLevelNPCBaseHealthMult", 0.25))
-			health *= low_mult + float(steps) / low_level_steps * (1.0 - low_mult)
-		maximum = float(int(health))
-	maximum = maxf(maximum, 1.0)
+func _initial_vital(value: float) -> Dictionary:
+	var maximum := maxf(value, 1.0)
 	return {"current": maximum, "max": maximum}
 
-func _initial_actor_fatigue(npc: Dictionary) -> Dictionary:
-	var maximum := float(npc.get("base_fatigue", 0.0))
-	var attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
-	if maximum <= 0.0 and attributes.size() > 5:
-		maximum = float(attributes[0] + attributes[2] + attributes[3] + attributes[5])
-	maximum = maxf(maximum, 1.0)
-	return {"current": maximum, "max": maximum}
 
 func _resolve_inventory(reference_id: int, entries: Array) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = reference_id
 	var inventory := {}
-	LootInventory.add_entries(inventory, data_reader, entries, 1, rng)
+	LootInventory.add_entries(inventory, data_reader, entries, _player_actor_values.level, rng)
 	return inventory
 
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
@@ -8229,6 +8497,22 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 		if quest_bridge.is_actor_removed(reference_id):
 			_npc_loaded_reference_ids[reference_id] = true
 			continue
+		var level := ActorRules.level_for(npc, _player_actor_values.level)
+		var class_form_id := int(npc.get("class_form_id", 0))
+		if not is_creature and (int(npc.get("flags", 0)) & 0x10) != 0:
+			ActorRules.calculate_base(npc, data_reader.get_character_class(class_form_id),
+				_character_skills, level, _player_game_settings, false)
+		var npc_spell_ids: PackedInt64Array = npc.get("spell_form_ids", PackedInt64Array()).duplicate()
+		npc_spell_ids.append_array(npc.get("racial_spell_form_ids", PackedInt64Array()))
+		var abilities := ActorRules.abilities(data_reader, npc_spell_ids)
+		var base_attributes: PackedInt64Array = npc.get("attributes", PackedInt64Array())
+		var attributes := ActorRules.values_with_abilities(base_attributes, abilities, "FOAT", 0)
+		var skills := ActorRules.values_with_abilities(npc.get("skills", PackedInt64Array()), abilities, "FOSK", 12)
+		var fatigue := float(npc.get("base_fatigue", 0))
+		if base_attributes.size() >= 8:
+			if fatigue <= 0.0:
+				fatigue = ActorRules.base_fatigue(base_attributes)
+			fatigue += ActorRules.base_fatigue(attributes) - ActorRules.base_fatigue(base_attributes)
 		var starting_inventory := _resolve_inventory(reference_id, npc.get("inventory", []))
 		npc["encumbrance"] = LootInventory.total_weight(starting_inventory, data_reader)
 		# A creature's collider is sized from its rig. Humanoid races with tails also
@@ -8356,6 +8640,8 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"starting_inventory": starting_inventory,
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"creature": is_creature,
+			"creature_type": int(npc.get("creature_type", -1)),
+			"creature_combat_skill": float(npc.get("combat_skill", 0)),
 			"skeleton_model_path": skeleton_path,
 			"creature_attack_damage": float(npc.get("attack_damage", 0)) if is_creature else 0.0,
 			"creature_attack_reach": float(npc.get("attack_reach", 0.0)) if is_creature else 0.0,
@@ -8377,16 +8663,22 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"dialogue_face_previous_weight": 0.0,
 			"expression_cycle": expression_cycle,
 			"animations": animations,
-			"attributes": npc.get("attributes", PackedInt64Array()),
-			"skills": npc.get("skills", PackedInt64Array()),
+			"level": level,
+			"class_form_id": class_form_id,
+			"base_attributes": base_attributes,
+			"base_skills": npc.get("skills", PackedInt64Array()),
+			"attributes": attributes,
+			"skills": skills,
+			"abilities": abilities,
 			"encumbrance": float(npc.get("encumbrance", 0.0)),
 			"combat_style": npc.get("combat_style", {}),
-			"fatigue": _initial_actor_fatigue(npc),
+			"fatigue": _initial_vital(fatigue + float(abilities.get("FOSP:10", 0))),
+			"magicka": _initial_vital(float(npc.get("base_magicka", 0)) + float(abilities.get("FOSP:9", 0))),
 			"knockdown_state": "",
 			"hit_reaction": {},
 			"hit_attack_lock_remaining": 0.0,
 			"aggression": int(npc.get("aggression", 0)),
-			"health": _initial_actor_health(npc, is_creature),
+			"health": _initial_vital(float(npc.get("base_health", 0)) + float(abilities.get("FOSP:8", 0))),
 			"essential": (int(npc.get("flags", 0)) & 0x2) != 0,
 			"faction_form_ids": npc.get("faction_form_ids", PackedInt64Array()),
 			"dead": false,
@@ -8397,6 +8689,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"worn_equipment": assembled.get("worn_equipment", []),
 			"bound_gear_meshes": assembled.get("bound_gear_meshes", []),
 			"bound_armor_meshes": assembled.get("bound_armor_meshes", []),
+			"bound_armor_ids": assembled.get("bound_armor_ids", PackedInt64Array()),
 			"bound_gear_slots": int(assembled.get("bound_gear_slots", 0)),
 			"bound_item_names": bound_item_names,
 			"bound_magic_effect_codes": assembled.get("bound_magic_effect_codes", []),
@@ -10366,7 +10659,7 @@ func _fire_player_combat_events(animation: Dictionary, from_time: float, to_time
 				_player_weapon_is_held = false
 				_refresh_player_weapon_mount()
 		elif key_name == "hit" and _player_combat_action_kind == "attack" and _player_weapon_type() != WEAPON_TYPE_BOW:
-			if _melee_hit(_player_combat_action.contains("power")):
+			if _melee_hit(_player_combat_action.contains("power"), _player_combat_action):
 				_player_block_attack()
 		elif key_name == "release" and _player_combat_action_kind == "attack" and _player_weapon_type() == WEAPON_TYPE_BOW:
 			AudioManager.play_bow_shot(player)
