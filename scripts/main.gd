@@ -310,6 +310,7 @@ var _exterior_environment: Environment
 var _land_mesh_cache: Dictionary = {}
 var _land_collision_cache: Dictionary = {}
 var _tree_mesh_cache: Dictionary = {}
+var _tree_material_cache: Dictionary = {}
 var _water_material: StandardMaterial3D
 var _exterior_terrain_root: Node3D
 var _outgoing_exterior_terrain: Node3D
@@ -527,6 +528,10 @@ func _set_cell_environment(cell: Dictionary) -> void:
 	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
 	key_light.visible = is_exterior
 	key_light.directional_shadow_max_distance = EXTERIOR_SHADOW_DISTANCE
+	if is_exterior:
+		var tree_tint := _exterior_tree_tint()
+		for material: StandardMaterial3D in _tree_material_cache.values():
+			material.albedo_color = tree_tint
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	if camera != null:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
@@ -2675,16 +2680,13 @@ func _load_cell_geometry(
 				continue
 			var use_single_billboard := tree_distance > EXTERIOR_TREE_NEAR_DISTANCE
 			var tree_mesh := _tree_billboard_mesh(tree_width, tree_height, use_single_billboard)
-			var tree_texture := await assets.texture_for_path(tree_texture_path)
-			if generation != _cell_load_generation:
-				return false
-			if tree_mesh == null or tree_texture == null:
+			if tree_mesh == null:
 				continue
-			var tree_material := await assets.material_for_texture(
-				tree_texture_path, false, true, 128, use_single_billboard
-			)
+			var tree_material := await _exterior_tree_material(tree_texture_path, use_single_billboard)
 			if generation != _cell_load_generation:
 				return false
+			if tree_material == null:
+				continue
 			var batch_x := floori(reference_transform.origin.x / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
 			var batch_z := floori(reference_transform.origin.z / EXTERIOR_OBJECT_BATCH_SIZE_METERS)
 			var tree_key := "%s|%.1f|%.1f|%s|%d|%d|%d" % [
@@ -3394,6 +3396,26 @@ func _tree_billboard_mesh(width: float, height: float, single_billboard: bool) -
 	var mesh := surface.commit() as ArrayMesh
 	_tree_mesh_cache[key] = mesh
 	return mesh
+
+func _exterior_tree_material(texture_path: String, billboard: bool) -> StandardMaterial3D:
+	var key := "%s|%s" % [texture_path.to_lower(), billboard]
+	if _tree_material_cache.has(key):
+		return _tree_material_cache[key]
+	var source := await assets.material_for_texture(texture_path, false, true, 128, billboard)
+	if source.albedo_texture == null:
+		return null
+	var material := source.duplicate() as StandardMaterial3D
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = _exterior_tree_tint()
+	_tree_material_cache[key] = material
+	return material
+
+func _exterior_tree_tint() -> Color:
+	# Average direct sunlight over the canopy instead of using the quad's normal.
+	var ambient := _exterior_environment.ambient_light_color.srgb_to_linear() * _exterior_environment.ambient_light_energy
+	var sun := key_light.light_color.srgb_to_linear() * (key_light.light_energy * 0.5)
+	var light := ambient + sun
+	return Color(minf(light.r, 1.0), minf(light.g, 1.0), minf(light.b, 1.0)).linear_to_srgb()
 
 func _append_tree_billboard_quad(surface: SurfaceTool, bottom_left: Vector3, bottom_right: Vector3, top_left: Vector3, top_right: Vector3) -> void:
 	surface.set_uv(Vector2(0.0, 1.0))
