@@ -55,14 +55,16 @@ func _init(asset_library: NifAssetLibrary) -> void:
 ## Builds the body, head, face details, hair and equipment of an NPC onto its avatar and skeleton. Returns
 ## {"face_meshes", "attached_item_names"}, or an empty dictionary when is_current turns false while models load (the
 ## caller discards the actor).
-func assemble_npc_model(avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, is_current: Callable) -> Dictionary:
+func assemble_npc_model(
+	avatar: Node3D, skeleton: Skeleton3D, npc: Dictionary, inventory: Dictionary, is_current: Callable
+) -> Dictionary:
 	var is_female := bool(npc.get("female", false))
 	var race_editor_id := str(data_reader.find_editor_id(int(npc.get("race_form_id", 0)))).to_lower()
 	var race_texture_key := _npc_race_texture_key(race_editor_id)
 	var eye_texture_path := _npc_eye_texture_path(npc, race_editor_id)
 	var head_model_path := npc_head_model_path(npc)
 	var head_part := _npc_head_part_entry(npc)
-	var equipment_ids := _npc_equipment_ids(npc)
+	var equipment_ids := _npc_equipment_ids(npc, inventory)
 	var bound_equipment_ids := _npc_bound_equipment_ids(npc)
 	var covered_body_slots := 0
 	var covered_head_slots := 0
@@ -535,7 +537,7 @@ func ensure_facegen_data(head_model_path: String) -> Dictionary:
 	])
 	return decoded
 
-func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
+func _npc_equipment_ids(npc: Dictionary, inventory: Dictionary) -> Array[int]:
 	var outfit_garments: Array[int] = []
 	var outfit_weapons: Array[int] = []
 	var inventory_armor: Array[int] = []
@@ -554,12 +556,10 @@ func _npc_equipment_ids(npc: Dictionary) -> Array[int]:
 				outfit_garments.push_back(item_id)
 			elif item_type == "WEAP":
 				outfit_weapons.push_back(item_id)
-	for inventory_value: Variant in npc.get("inventory", []):
-		var entry: Dictionary = inventory_value
-		var item_id := int(entry.get("form_id", 0))
-		if int(entry.get("count", 0)) <= 0 or seen.has(item_id):
+	for item_value: Variant in inventory:
+		var item_id := int(item_value)
+		if int(inventory[item_id]) <= 0 or seen.has(item_id):
 			continue
-		seen[item_id] = true
 		var item_type := str(data_reader.find_record_type(item_id))
 		match item_type:
 			"ARMO": inventory_armor.push_back(item_id)

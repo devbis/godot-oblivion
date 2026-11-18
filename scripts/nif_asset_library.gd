@@ -8,6 +8,7 @@ const TEXTURE_FALLBACKS := {
 	"textures/characters/imperial/female/ear.dds": "textures/characters/imperial/earshuman.dds",
 	"textures/characters/hairf01.dds": "textures/characters/hair/short.dds",
 	"textures/characters/hairbrownm01.dds": "textures/characters/hair/short.dds",
+	"textures/characters/hair/grey_mane.dds": "textures/characters/hair/mane.dds",
 }
 
 ## Native OblivionData reader; assigned by the owner once it exists.

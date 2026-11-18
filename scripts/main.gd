@@ -1388,8 +1388,9 @@ func _register_quest_actor(actor: Dictionary) -> void:
 	var reference_name := str(actor.get("reference_name", ""))
 	var base_form_id := int(actor.get("base_form_id", 0))
 	quest_world.set_reference_base(reference_name, base_form_id)
-	if not quest_world.add_actor(base_form_id, reference_name) and not bool(actor.get("creature", false)):
-		push_warning("OpenOB quest: no GameMode script for actor %s" % reference_name)
+	var script_form_id := int(actor.get("script_form_id", 0))
+	if script_form_id != 0 and not quest_world.add_actor(base_form_id, reference_name):
+		push_warning("OpenOB quest: could not register script 0x%08X for actor %s" % [script_form_id, reference_name])
 	# A MoveTo issued before this actor was streamed in applies now.
 	var pending_move: Variant = quest_bridge.take_pending_move(int(actor.get("reference_id", 0)))
 	var actor_root := actor.get("root") as Node3D
@@ -5920,25 +5921,20 @@ func _loot_store_for(target: Dictionary) -> Dictionary:
 	if _loot_contents.has(reference_id):
 		return _loot_contents[reference_id]
 	var store := {}
-	var rng := RandomNumberGenerator.new()
-	rng.seed = reference_id
 	if str(target.get("kind", "")) == "container":
 		var reference: Dictionary = target.get("reference", {})
 		var record: Dictionary = data_reader.find_container(int(reference.get("base_form_id", 0)))
-		LootInventory.add_entries(store, data_reader, record.get("contents", []), 1, rng)
+		store = _resolve_inventory(reference_id, record.get("contents", []))
 	else:
 		var actor: Dictionary = target.get("actor", {})
-		var base_form_id := int(actor.get("base_form_id", 0))
-		var is_creature := bool(actor.get("creature", false))
-		var base_record: Dictionary = data_reader.find_creature_base(base_form_id) if is_creature else data_reader.find_npc_base(base_form_id)
-		LootInventory.add_entries(store, data_reader, base_record.get("inventory", []), 1, rng)
-		if not is_creature:
-			var outfit_id := int(base_record.get("default_outfit_form_id", 0))
-			if outfit_id != 0:
-				for item_value: Variant in data_reader.get_outfit_items(outfit_id):
-					var item_id := int(item_value)
-					if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
-						store[item_id] = 1
+		var inventory: Dictionary = actor.get("starting_inventory", {})
+		store = inventory.duplicate()
+		var outfit_id := int(actor.get("default_outfit_form_id", 0))
+		if outfit_id != 0:
+			for item_value: Variant in data_reader.get_outfit_items(outfit_id):
+				var item_id := int(item_value)
+				if not store.has(item_id) and str(data_reader.find_record_type(item_id)) in ["ARMO", "CLOT", "WEAP"]:
+					store[item_id] = 1
 		var weapon_id := int(actor.get("weapon_form_id", 0))
 		if weapon_id > 0 and not store.has(weapon_id):
 			store[weapon_id] = 1
@@ -8194,14 +8190,12 @@ func _initial_actor_fatigue(npc: Dictionary) -> Dictionary:
 	maximum = maxf(maximum, 1.0)
 	return {"current": maximum, "max": maximum}
 
-func _npc_base_encumbrance(npc: Dictionary) -> float:
+func _resolve_inventory(reference_id: int, entries: Array) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = reference_id
 	var inventory := {}
-	for entry_value: Variant in npc.get("inventory", []):
-		var entry: Dictionary = entry_value
-		var form_id := int(entry.get("form_id", 0))
-		if form_id > 0:
-			inventory[form_id] = int(inventory.get(form_id, 0)) + int(entry.get("count", 0))
-	return LootInventory.total_weight(inventory, data_reader)
+	LootInventory.add_entries(inventory, data_reader, entries, 1, rng)
+	return inventory
 
 func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_existing: bool = true) -> void:
 	if clear_existing:
@@ -8231,11 +8225,12 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			else data_reader.find_npc_base(int(reference.get("base_form_id", 0)))
 		if npc.is_empty():
 			continue
-		npc["encumbrance"] = _npc_base_encumbrance(npc)
 		# An actor a script killed or disabled stays that way when its cell is loaded again.
 		if quest_bridge.is_actor_removed(reference_id):
 			_npc_loaded_reference_ids[reference_id] = true
 			continue
+		var starting_inventory := _resolve_inventory(reference_id, npc.get("inventory", []))
+		npc["encumbrance"] = LootInventory.total_weight(starting_inventory, data_reader)
 		# A creature's collider is sized from its rig. Humanoid races with tails also
 		# need their own rig before the body meshes can be skinned.
 		var skeleton_path := str(npc.get("model_path", "")) if is_creature else ActorFactory.npc_skeleton_path(npc, PLAYER_SKELETON)
@@ -8320,7 +8315,7 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			var equipment_head_model_path := actors.npc_head_model_path(npc)
 			_register_player_face_profile(npc, equipment_head_model_path)
 			assembled = await actors.assemble_npc_model(
-				avatar, skeleton, npc, func() -> bool: return stream_generation == _npc_stream_generation
+				avatar, skeleton, npc, starting_inventory, func() -> bool: return stream_generation == _npc_stream_generation
 			)
 			if assembled.is_empty():
 				_discard_pending_npc(actor_root)
@@ -8356,6 +8351,9 @@ func _load_cell_actors(cell: Dictionary, target_reference_id: int = -1, clear_ex
 			"display_name": npc_display_name,
 			"reference_name": actor_reference_name,
 			"base_form_id": int(reference.get("base_form_id", 0)),
+			"script_form_id": int(npc.get("script_form_id", 0)),
+			"default_outfit_form_id": int(npc.get("default_outfit_form_id", 0)),
+			"starting_inventory": starting_inventory,
 			"npc_editor_id": str(npc.get("editor_id", "")),
 			"creature": is_creature,
 			"skeleton_model_path": skeleton_path,
