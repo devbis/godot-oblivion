@@ -147,7 +147,8 @@ bool is_runtime_visual_record(std::string_view type) {
         std::string_view("ACRE"), std::string_view("GMST"), std::string_view("NPC_"), std::string_view("CREA"),
         std::string_view("RACE"), std::string_view("BSGN"), std::string_view("OTFT"), std::string_view("PACK"), std::string_view("IDLE"),
         std::string_view("TREE"), std::string_view("LAND"), std::string_view("LTEX"),
-        std::string_view("WRLD"), std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
+        std::string_view("WRLD"), std::string_view("CLMT"), std::string_view("WTHR"), std::string_view("REGN"),
+        std::string_view("STAT"), std::string_view("DOOR"), std::string_view("LIGH"),
         std::string_view("FURN"), std::string_view("ACTI"), std::string_view("MSTT"),
         std::string_view("ARMO"), std::string_view("CLOT"), std::string_view("WEAP"), std::string_view("SPEL"),
         std::string_view("MGEF"), std::string_view("EFSH"), std::string_view("CSTY"),
@@ -199,6 +200,11 @@ void Esm4Database::open(const std::filesystem::path& path, bool runtime_visuals_
     land_texture_path_by_id_.clear();
     land_texture_material_by_id_.clear();
     worldspace_water_level_by_id_.clear();
+    worldspace_climate_by_id_.clear();
+    worldspace_parent_by_id_.clear();
+    weather_by_id_.clear();
+    climate_by_id_.clear();
+    region_weather_by_id_.clear();
     record_type_by_id_.clear();
     record_type_names_.clear();
     script_by_id_.clear();
@@ -507,6 +513,40 @@ const DialogTopic* Esm4Database::find_topic(std::uint32_t form_id) const {
     return it == topic_by_id_.end() ? nullptr : &it->second;
 }
 
+const WeatherRecord* Esm4Database::find_weather(std::uint32_t id) const {
+    const auto found = weather_by_id_.find(id);
+    return found != weather_by_id_.end() ? &found->second : nullptr;
+}
+
+const ClimateRecord* Esm4Database::world_climate(std::uint32_t worldspace, std::uint32_t cell_climate) const {
+    if (const auto found = climate_by_id_.find(cell_climate); found != climate_by_id_.end())
+        return &found->second;
+    for (int depth = 0; worldspace && depth < 16; ++depth) {
+        if (const auto climate = worldspace_climate_by_id_.find(worldspace); climate != worldspace_climate_by_id_.end()) {
+            if (const auto found = climate_by_id_.find(climate->second); found != climate_by_id_.end())
+                return &found->second;
+        }
+        const auto parent = worldspace_parent_by_id_.find(worldspace);
+        if (parent == worldspace_parent_by_id_.end()) break;
+        worldspace = parent->second;
+    }
+    const auto fallback = climate_by_id_.find(find_form_id_by_editor_id("DefaultClimate"));
+    return fallback != climate_by_id_.end() ? &fallback->second : nullptr;
+}
+
+const RegionalWeather* Esm4Database::region_weather(const CellRecord& cell) const {
+    const RegionalWeather* selected = nullptr;
+    for (const auto id : cell.region_ids) {
+        const auto found = region_weather_by_id_.find(id);
+        if (found == region_weather_by_id_.end() || found->second.chances.empty()) continue;
+        const auto& candidate = found->second;
+        if (!selected || candidate.override_weather > selected->override_weather
+            || (candidate.override_weather == selected->override_weather && candidate.priority > selected->priority))
+            selected = &candidate;
+    }
+    return selected;
+}
+
 std::optional<float> Esm4Database::find_global_value(std::uint32_t form_id) const {
     const auto found = global_value_by_id_.find(form_id);
     if (found == global_value_by_id_.end()) return std::nullopt;
@@ -696,6 +736,14 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
     bool is_land = type == "LAND";
     bool is_land_texture = type == "LTEX";
     bool is_worldspace = type == "WRLD";
+    const bool is_climate = type == "CLMT";
+    const bool is_weather = type == "WTHR";
+    const bool is_region = type == "REGN";
+    ClimateRecord climate;
+    WeatherRecord weather;
+    RegionalWeather regional_weather;
+    std::uint32_t region_section = 0;
+
     bool is_script = type == "SCPT";
     bool is_quest = type == "QUST";
     const bool is_topic = type == "DIAL";
@@ -785,7 +833,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             const auto text = read_zstring(value, subrecord_size);
             if (is_cell) cell.editor_id = text;
             else if (is_reference) reference.reference_name = text;
-            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_birthsign || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item)
+            else if (type == "STAT" || type == "DOOR" || type == "LIGH" || type == "FURN" || type == "ACTI" || type == "MSTT" || type == "RACE" || is_birthsign || is_game_setting || is_npc_base || is_creature || is_item_model || is_spell || is_magic_effect || is_effect_shader || is_outfit || is_ai_package || is_tree || is_combat_style || is_container || is_leveled_item || is_global || is_climate || is_weather)
                 base_editor_id = text;
             if (is_npc_base) npc.editor_id = text;
             if (is_creature) creature.editor_id = text;
@@ -947,6 +995,40 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
                 effect_shader.particle_rotation_speed = f32(value + 236);
                 effect_shader.particle_rotation_speed_variance = f32(value + 240);
             }
+        } else if ((tag == "XCCM" || tag == "XCLR") && is_cell && subrecord_size >= 4) {
+            if (tag == "XCCM") cell.climate_id = u32(value);
+            else for (std::size_t offset = 0; offset + 4 <= subrecord_size; offset += 4)
+                cell.region_ids.push_back(u32(value + offset));
+        } else if (tag == "CNAM" && is_worldspace && subrecord_size >= 4) {
+            worldspace_climate_by_id_[form_id] = u32(value);
+        } else if (tag == "WNAM" && is_worldspace && subrecord_size >= 4) {
+            worldspace_parent_by_id_[form_id] = u32(value);
+        } else if (tag == "TNAM" && is_climate && subrecord_size >= 4) {
+            std::copy_n(value, 4, climate.timing.begin());
+        } else if (tag == "RDAT" && is_region && subrecord_size >= 6) {
+            region_section = u32(value);
+            if (region_section == 3) {
+                regional_weather.override_weather = value[4] != 0;
+                regional_weather.priority = value[5];
+            }
+        } else if ((tag == "WLST" && is_climate) || (tag == "RDWT" && is_region && region_section == 3)) {
+            auto& chances = is_climate ? climate.chances : regional_weather.chances;
+            for (std::size_t offset = 0; offset + 8 <= subrecord_size; offset += 8) {
+                const auto id = u32(value + offset);
+                const auto chance = u32(value + offset + 4);
+                if (id && chance > 0 && chance <= 100) chances.push_back({id, chance});
+            }
+        } else if ((tag == "CNAM" || tag == "DNAM") && is_weather) {
+            weather.cloud_textures[tag == "CNAM" ? 0 : 1] = read_zstring(value, subrecord_size);
+        } else if (tag == "NAM0" && is_weather && subrecord_size >= weather.colors.size()) {
+            std::copy_n(value, weather.colors.size(), weather.colors.begin());
+            weather.has_colors = true;
+        } else if (tag == "FNAM" && is_weather && subrecord_size >= 16) {
+            for (std::size_t index = 0; index < 4; ++index) weather.fog_distances[index] = f32(value + 4 * index);
+        } else if (tag == "HNAM" && is_weather && subrecord_size >= 48) {
+            weather.sunlight_dimmer = f32(value + 44);
+        } else if (tag == "DATA" && is_weather && subrecord_size >= weather.parameters.size()) {
+            std::copy_n(value, weather.parameters.size(), weather.parameters.begin());
         } else if (tag == "DNAM" && is_worldspace && subrecord_size >= 8) {
             worldspace_water_level_by_id_[form_id] = f32(value + 4);
         } else if (tag == "VHGT" && is_land && subrecord_size >= 4 + 33 * 33) {
@@ -1510,6 +1592,12 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         if (!tree.model_path.empty()) base_model_by_id_[form_id] = tree.model_path;
         tree_by_id_[form_id] = std::move(tree);
     }
+    if (is_climate) climate_by_id_[form_id] = std::move(climate);
+    if (is_weather) {
+        weather.editor_id = base_editor_id;
+        weather_by_id_[form_id] = std::move(weather);
+    }
+    if (is_region && !regional_weather.chances.empty()) region_weather_by_id_[form_id] = std::move(regional_weather);
     if (is_worldspace)
         worldspace_water_level_by_id_.try_emplace(form_id, 0.0f);
     if (is_script)

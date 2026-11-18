@@ -17,6 +17,7 @@ const ActorFactory := preload("res://scripts/actor_factory.gd")
 const SceneQuestDirector := preload("res://scripts/scene_quest_director.gd")
 const NifAssetLibrary := preload("res://scripts/nif_asset_library.gd")
 const ExteriorLandMaterials := preload("res://scripts/exterior_land_materials.gd")
+const ExteriorWeather := preload("res://scripts/exterior_weather.gd")
 const FaceGenData := preload("res://scripts/facegen_data.gd")
 const NpcRouteController := preload("res://scripts/npc_route_controller.gd")
 const PlayerActorValues := preload("res://scripts/player_actor_values.gd")
@@ -308,7 +309,7 @@ var _player_deferred_assets_ready := false
 var _player_deferred_assets_loading := false
 var _cell_material: StandardMaterial3D
 var _interior_environment: Environment
-var _exterior_environment: Environment
+var _exterior_weather: ExteriorWeather
 var _land_mesh_cache: Dictionary = {}
 var _land_materials := ExteriorLandMaterials.new()
 var _land_region: Dictionary = {}
@@ -482,29 +483,13 @@ func _ready() -> void:
 	_cell_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	assets.cell_material = _cell_material
 	_interior_environment = world_environment.environment
-	_exterior_environment = _make_exterior_environment()
+	_exterior_weather = ExteriorWeather.new()
+	_exterior_weather.name = "ExteriorWeather"
+	add_child(_exterior_weather)
+	_exterior_weather.configure(key_light, assets)
 	status_label.text = "OpenOB data reader starting…"
 	fly_mode_button.pressed.connect(_toggle_fly_mode)
 	_load_game_data()
-
-func _make_exterior_environment() -> Environment:
-	var sky_material := ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = Color(0.12, 0.22, 0.38)
-	sky_material.sky_horizon_color = Color(0.58, 0.69, 0.78)
-	sky_material.ground_bottom_color = Color(0.17, 0.19, 0.16)
-	sky_material.ground_horizon_color = Color(0.48, 0.52, 0.48)
-	var sky := Sky.new()
-	sky.sky_material = sky_material
-	var environment := Environment.new()
-	environment.background_mode = Environment.BG_SKY
-	environment.sky = sky
-	# A modest neutral fill keeps asset meshes readable in cast shadow. Sky-only
-	# ambient is too weak for Oblivion's dark, texture-heavy NIFs in Godot's
-	# compatibility renderer, while the directional sun still defines shadows.
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.ambient_light_color = Color(0.58, 0.64, 0.74)
-	environment.ambient_light_energy = 0.4
-	return environment
 
 ## The player walking through a corpse moves its limbs (see ActorRagdoll.nudge).
 func _nudge_corpses() -> void:
@@ -529,19 +514,37 @@ func _set_cell_environment(cell: Dictionary) -> void:
 		_interior_environment.ambient_light_color = cell.get("ambient_color", Color(0.55, 0.62, 0.78)) if bool(cell.get("has_ambient_color", false)) else Color(0.55, 0.62, 0.78)
 		# Godot's ambient term is darker than the original game's interior fill.
 		_interior_environment.ambient_light_color = _interior_environment.ambient_light_color.lerp(Color(0.24, 0.24, 0.24), 0.35)
-	world_environment.environment = _exterior_environment if is_exterior else _interior_environment
+	world_environment.environment = _exterior_weather.environment if is_exterior else _interior_environment
 	key_light.visible = is_exterior
 	key_light.directional_shadow_max_distance = EXTERIOR_SHADOW_DISTANCE
+	_exterior_weather.set_exterior(is_exterior)
 	if is_exterior:
-		var tree_tint := _exterior_tree_tint()
-		for material: StandardMaterial3D in _tree_material_cache.values():
-			material.albedo_color = tree_tint
+		_update_exterior_weather_location(cell)
+		if _exterior_weather.advance(0.0, player.global_position, game_units_to_meters):
+			_refresh_exterior_tree_tint()
 	var camera := player.get_node_or_null("CameraPivot/Camera3D") as Camera3D
 	if camera != null:
 		camera.far = EXTERIOR_CAMERA_FAR if is_exterior else 4000.0
 
+func _update_exterior_weather_location(cell: Dictionary) -> void:
+	_exterior_weather.update_location(
+		int(cell.get("worldspace_form_id", 0)), player.global_position, EXTERIOR_CELL_SIZE * game_units_to_meters
+	)
+
+func _refresh_exterior_tree_tint() -> void:
+	var tint := _exterior_tree_tint()
+	for material: StandardMaterial3D in _tree_material_cache.values():
+		material.albedo_color = tint
+
 func _process(_delta: float) -> void:
 	_update_performance_sample()
+	if not _world_loading and not get_tree().paused:
+		if not bool(current_cell.get("interior", true)):
+			_update_exterior_weather_location(current_cell)
+		if _exterior_weather.advance(_delta, player.global_position, game_units_to_meters):
+			_refresh_exterior_tree_tint()
+		if quest_world != null:
+			quest_world.set_game_clock(_exterior_weather.game_hour, _exterior_weather.time_scale)
 	if _birthsign_menu_active:
 		return
 	_update_flickering_lights(_delta)
@@ -695,8 +698,10 @@ func _load_game_data() -> void:
 		status_label.text = "Data load failed: %s" % data_reader.get_error()
 		return
 
+	var arguments := OS.get_cmdline_user_args()
+	_exterior_weather.initialize_clock(arguments)
 	var sewer_exit_spawn: Dictionary = {}
-	if OS.get_cmdline_user_args().has("--start-at-sewer-exit"):
+	if arguments.has("--start-at-sewer-exit"):
 		sewer_exit_spawn = _sewer_exit_start_data()
 		if sewer_exit_spawn.is_empty():
 			status_label.text = "Could not find the Imperial Sewer exit. Start without --start-at-sewer-exit to begin in the prison."
@@ -1356,6 +1361,7 @@ func start_quest(quest_editor_id: String, stage: int = 0) -> PackedStringArray:
 		quest_world = data_reader.create_quest_world(executable_path, cache_dir)
 		if quest_world == null:
 			return PackedStringArray(["quest world not created (command table of %s)" % executable_path])
+		quest_world.set_game_clock(_exterior_weather.game_hour, _exterior_weather.time_scale)
 		quest_world.set_speech_length(Callable(self, "_speech_seconds"))
 		# Dialogue conditions read the currently loaded Player base record until character creation supplies live identity.
 		var player_race_form_id := int(_player_base_record.get("race_form_id", 0))
@@ -1526,6 +1532,8 @@ func _quest_distance(from: String, to: String) -> Variant:
 ## Answers world-state queries made by GameMode scripts during a tick.
 func _quest_world_command(command: String, target: String, arguments: Array) -> Variant:
 	match command.to_lower():
+		"getcurrenttime":
+			return _exterior_weather.game_hour
 		"getopenstate":
 			var wanted_name := target.strip_edges().to_lower()
 			for reference_value: Variant in current_cell.get("references", []):
@@ -3461,7 +3469,8 @@ func _exterior_tree_material(texture_path: String, billboard: bool) -> StandardM
 
 func _exterior_tree_tint() -> Color:
 	# Average direct sunlight over the canopy instead of using the quad's normal.
-	var ambient := _exterior_environment.ambient_light_color.srgb_to_linear() * _exterior_environment.ambient_light_energy
+	var environment := _exterior_weather.environment
+	var ambient := environment.ambient_light_color.srgb_to_linear() * environment.ambient_light_energy
 	var sun := key_light.light_color.srgb_to_linear() * (key_light.light_energy * 0.5)
 	var light := ambient + sun
 	return Color(minf(light.r, 1.0), minf(light.g, 1.0), minf(light.b, 1.0)).linear_to_srgb()

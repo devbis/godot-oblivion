@@ -372,9 +372,38 @@ struct IdleRecord {
     [[nodiscard]] bool is_folder() const;    // no .kf file: the node only groups its children
 };
 
+struct WeatherChance {
+    std::uint32_t weather_id;
+    std::uint32_t chance;
+};
+
+struct ClimateRecord {
+    // Sunrise begin/end and sunset begin/end, stored in ten-minute units.
+    std::array<std::uint8_t, 4> timing{36, 60, 96, 120};
+    std::vector<WeatherChance> chances;
+};
+
+struct WeatherRecord {
+    std::string editor_id;
+    std::array<std::string, 2> cloud_textures;
+    std::array<std::uint8_t, 160> colors{};
+    bool has_colors = false;
+    std::array<float, 4> fog_distances{};
+    std::array<std::uint8_t, 15> parameters{};
+    float sunlight_dimmer = 1.0f;
+};
+
+struct RegionalWeather {
+    std::vector<WeatherChance> chances;
+    std::uint8_t priority = 0;
+    bool override_weather = false;
+};
+
 struct CellRecord {
     std::uint32_t form_id = 0;
     std::uint32_t worldspace_form_id = 0;
+    std::uint32_t climate_id = 0;
+    std::vector<std::uint32_t> region_ids;
     std::string editor_id;
     std::string display_name;
     bool interior = true;
@@ -441,6 +470,9 @@ public:
     [[nodiscard]] const std::map<std::uint32_t, ScriptRecord>& scripts() const noexcept { return script_by_id_; }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const;
     // The initial value (FLTV) of a GLOB record, or nullopt when there is no such global.
+    [[nodiscard]] const WeatherRecord* find_weather(std::uint32_t id) const;
+    [[nodiscard]] const ClimateRecord* world_climate(std::uint32_t worldspace, std::uint32_t cell_climate) const;
+    [[nodiscard]] const RegionalWeather* region_weather(const CellRecord& cell) const;
     [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const;
     [[nodiscard]] const DialogTopic* find_topic(std::uint32_t form_id) const;
     [[nodiscard]] const std::map<std::uint32_t, DialogTopic>& topics() const noexcept { return topic_by_id_; }
@@ -494,6 +526,11 @@ private:
     std::map<std::uint32_t, std::uint16_t> item_biped_slots_by_id_;
     std::map<std::uint32_t, std::string> land_texture_path_by_id_;
     std::map<std::uint32_t, std::uint8_t> land_texture_material_by_id_;
+    std::map<std::uint32_t, std::uint32_t> worldspace_climate_by_id_;
+    std::map<std::uint32_t, std::uint32_t> worldspace_parent_by_id_;
+    std::map<std::uint32_t, WeatherRecord> weather_by_id_;
+    std::map<std::uint32_t, ClimateRecord> climate_by_id_;
+    std::map<std::uint32_t, RegionalWeather> region_weather_by_id_;
     std::map<std::uint32_t, float> worldspace_water_level_by_id_;
     std::map<std::string, std::size_t> cell_by_editor_id_;
     std::map<std::uint32_t, std::size_t> record_type_by_id_;

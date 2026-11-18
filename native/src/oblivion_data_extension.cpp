@@ -881,6 +881,53 @@ public:
         return result;
     }
 
+    double get_global_default(const String& editor_id, double fallback) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return fallback;
+        const auto value = data_->find_global_value(data_->find_form_id_by_editor_id(editor_id.utf8().get_data()));
+        return value.value_or(fallback);
+    }
+
+    Dictionary find_weather(const String& editor_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        return weather_to_dictionary(data_->find_form_id_by_editor_id(editor_id.utf8().get_data()));
+    }
+
+    Dictionary get_weather_context(int64_t worldspace, int64_t grid_x, int64_t grid_y) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!data_) return {};
+        const auto space_id = form_id_arg(worldspace);
+        const oblivion::CellRecord* location = nullptr;
+        for (const auto& cell : data_->cells()) {
+            if (cell.exterior_grid_cell && !cell.interior && cell.has_grid && cell.worldspace_form_id == space_id
+                && cell.grid_x == grid_x && cell.grid_y == grid_y) {
+                location = &cell;
+                break;
+            }
+        }
+        const auto* climate = data_->world_climate(space_id, location ? location->climate_id : 0);
+        const auto* regional = location && !location->climate_id ? data_->region_weather(*location) : nullptr;
+        Dictionary result;
+        if (climate) {
+            const auto& t = climate->timing;
+            result["timing"] = Vector4(t[0], t[1], t[2], t[3]) / 6.0f;
+        }
+        Array choices;
+        const auto append_choices = [&](const std::vector<oblivion::WeatherChance>& chances) {
+            for (const auto& entry : chances) {
+                Dictionary weather = weather_to_dictionary(entry.weather_id);
+                if (weather.is_empty()) continue;
+                weather["chance"] = static_cast<int64_t>(entry.chance);
+                choices.push_back(weather);
+            }
+        };
+        if (regional) append_choices(regional->chances);
+        if (choices.is_empty() && climate) append_choices(climate->chances);
+        result["choices"] = choices;
+        return result;
+    }
+
     double get_float_game_setting(const String& name, double default_value = 0.0) const {
         const CharString utf8 = name.utf8();
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1405,6 +1452,9 @@ protected:
         ClassDB::bind_method(D_METHOD("find_container", "form_id"), &OblivionData::find_container);
         ClassDB::bind_method(D_METHOD("find_leveled_list", "form_id"), &OblivionData::find_leveled_list);
         ClassDB::bind_method(D_METHOD("find_item_stats", "form_id"), &OblivionData::find_item_stats);
+        ClassDB::bind_method(D_METHOD("get_global_default", "editor_id", "fallback"), &OblivionData::get_global_default);
+        ClassDB::bind_method(D_METHOD("find_weather", "editor_id"), &OblivionData::find_weather);
+        ClassDB::bind_method(D_METHOD("get_weather_context", "worldspace", "grid_x", "grid_y"), &OblivionData::get_weather_context);
         ClassDB::bind_method(D_METHOD("get_float_game_setting", "name", "default_value"),
                              &OblivionData::get_float_game_setting, DEFVAL(0.0));
         ClassDB::bind_method(D_METHOD("get_int_game_setting", "name", "default_value"),
@@ -1488,6 +1538,32 @@ private:
         return entry;
     }
 
+    // The callers hold state_mutex_ while reading the data index.
+    Dictionary weather_to_dictionary(std::uint32_t id) const {
+        const auto* weather = data_->find_weather(id);
+        if (!weather || !weather->has_colors) return {};
+        Dictionary result;
+        result["id"] = static_cast<int64_t>(id);
+        result["name"] = as_string(weather->editor_id);
+        PackedColorArray colors;
+        for (std::size_t i = 0; i < weather->colors.size(); i += 4)
+            colors.push_back(Color::from_rgba8(weather->colors[i], weather->colors[i+1], weather->colors[i+2], 255));
+        result["colors"] = colors;
+        result["cloud_lower"] = as_string(weather->cloud_textures[0]);
+        result["cloud_upper"] = as_string(weather->cloud_textures[1]);
+        const auto& fog = weather->fog_distances;
+        result["fog"] = Vector4(fog[0], fog[1], fog[2], fog[3]);
+        const auto& p = weather->parameters;
+        result["wind"] = p[0] / 255.0;
+        result["cloud_speed"] = Vector2(p[1], p[2]) / 255.0;
+        result["transition"] = p[3] / 255.0;
+        result["thunder"] = p[10] / 255.0;
+        result["flags"] = p[11];
+        result["lightning_color"] = Color::from_rgba8(p[12], p[13], p[14], 255);
+        result["sunlight_dimmer"] = weather->sunlight_dimmer;
+        return result;
+    }
+
     static Dictionary cell_to_dictionary(const oblivion::CellRecord& cell) {
         Dictionary result;
         result["form_id"] = static_cast<int64_t>(cell.form_id);
@@ -1569,7 +1645,7 @@ public:
                                    -> std::optional<oblivion::ScriptValue> {
                 const auto lowered_command = lower_ascii(command);
                 if (lowered_command == "getopenstate" || lowered_command == "getdetected"
-                    || lowered_command == "getincell") {
+                    || lowered_command == "getincell" || lowered_command == "getcurrenttime") {
                     Array godot_arguments;
                     for (const auto& argument : arguments) {
                         godot_arguments.push_back(argument.is_text ? Variant(utf8_text(argument.text))
@@ -1852,6 +1928,16 @@ public:
         owner_ = owner;
         game_ = std::move(game);
         world_ = std::move(world);
+        if (game_ && world_) {
+            const auto hour_id = game_->find_form_id_by_editor_id("GameHour");
+            const auto scale_id = game_->find_form_id_by_editor_id("TimeScale");
+            world_->set_global_value([this, hour_id, scale_id](std::uint32_t id) -> std::optional<double> {
+                if (id && id == hour_id && game_hour_) return game_hour_;
+                if (id && id == scale_id && time_scale_) return time_scale_;
+                if (const auto value = game_->find_global_value(id)) return *value;
+                return std::nullopt;
+            });
+        }
         choice_only_topic_ids_.clear();
         topic_candidates_.clear();
         topic_candidates_built_ = false;
@@ -1868,8 +1954,14 @@ public:
         }
     }
 
+    void set_game_clock(double hour, double time_scale) {
+        game_hour_ = hour;
+        time_scale_ = time_scale;
+    }
+
     static void _bind_methods() {
         ClassDB::bind_method(D_METHOD("start", "quest_editor_id", "stage", "distance"), &OblivionQuestWorld::start);
+        ClassDB::bind_method(D_METHOD("set_game_clock", "hour", "time_scale"), &OblivionQuestWorld::set_game_clock);
         ClassDB::bind_method(D_METHOD("tick", "seconds", "distance", "world_command"), &OblivionQuestWorld::tick,
                              DEFVAL(Callable()));
         ClassDB::bind_method(D_METHOD("get_stage", "quest_editor_id"), &OblivionQuestWorld::get_stage);
@@ -1904,6 +1996,8 @@ private:
     Ref<OblivionData> owner_;
     // The game data the world's quests, scripts and topics point into. Declared before the world, so it outlives it.
     std::shared_ptr<const oblivion::GameData> game_;
+    std::optional<double> game_hour_;
+    std::optional<double> time_scale_;
     const oblivion::DialogTopic* greeting_ = nullptr;
     bool greeting_looked_up_ = false;
     mutable std::vector<const oblivion::DialogTopic*> topic_candidates_;
@@ -2047,11 +2141,6 @@ Ref<OblivionQuestWorld> OblivionData::create_quest_world(const String& executabl
         const auto commands = command_table(executable_value.get_data(), cache_value.get_data());
         auto world = std::make_unique<oblivion::QuestWorld>(oblivion::make_command_lookup(*commands));
         world->set_answer(oblivion::answer_fresh_player);
-        // CTDA "use global": the comparison is the FLTV of a GLOB record.
-        world->set_global_value([shared_game](std::uint32_t form_id) -> std::optional<double> {
-            if (const auto value = shared_game->find_global_value(form_id)) return static_cast<double>(*value);
-            return std::nullopt;
-        });
         // The idle manager: PickIdle walks the IDLE tree, and idle conditions may ask for the actor's race and sex.
         world->set_idle_tree([shared_game](std::uint32_t parent) -> const std::vector<const oblivion::IdleRecord*>& {
             return shared_game->idle_children(parent);

@@ -66,6 +66,11 @@ public:
     [[nodiscard]] const std::string* find_record_icon_path(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::uint32_t form_id) const;
     [[nodiscard]] const ScriptRecord* find_script(std::string_view editor_id) const;
+    [[nodiscard]] const WeatherRecord* find_weather(std::uint32_t id) const { return esm_.find_weather(id); }
+    [[nodiscard]] const ClimateRecord* world_climate(std::uint32_t space, std::uint32_t cell) const {
+        return esm_.world_climate(space, cell);
+    }
+    [[nodiscard]] const RegionalWeather* region_weather(const CellRecord& cell) const { return esm_.region_weather(cell); }
     [[nodiscard]] std::optional<float> find_global_value(std::uint32_t form_id) const { return esm_.find_global_value(form_id); }
     [[nodiscard]] const QuestRecord* find_quest(std::uint32_t form_id) const { return esm_.find_quest(form_id); }
     [[nodiscard]] const std::map<std::uint32_t, QuestRecord>& quests() const noexcept { return esm_.quests(); }

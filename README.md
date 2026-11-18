@@ -37,6 +37,14 @@ Quests need the game executable to read its script command table. Set `OBLIVION_
 
 The in-game reader searches for `Oblivion.esm` and all `.bsa` files in that directory. Loose files override archived resources. NPC walk/run speeds use the original Speed and Athletics calculations and movement GMSTs; player movement and the remaining physics values are still editable prototype settings.
 
+Exterior lighting follows the game clock and the active climate. The clock starts from the master file's `GameHour` and `TimeScale`. Weather is selected from the current cell's regional weather list, with the world climate as a fallback. To preview a particular time and weather at the sewer exit, use:
+
+```sh
+godot --path . -- --start-at-sewer-exit --game-hour 14 --weather Rain --time-scale 0
+```
+
+`--weather` accepts a weather record's editor ID (for example `Clear`, `Fog`, `Thunderstorm`, or `Snow`). Set `--time-scale 3600` to advance one game hour per real second.
+
 ## Current support
 
 - Oblivion BSA version 103 directory parsing and zlib asset extraction.
