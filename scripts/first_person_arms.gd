@@ -359,6 +359,12 @@ func present_stance(weapon_type: int, show_weapon: bool) -> void:
 		_request_clip(idle_clip_name)
 		while _clips_requested.get(idle_clip_name, "") == "loading":
 			await host.get_tree().process_frame
+	if _torch_held:
+		var torch_clip_name := _torch_idle_clip_name()
+		if _clips.get(torch_clip_name, {}).is_empty():
+			_request_clip(torch_clip_name)
+			while _clips_requested.get(torch_clip_name, "") == "loading":
+				await host.get_tree().process_frame
 	var clip: Dictionary = _clips.get(idle_clip_name, {})
 	if clip.is_empty():
 		return
@@ -375,6 +381,7 @@ func present_stance(weapon_type: int, show_weapon: bool) -> void:
 	_from_pose.clear()
 	_pose(clip, _time, 1.0)
 	_apply_torch_pose(_time)
+	_hide_torch_only_right_arm()
 	_place_under_camera()
 	_posed = true
 	_refresh_visibility()
@@ -512,6 +519,7 @@ func update(delta: float, motion: Dictionary) -> void:
 	var sample_time := start_time + fposmod(_time - start_time, stop_time - start_time) if looping else clampf(_time, start_time, stop_time)
 	_pose(clip, sample_time, _blend_elapsed / BLEND_S)
 	_apply_torch_pose(sample_time)
+	_hide_torch_only_right_arm()
 	_update_sway(delta, motion, clip)
 	_place_under_camera()
 	_posed = true
@@ -749,7 +757,7 @@ func _pose(clip: Dictionary, sample_time: float, blend_weight: float) -> void:
 func _apply_torch_pose(sample_time: float) -> void:
 	if not _torch_held or skeleton == null:
 		return
-	var torch_clip_name := "onehandtorchidle" if _stance.prefix == "onehand" else "torchidle"
+	var torch_clip_name := _torch_idle_clip_name()
 	var torch_clip: Dictionary = _clips.get(torch_clip_name, {})
 	if torch_clip.is_empty():
 		_request_clip(torch_clip_name)
@@ -764,6 +772,9 @@ func _apply_torch_pose(sample_time: float) -> void:
 	var phase := fposmod(sample_time - float(active_clip.get("start_time", 0.0)), maxf(active_duration, 0.001))
 	var torch_time := torch_start + fposmod(phase, torch_duration)
 	var preserve_right_arm := not _one_shot.is_empty() or _blocking
+	var shield_blocking := _shield_equipped and (
+		_blocking or _one_shot.ends_with("blockhit") or _one_shot.ends_with("blockattack")
+	)
 	for track_value: Variant in torch_clip.get("tracks", []):
 		var track: Dictionary = track_value
 		var bone_index := int(track.get("bone_index", -1))
@@ -771,6 +782,10 @@ func _apply_torch_pose(sample_time: float) -> void:
 			continue
 		var bone_name := str(skeleton.get_bone_name(bone_index))
 		if preserve_right_arm and (bone_name.begins_with("Bip01 R ") or bone_name == "Weapon"):
+			continue
+		# The original shield block animation owns the left arm while blocking.
+		# Do not let the torch idle layer lower that arm and pull the shield away.
+		if shield_blocking and bone_name.begins_with("Bip01 L "):
 			continue
 		if bone_name in ["Bip01", "Bip01 NonAccum"] or bone_name.contains("Thigh") \
 				or bone_name.contains("Calf") or bone_name.contains("Foot") or bone_name.contains("Toe"):
@@ -784,6 +799,23 @@ func _apply_torch_pose(sample_time: float) -> void:
 		var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
 		if scales.size() >= 2:
 			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * AnimationSampling.scalar(scales, torch_time))
+
+func _torch_idle_clip_name() -> String:
+	if _stance.prefix == "onehand":
+		return "onehandtorchidle"
+	return "torchidle"
+
+func _hide_torch_only_right_arm() -> void:
+	if not _torch_held or _weapon_wanted or not _one_shot.is_empty() or _blocking or skeleton == null:
+		return
+	# Torch-only idle still uses the unarmed base clip. Collapse the right arm's
+	# bones so its fist pose is not visible while the torch stays in the left hand.
+	for bone_index in range(skeleton.get_bone_count()):
+		var bone_name := str(skeleton.get_bone_name(bone_index))
+		if bone_name.begins_with("Bip01 R Clavicle") or bone_name.begins_with("Bip01 R UpperArm") \
+				or bone_name.begins_with("Bip01 R Forearm") or bone_name.begins_with("Bip01 R Hand") \
+				or bone_name.begins_with("Bip01 R Finger"):
+			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * 0.00001)
 
 ## Walking sways the arms: a bob that follows the step cycle of the walk or run clip and fades in and out with movement,
 ## and a trail behind the view's turns.
@@ -890,7 +922,7 @@ func _load_clip(clip_name: String) -> void:
 func _preload_stance() -> void:
 	var prefix := str(_stance.prefix)
 	if _torch_held:
-		_request_clip("onehandtorchidle" if prefix == "onehand" else "torchidle")
+		_request_clip(_torch_idle_clip_name())
 	for suffix: String in [
 		"idle", "equip", "unequip", "forward", "backward", "left", "right", "blockattack",
 		"fastforward", "fastbackward", "fastleft", "fastright", "blockidle",
