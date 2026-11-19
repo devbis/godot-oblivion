@@ -218,10 +218,14 @@ int main(int argc, char** argv) {
                 const auto* model_path = data.find_item_model_path(form_id, false);
                 const auto* female_model_path = data.find_item_model_path(form_id, true);
                 const auto* item_stats = data.find_item_stats(form_id);
+                const auto* light = data.find_light(form_id);
                 std::cout << std::hex << std::setw(8) << std::setfill('0') << form_id << std::dec
                           << " type=" << (type ? *type : "?")
                           << " editor_id=" << argv[3]
                           << " playable=" << (item_stats ? (item_stats->playable ? "true" : "false") : "n/a")
+                          << " light_flags=0x" << std::hex << (light ? light->flags : 0) << std::dec
+                          << " light_time=" << (light ? light->time : 0)
+                          << " base_model=" << (data.find_base_model_path(form_id) ? *data.find_base_model_path(form_id) : "")
                           << " male_model=" << (model_path ? *model_path : "")
                           << " female_model=" << (female_model_path ? *female_model_path : "") << '\n';
                 return 0;

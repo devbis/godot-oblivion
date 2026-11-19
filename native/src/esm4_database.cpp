@@ -858,7 +858,7 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
         } else if (tag == "FULL" && is_race) {
             race_face_gen.display_name = lower_ascii(read_zstring(value, subrecord_size));
             record_display_name_by_id_[form_id] = race_face_gen.display_name;
-        } else if (tag == "FULL" && (is_birthsign || is_character_class || type == "FURN")) {
+        } else if (tag == "FULL" && (is_birthsign || is_character_class || type == "FURN" || type == "LIGH")) {
             const auto display_name = read_zstring(value, subrecord_size);
             if (!display_name.empty()) record_display_name_by_id_[form_id] = display_name;
         } else if (tag == "FULL" && is_creature) {
@@ -892,10 +892,18 @@ void Esm4Database::parse_record(std::string_view type, std::uint32_t form_id, st
             cell.interior = (cell_flags & 0x0001) != 0;
         } else if (tag == "DATA" && type == "LIGH" && subrecord_size >= 16) {
             LightData light;
+            light.time = static_cast<std::int32_t>(u32(value));
             light.radius = u32(value + 4);
             std::copy_n(value + 8, 3, light.color.begin());
             light.flags = u32(value + 12);
+            if (subrecord_size >= 32) {
+                light.value = u32(value + 24);
+                light.weight = f32(value + 28);
+            }
             light_by_id_[form_id] = light;
+            auto& stats = item_stats_by_id_[form_id];
+            stats.value = static_cast<std::int32_t>(light.value);
+            stats.weight = light.weight;
         } else if (tag == "DATA" && is_pathgrid && subrecord_size >= 2) {
             pathgrid_node_count = static_cast<std::int16_t>(u16(value));
         } else if (tag == "PGRP" && is_pathgrid) {

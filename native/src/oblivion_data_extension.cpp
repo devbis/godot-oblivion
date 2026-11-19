@@ -820,8 +820,11 @@ public:
         const auto* light = data_->find_light(form_id_arg(form_id));
         if (!light) return {};
         Dictionary result;
+        result["time"] = light->time;
         result["radius"] = static_cast<int64_t>(light->radius);
         result["flags"] = static_cast<int64_t>(light->flags);
+        result["value"] = static_cast<int64_t>(light->value);
+        result["weight"] = light->weight;
         PackedByteArray color;
         for (const auto channel : light->color) color.push_back(channel);
         result["color"] = color;

@@ -21,9 +21,12 @@
 namespace oblivion {
 
 struct LightData {
+    std::int32_t time = 0;
     std::uint32_t radius = 0;
     std::array<std::uint8_t, 3> color{};
     std::uint32_t flags = 0;
+    std::uint32_t value = 0;
+    float weight = 0.0f;
 };
 
 struct PlacedReference {
