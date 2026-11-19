@@ -761,6 +761,22 @@ func add_actor_model(
 			bool(mesh_entry.get("alpha_test", false)),
 			int(mesh_entry.get("alpha_threshold", 128))
 		)
+		if model_path.to_lower().replace("\\", "/").ends_with("/torch02.nif") \
+				and str(mesh_entry.get("mesh_name", "")).to_lower().begins_with("flamecap"):
+			# Torch02's NIF carries the animated flame in its authored FlameCap mesh.
+			# Preserve that mesh and UV animation, but make its low-alpha source texture
+			# bright enough to read as fire in the unlit first-person view.
+			material = material.duplicate() as StandardMaterial3D
+			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+			material.cull_mode = BaseMaterial3D.CULL_DISABLED
+			material.albedo_color = Color.WHITE
+			material.emission_enabled = true
+			material.emission = Color(1.6, 0.9, 0.36)
+			material.emission_texture = material.albedo_texture
+			material.emission_energy_multiplier = 4.0
 		if is_actor_head and not facegen_data.get("egt_bytes", PackedByteArray()).is_empty():
 			material = _facegen_texture_material(
 				material,

@@ -292,6 +292,7 @@ var _flickering_lights: Array[OmniLight3D] = []
 var _upright_fire_sprite_meshes: Dictionary = {}
 var _nif_flipbook_instances: Array[Dictionary] = []
 var _nif_flipbook_texture_cache: Dictionary = {}
+var _fire_particle_texture_cache: Dictionary = {}
 var _cell_load_generation := 0
 var _cell_geometry_partition_origin := Vector3.ZERO
 var _deferred_world_generation := 0
@@ -351,6 +352,24 @@ var _player_equipment: Dictionary = {}
 var _player_weapon_meshes: Array[MeshInstance3D] = []
 var _player_weapon_form_id := 0
 var _player_weapon_record: Dictionary = {}
+var _player_torch_form_id := 0
+var _player_torch_meshes: Array[MeshInstance3D] = []
+var _player_torch_first_person_meshes: Array[MeshInstance3D] = []
+var _player_torch_third_person_meshes: Array[MeshInstance3D] = []
+var _player_torch_first_person_mount: Node3D
+var _player_torch_third_person_mount: Node3D
+var _player_torch_mount: Node3D
+var _player_torch_effect_root: Node3D
+var _player_torch_effect_unit_scale := 0.0
+var _player_torch_light: OmniLight3D
+var _player_torch_idle_pose: Dictionary = {}
+var _player_onehand_torch_pose: Dictionary = {}
+var _player_torch_remaining_seconds := 0.0
+var _player_torch_flicker_time := 0.0
+var _player_torch_first_person := false
+var _player_torch_stowed_for_unarmed := false
+var _player_torch_stowed_form_id := 0
+var _torch_remaining_by_form: Dictionary = {}
 var _weapon_drawn := false
 var _player_weapon_is_held := false
 var _player_blocking := false
@@ -552,6 +571,8 @@ func _refresh_exterior_tree_tint() -> void:
 func _process(_delta: float) -> void:
 	_update_performance_sample()
 	if not _world_loading and not get_tree().paused:
+		_update_player_torch(_delta)
+		_update_dropped_torches(_delta)
 		if not bool(current_cell.get("interior", true)):
 			_update_exterior_weather_location(current_cell)
 		if _exterior_weather.advance(_delta, player.global_position, game_units_to_meters):
@@ -2809,7 +2830,7 @@ func _load_cell_geometry(
 		var base_form_id := int(reference.get("base_form_id", 0))
 		var base_type := str(data_reader.find_record_type(base_form_id))
 		var is_door := base_type == "DOOR"
-		var is_pickup_item := base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]
+		var is_pickup_item := _is_pickup_item_type(base_form_id, base_type)
 		# An item the player took stays gone when its cell is loaded again.
 		if is_pickup_item and _picked_up_reference_ids.has(int(reference.get("form_id", 0))):
 			continue
@@ -2821,9 +2842,9 @@ func _load_cell_geometry(
 			director.register_door_reference(reference, meshes, _reference_transform(reference))
 		var nif_key := model_path.to_lower().replace("\\", "/")
 		var physics_metadata: Dictionary = assets.nif_metadata_cache.get(nif_key, {})
-		_add_nif_particles(physics_metadata, reference_transform, model_path)
+		_add_nif_particles(physics_metadata, reference_transform, model_path, null, int(reference.get("form_id", 0)))
 		if not _actor_reference_disabled(reference):
-			_add_local_fire_light(physics_metadata, reference_transform, authored_light_positions)
+			_add_local_fire_light(physics_metadata, reference_transform, authored_light_positions, int(reference.get("form_id", 0)))
 		if not await _add_nif_attached_effects(
 			physics_metadata, reference_transform, model_path, generation, authored_light_positions,
 			not _actor_reference_disabled(reference)
@@ -4412,6 +4433,13 @@ func _create_pickup_target_area(reference_id: int, reference_transform: Transfor
 		parent.add_child(area)
 	return area
 
+func _is_pickup_item_type(form_id: int, record_type: String) -> bool:
+	if record_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]:
+		return true
+	if record_type == "LIGH":
+		return (int(data_reader.find_light(form_id).get("flags", 0)) & 0x02) != 0
+	return false
+
 func _should_collide_model(model_path: String) -> bool:
 	var normalized := model_path.to_lower().replace("\\", "/")
 	return not normalized.contains("/fx/") and not normalized.contains("lightbeam") and not normalized.contains("dust") and not normalized.contains("trigzone") and not normalized.contains("/triggers/") and not normalized.contains("markerx")
@@ -4460,7 +4488,7 @@ func _update_exterior_collision_streaming() -> void:
 		if _is_early_oblivion_gate(reference, model_path):
 			continue
 		var base_type := str(data_reader.find_record_type(int(reference.get("base_form_id", 0))))
-		if base_type in ["ARMO", "CLOT", "WEAP", "ALCH", "AMMO", "APPA", "BOOK", "INGR", "KEYM", "MISC", "SLGM", "SGST"]:
+		if _is_pickup_item_type(int(reference.get("base_form_id", 0)), base_type):
 			continue
 		selected_distance = distance_to_player
 		selected_reference = reference
@@ -5001,6 +5029,8 @@ func _equip_player_item(form_id: int) -> bool:
 	if _player_avatar == null or _player_skeleton == null:
 		return false
 	var item_type := str(data_reader.find_record_type(form_id))
+	if item_type == "LIGH":
+		return await _equip_player_torch(form_id)
 	var model_path := str(data_reader.find_item_model_path(form_id, false))
 	if item_type not in ["ARMO", "CLOT", "WEAP"] or model_path.is_empty():
 		return false
@@ -5018,7 +5048,9 @@ func _equip_player_item(form_id: int) -> bool:
 		_player_weapon_form_id = form_id
 		_player_weapon_record = weapon_record
 		_preload_player_combat_stance(_player_weapon_type())
-		_sync_arms_weapon(true)
+		await _sync_arms_weapon(true)
+		if _player_torch_form_id > 0 and not _weapon_drawn and _arms != null and _arms.built:
+			await _arms.set_weapon(-1, "")
 		return true
 	var slots := int(data_reader.get_item_biped_slots(form_id))
 	if slots == 0:
@@ -5053,6 +5085,286 @@ func _equip_player_item(form_id: int) -> bool:
 	_refresh_player_body_visibility()
 	_sync_arms_equipment()
 	return true
+
+func _equip_player_torch(form_id: int) -> bool:
+	var light_data: Dictionary = data_reader.find_light(form_id)
+	if (int(light_data.get("flags", 0)) & 0x02) == 0 or _player_avatar == null or _player_skeleton == null:
+		return false
+	var torch_bone := "Torch"
+	if _player_skeleton.find_bone(torch_bone) < 0:
+		push_warning("Cannot hold %s: player skeleton has no Torch bone" % _record_display_name(form_id))
+		return false
+	if _player_torch_form_id == form_id and is_instance_valid(_player_torch_light):
+		return true
+	_unequip_player_torch()
+	var model_path := str(data_reader.find_base_model_path(form_id))
+	if model_path.is_empty():
+		return false
+	var third_person_meshes: Array[MeshInstance3D] = await actors.add_actor_model(
+		_player_avatar, _player_skeleton, model_path, torch_bone
+	)
+	if third_person_meshes.is_empty():
+		return false
+	var first_person_meshes: Array[MeshInstance3D] = []
+	if _arms != null and _arms.built and is_instance_valid(_arms.skeleton):
+		first_person_meshes = await actors.add_actor_model(_arms.root, _arms.skeleton, model_path, torch_bone)
+		if first_person_meshes.is_empty():
+			for mesh in third_person_meshes:
+				if is_instance_valid(mesh):
+					mesh.queue_free()
+			return false
+	_player_torch_form_id = form_id
+	_player_torch_first_person = not first_person_meshes.is_empty()
+	_player_torch_first_person_meshes = first_person_meshes
+	_player_torch_third_person_meshes = third_person_meshes
+	_player_torch_meshes = first_person_meshes.duplicate()
+	_player_torch_meshes.append_array(third_person_meshes)
+	_player_torch_first_person_mount = _wrap_player_torch_model(first_person_meshes) if not first_person_meshes.is_empty() else null
+	_player_torch_third_person_mount = _wrap_player_torch_model(third_person_meshes)
+	_player_torch_mount = _player_torch_first_person_mount if player.is_first_person else _player_torch_third_person_mount
+	if not is_instance_valid(_player_torch_mount):
+		_unequip_player_torch()
+		return false
+	var metadata: Dictionary = assets.nif_metadata_cache.get(model_path.to_lower().replace("\\", "/"), {})
+	var source_meshes: Array = await assets.meshes_for_model(model_path)
+	if not is_instance_valid(_player_torch_mount):
+		_unequip_player_torch()
+		return false
+	for mesh_index in mini(_player_torch_meshes.size(), source_meshes.size()):
+		var source_index := mesh_index % maxi(source_meshes.size(), 1)
+		if not await _install_nif_texture_flipbook(
+			_player_torch_meshes[mesh_index], source_meshes[source_index], metadata, _cell_load_generation
+		):
+			_unequip_player_torch()
+			return false
+		if str(source_meshes[source_index].get("mesh_name", "")).to_lower().begins_with("flamecap"):
+			# The held torch's FlameCap is a static textured card. The game's moving
+			# flame comes from the FireTorchSmall particle system below.
+			_player_torch_meshes[mesh_index].visible = false
+	if _arms != null and _arms.built:
+		var hand_weapon_ready := _weapon_drawn and _player_weapon_form_id > 0
+		var weapon_type := _player_weapon_type() if hand_weapon_ready else -1
+		var weapon_path := str(data_reader.find_item_model_path(_player_weapon_form_id, false)) \
+			if hand_weapon_ready else ""
+		await _arms.set_weapon(weapon_type, weapon_path)
+		_arms.set_torch_held(true)
+		await _arms.present_stance(weapon_type, hand_weapon_ready)
+	_player_torch_effect_root = Node3D.new()
+	_player_torch_effect_root.name = "TorchFireEffects"
+	_player_torch_effect_root.set_meta("player_torch_effects", true)
+	# The avatar and its bones are scaled from game units to metres. Keep the
+	# particle system outside that scaled hierarchy because _add_nif_particles
+	# converts emitter dimensions and offsets to metres itself.
+	player.add_child(_player_torch_effect_root)
+	_update_player_torch_effect_transform()
+	var torch_unit_scale := absf(_player_torch_mount.global_basis.get_scale().x)
+	if torch_unit_scale <= 0.000001 or torch_unit_scale > 0.1:
+		torch_unit_scale = game_units_to_meters * (
+			FirstPersonArms.VIEW_MODEL_SCALE if player.is_first_person else _player_race_height_scale
+		)
+	_player_torch_effect_unit_scale = torch_unit_scale
+	_update_player_torch_effect_transform()
+	var torch_model_transform := Transform3D(
+		Basis.IDENTITY.scaled(Vector3.ONE * torch_unit_scale), Vector3.ZERO
+	)
+	const torch_flame_model_path := "Fire/FireTorchSmall.NIF"
+	await assets.meshes_for_model(torch_flame_model_path)
+	var torch_flame_metadata: Dictionary = assets.nif_metadata_cache.get(
+		torch_flame_model_path.to_lower(), {}
+	)
+	var torch_flame_transform := Transform3D(
+		Basis.IDENTITY.scaled(Vector3.ONE * torch_unit_scale),
+		Vector3.ZERO
+	)
+	if (torch_flame_metadata.get("particle_emitters", []) as Array).is_empty():
+		push_warning("Torch flame effect %s has no particle emitters" % torch_flame_model_path)
+	else:
+		print("OpenOB torch: %s flame emitters=%d" % [
+			torch_flame_model_path,
+			(torch_flame_metadata.get("particle_emitters", []) as Array).size(),
+		])
+		_add_nif_particles(
+			torch_flame_metadata, torch_flame_transform, torch_flame_model_path,
+			_player_torch_effect_root, 0, true
+		)
+	_player_torch_idle_pose = await _gesture_animation("Characters/_male/torchidle.kf", _player_skeleton)
+	_player_onehand_torch_pose = await _gesture_animation(
+		"Characters/_male/onehandtorchidle.kf", _player_skeleton
+	)
+	var color_bytes: PackedByteArray = light_data.get("color", PackedByteArray())
+	var torch_light := OmniLight3D.new()
+	torch_light.name = "HeldTorchLight"
+	var particle_emitters: Array = metadata.get("particle_emitters", [])
+	var flame_anchor := Vector3.ZERO
+	for source_mesh_value: Variant in source_meshes:
+		var source_mesh_entry: Dictionary = source_mesh_value
+		if str(source_mesh_entry.get("mesh_name", "")).to_lower().begins_with("flamecap"):
+			var flame_mesh := source_mesh_entry.get("mesh") as ArrayMesh
+			if flame_mesh != null:
+				flame_anchor = flame_mesh.get_aabb().get_center()
+			break
+	if not particle_emitters.is_empty():
+		var emitter: Dictionary = particle_emitters[0]
+		var emitter_position: Vector3 = torch_model_transform * ActorFactory.godot_node_rest({
+			"translation": emitter.get("position", Vector3.ZERO),
+			"rotation_rows": emitter.get("rotation_rows", PackedFloat32Array()),
+			"scale": float(emitter.get("scale", 1.0)),
+		}).origin
+		torch_light.position = emitter_position - flame_anchor * torch_unit_scale
+	else:
+		var attach_light_position := flame_anchor
+		for node_value: Variant in metadata.get("nodes", []):
+			var node: Dictionary = node_value
+			if str(node.get("name", "")).to_lower() != "attachlight":
+				continue
+			attach_light_position = Vector3(node.get("global_translation", node.get("translation", Vector3.ZERO)))
+			break
+		torch_light.position = (attach_light_position - flame_anchor) * torch_unit_scale
+	if color_bytes.size() >= 3:
+		torch_light.light_color = Color8(color_bytes[0], color_bytes[1], color_bytes[2])
+	torch_light.omni_range = maxf(0.1, float(light_data.get("radius", 0)) * game_units_to_meters)
+	torch_light.light_energy = 1.0
+	torch_light.shadow_enabled = false
+	_player_torch_effect_root.add_child(torch_light)
+	_player_torch_light = torch_light
+	var duration := float(light_data.get("time", 0))
+	_player_torch_remaining_seconds = float(_torch_remaining_by_form.get(form_id, duration if duration > 0.0 else INF))
+	if (int(light_data.get("flags", 0)) & 0x48) != 0:
+		_register_flickering_light(torch_light, 7.0 if (int(light_data.get("flags", 0)) & 0x40) != 0 else 3.2)
+	return true
+
+func _wrap_player_torch_model(meshes: Array[MeshInstance3D]) -> Node3D:
+	if meshes.is_empty() or not is_instance_valid(meshes[0]):
+		return null
+	var bone_mount := meshes[0].get_parent() as Node3D
+	if not is_instance_valid(bone_mount):
+		return null
+	var wrapper := Node3D.new()
+	wrapper.name = "TorchModelOffset"
+	bone_mount.add_child(wrapper)
+	for mesh in meshes:
+		if is_instance_valid(mesh):
+			mesh.reparent(wrapper, false)
+	return wrapper
+
+func _unequip_player_torch(reset_first_person_arms := true) -> void:
+	var was_first_person_torch := _player_torch_first_person
+	if _player_torch_form_id > 0 and _player_torch_remaining_seconds > 0.0:
+		_torch_remaining_by_form[_player_torch_form_id] = _player_torch_remaining_seconds
+	if is_instance_valid(_player_torch_first_person_mount):
+		_player_torch_first_person_mount.queue_free()
+	else:
+		for mesh_value: Variant in _player_torch_first_person_meshes:
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.queue_free()
+	if is_instance_valid(_player_torch_third_person_mount):
+		_player_torch_third_person_mount.queue_free()
+	else:
+		for mesh_value: Variant in _player_torch_third_person_meshes:
+			var mesh := mesh_value as MeshInstance3D
+			if is_instance_valid(mesh):
+				mesh.queue_free()
+	if is_instance_valid(_player_torch_light):
+		_player_torch_light.queue_free()
+	if is_instance_valid(_player_torch_effect_root):
+		_player_torch_effect_root.queue_free()
+	_player_torch_form_id = 0
+	_player_torch_meshes = []
+	_player_torch_first_person_meshes = []
+	_player_torch_third_person_meshes = []
+	_player_torch_first_person_mount = null
+	_player_torch_third_person_mount = null
+	_player_torch_mount = null
+	_player_torch_effect_root = null
+	_player_torch_effect_unit_scale = 0.0
+	_player_torch_light = null
+	_player_torch_idle_pose = {}
+	_player_onehand_torch_pose = {}
+	_player_torch_remaining_seconds = 0.0
+	_player_torch_first_person = false
+	if was_first_person_torch and _arms != null and _arms.built:
+		_arms.set_torch_held(false)
+		if reset_first_person_arms:
+			if _weapon_drawn:
+				_sync_arms_weapon(true)
+			else:
+				_arms.holster()
+				_arms.set_weapon(-1, "")
+
+func _update_player_torch(delta: float) -> void:
+	if _player_torch_form_id <= 0 or not is_instance_valid(_player_torch_light):
+		return
+	_update_player_torch_effect_transform()
+	_player_torch_flicker_time += delta
+	var flame_energy := 1.2 + 0.25 * sin(_player_torch_flicker_time * 17.0) + 0.1 * sin(_player_torch_flicker_time * 29.0)
+	for mesh_value: Variant in _player_torch_meshes:
+		var flame_mesh := mesh_value as MeshInstance3D
+		if not is_instance_valid(flame_mesh) or not str(flame_mesh.name).to_lower().contains("flamecap"):
+			continue
+		var flame_material := flame_mesh.material_override as StandardMaterial3D
+		if flame_material != null and flame_material.emission_enabled:
+			flame_material.emission_energy_multiplier = flame_energy
+	if is_inf(_player_torch_remaining_seconds):
+		return
+	_player_torch_remaining_seconds = maxf(0.0, _player_torch_remaining_seconds - delta)
+	if _player_torch_remaining_seconds > 0.0:
+		return
+	var expired_form_id := _player_torch_form_id
+	for mesh_value: Variant in _player_torch_meshes:
+		var mesh := mesh_value as MeshInstance3D
+		if is_instance_valid(mesh) and bool(mesh.get_meta("nif_fire_lod_sprite", false)):
+			mesh.visible = false
+	_unequip_player_torch()
+	_torch_remaining_by_form.erase(expired_form_id)
+	var count := int(_player_inventory.get(expired_form_id, 0))
+	if count > 1:
+		_player_inventory[expired_form_id] = count - 1
+	else:
+		_player_inventory.erase(expired_form_id)
+	print("OpenOB torch: %s burns out" % _record_display_name(expired_form_id))
+	_refresh_inventory_hud()
+
+func _update_player_torch_effect_transform() -> void:
+	if not is_instance_valid(_player_torch_mount) or not is_instance_valid(_player_torch_effect_root):
+		return
+	var mount_basis := _player_torch_mount.global_basis.orthonormalized()
+	var active_meshes := _player_torch_first_person_meshes if player.is_first_person else _player_torch_third_person_meshes
+	var flame_position := _player_torch_mount.global_position
+	for mesh_value: Variant in active_meshes:
+		var flame_mesh := mesh_value as MeshInstance3D
+		if not is_instance_valid(flame_mesh) or not flame_mesh.name.to_lower().contains("flamecap"):
+			continue
+		if flame_mesh.mesh != null:
+			flame_position = flame_mesh.global_transform * flame_mesh.mesh.get_aabb().get_center()
+		break
+	var mount_scale := absf(_player_torch_mount.global_basis.get_scale().x)
+	if mount_scale <= 0.000001 or mount_scale > 0.1:
+		mount_scale = game_units_to_meters * (
+			FirstPersonArms.VIEW_MODEL_SCALE if player.is_first_person else _player_race_height_scale
+		)
+	var particle_scale := mount_scale / _player_torch_effect_unit_scale \
+		if _player_torch_effect_unit_scale > 0.000001 else 1.0
+	_player_torch_effect_root.global_transform = Transform3D(
+		mount_basis.scaled(Vector3.ONE * particle_scale), flame_position
+	)
+
+func _update_dropped_torches(delta: float) -> void:
+	for reference_value: Variant in _placed_items.keys():
+		var reference_id := int(reference_value)
+		var item: Dictionary = _placed_items[reference_id]
+		if not bool(item.get("lit_torch", false)):
+			continue
+		var remaining := float(item.get("torch_remaining_seconds", 0.0)) - delta
+		item["torch_remaining_seconds"] = remaining
+		if remaining > 0.0:
+			continue
+		for child: Node in cell_visual_root.get_children():
+			if int(child.get_meta("reference_id", -1)) != reference_id:
+				continue
+			child.queue_free()
+		_placed_items.erase(reference_id)
+		print("OpenOB torch: dropped %s burns out" % str(item.get("editor_id", "torch")))
 
 func _find_weapon_record(form_id: int) -> Dictionary:
 	if data_reader == null or not data_reader.has_method("find_weapon"):
@@ -5142,6 +5454,25 @@ func _refresh_player_first_person_visibility() -> void:
 			mesh.visible = not first_person
 	_refresh_player_body_visibility()
 	_refresh_player_hair_visibility()
+	if _player_torch_form_id > 0:
+		_rebuild_player_torch_for_view_mode.call_deferred()
+
+func _rebuild_player_torch_for_view_mode() -> void:
+	if _player_torch_form_id <= 0:
+		return
+	if player.is_first_person:
+		_player_torch_mount = _player_torch_first_person_mount
+		if _arms != null and _arms.built:
+			var hand_weapon_ready := _weapon_drawn and _player_weapon_form_id > 0
+			var weapon_type := _player_weapon_type() if hand_weapon_ready else -1
+			var weapon_path := str(data_reader.find_item_model_path(_player_weapon_form_id, false)) \
+				if hand_weapon_ready else ""
+			await _arms.set_weapon(weapon_type, weapon_path)
+			_arms.set_torch_held(true)
+			await _arms.present_stance(weapon_type, hand_weapon_ready)
+	else:
+		_player_torch_mount = _player_torch_third_person_mount
+	_update_player_torch_effect_transform()
 
 func _refresh_player_hair_visibility() -> void:
 	var headwear_equipped := false
@@ -6325,6 +6656,9 @@ func _remove_looted_npc_equipment(form_id: int) -> void:
 
 ## Takes the item off if it is worn: its meshes go, the body parts it covered show again.
 func _unequip_player_item(form_id: int) -> void:
+	if _player_torch_form_id == form_id:
+		_unequip_player_torch()
+		return
 	if _player_weapon_form_id == form_id:
 		_unequip_player_weapon()
 		return
@@ -6359,16 +6693,24 @@ func _on_inventory_item_gui_input(event: InputEvent, form_id: int) -> void:
 		_drop_inventory_item(form_id)
 
 ## Drops one item on the floor in front of the player, where it can be picked up again.
-func _drop_inventory_item(form_id: int) -> void:
-	if _world_loading or not _inventory_open:
+func _drop_inventory_item(form_id: int, force := false, lit_torch := false, torch_remaining := 0.0) -> void:
+	if _world_loading or (not _inventory_open and not force):
 		return
+	if _player_torch_form_id == form_id:
+		lit_torch = true
+		torch_remaining = _player_torch_remaining_seconds
 	var model_path := str(data_reader.find_world_item_model_path(form_id, false))
 	if model_path.is_empty():
 		model_path = str(data_reader.find_item_model_path(form_id, false))
+	if model_path.is_empty() and str(data_reader.find_record_type(form_id)) == "LIGH":
+		model_path = str(data_reader.find_base_model_path(form_id))
 	var meshes: Array = await assets.meshes_for_model(model_path) if not model_path.is_empty() else []
 	if meshes.is_empty():
 		_show_interaction_toast("Cannot drop %s" % _record_display_name(form_id))
 		return
+	if _player_torch_form_id == form_id:
+		_unequip_player_torch()
+		_torch_remaining_by_form.erase(form_id)
 	if _remove_inventory_item(form_id, 1) == 0:
 		return
 	var origin := player.global_position + (-player.global_basis.z) * 0.9 + Vector3.UP
@@ -6380,6 +6722,38 @@ func _drop_inventory_item(form_id: int) -> void:
 	)
 	_drop_serial += 1
 	var reference_id := DROPPED_ITEM_REFERENCE_BASE + _drop_serial
+	var item_type := str(data_reader.find_record_type(form_id))
+	var has_torch_remaining := item_type == "LIGH"
+	if has_torch_remaining and not lit_torch:
+		var default_light: Dictionary = data_reader.find_light(form_id)
+		torch_remaining = float(_torch_remaining_by_form.get(
+			form_id, float(default_light.get("time", 0)) if float(default_light.get("time", 0)) > 0.0 else INF
+		))
+	if lit_torch and item_type == "LIGH":
+		var light_data: Dictionary = data_reader.find_light(form_id)
+		var metadata: Dictionary = assets.nif_metadata_cache.get(model_path.to_lower().replace("\\", "/"), {})
+		_add_nif_particles(metadata, item_transform, model_path, null, reference_id)
+		var color_bytes: PackedByteArray = light_data.get("color", PackedByteArray())
+		var torch_light := OmniLight3D.new()
+		torch_light.name = "DroppedTorchLight_%08X" % reference_id
+		var particle_emitters: Array = metadata.get("particle_emitters", [])
+		if not particle_emitters.is_empty():
+			var emitter: Dictionary = particle_emitters[0]
+			torch_light.position = item_transform * ActorFactory.godot_node_rest({
+				"translation": emitter.get("position", Vector3.ZERO),
+				"rotation_rows": emitter.get("rotation_rows", PackedFloat32Array()),
+				"scale": float(emitter.get("scale", 1.0)),
+			}).origin
+		if color_bytes.size() >= 3:
+			torch_light.light_color = Color8(color_bytes[0], color_bytes[1], color_bytes[2])
+		torch_light.omni_range = maxf(0.1, float(light_data.get("radius", 0)) * game_units_to_meters)
+		if particle_emitters.is_empty():
+			torch_light.position = floor_point
+		torch_light.set_meta("reference_id", reference_id)
+		cell_visual_root.add_child(torch_light)
+		torch_light.set_meta("torch_remaining_seconds", torch_remaining)
+		if (int(light_data.get("flags", 0)) & 0x48) != 0:
+			_register_flickering_light(torch_light, 3.2)
 	var instances: Array[MeshInstance3D] = []
 	for mesh_entry: Dictionary in meshes:
 		var instance := MeshInstance3D.new()
@@ -6393,19 +6767,28 @@ func _drop_inventory_item(form_id: int) -> void:
 			bool(mesh_entry.get("alpha_test", false)),
 			int(mesh_entry.get("alpha_threshold", 128))
 		)
+		if lit_torch and item_type == "LIGH":
+			var torch_metadata: Dictionary = assets.nif_metadata_cache.get(model_path.to_lower().replace("\\", "/"), {})
+			if not await _install_nif_texture_flipbook(instance, mesh_entry, torch_metadata, _cell_load_generation):
+				instance.queue_free()
+				continue
 		instance.transform = item_transform
+		instance.set_meta("reference_id", reference_id)
 		cell_visual_root.add_child(instance)
 		instances.push_back(instance)
 	var item_name := _record_display_name(form_id)
 	_placed_items[reference_id] = {
 		"reference_id": reference_id,
 		"base_form_id": form_id,
-		"record_type": str(data_reader.find_record_type(form_id)),
+		"record_type": item_type,
 		"editor_id": str(data_reader.find_editor_id(form_id)),
 		"display_name": item_name,
 		"position": floor_point,
 		"mesh_instances": instances,
 		"target_area": _create_pickup_target_area(reference_id, item_transform, meshes),
+		"lit_torch": lit_torch and item_type == "LIGH",
+		"torch_remaining_seconds": torch_remaining,
+		"has_torch_remaining": has_torch_remaining,
 	}
 	_show_interaction_toast("Dropped %s" % item_name)
 
@@ -6504,8 +6887,13 @@ func _pick_up_placed_item(item: Dictionary) -> void:
 			var mesh_instance := mesh_value as MeshInstance3D
 			if is_instance_valid(mesh_instance):
 				mesh_instance.queue_free()
+	for child: Node in cell_visual_root.get_children():
+		if int(child.get_meta("reference_id", -1)) == reference_id:
+			child.queue_free()
 	var form_id := int(item.get("base_form_id", 0))
 	var item_name := str(item.get("editor_id", "item"))
+	if str(item.get("record_type", "")) == "LIGH" and bool(item.get("has_torch_remaining", false)):
+		_torch_remaining_by_form[form_id] = float(item.get("torch_remaining_seconds", 0.0))
 	_add_inventory_item(form_id)
 	var item_type := str(item.get("record_type", ""))
 	if item_type in ["ARMO", "CLOT", "WEAP"] and await _equip_player_item(form_id):
@@ -6544,7 +6932,7 @@ func _refresh_inventory_hud() -> void:
 		if item_name.is_empty():
 			item_name = "Item %08X" % form_id
 		var item_type := str(data_reader.find_record_type(form_id)) if data_reader != null else ""
-		var equipped := _player_equipment.has(form_id) or _player_weapon_form_id == form_id
+		var equipped := _player_equipment.has(form_id) or _player_weapon_form_id == form_id or _player_torch_form_id == form_id
 		var equipped_label := " · equipped" if equipped else ""
 		var item_button := Button.new()
 		item_button.text = "%s  %s%s" % [item_type, _item_line(form_id, int(_player_inventory[form_id])), equipped_label]
@@ -6764,6 +7152,12 @@ func _toggle_weapon_drawn() -> void:
 func _set_weapon_drawn(drawn: bool) -> void:
 	if drawn == _weapon_drawn:
 		return
+	if drawn and _player_weapon_form_id <= 0 and _player_torch_form_id > 0:
+		_player_torch_stowed_for_unarmed = true
+		_player_torch_stowed_form_id = _player_torch_form_id
+		_unequip_player_torch(false)
+		if player.is_first_person and _arms != null and _arms.built:
+			await _arms.set_weapon(-1, "")
 	_weapon_drawn = drawn
 	_refresh_player_movement()
 	_player_blocking = false
@@ -6783,13 +7177,50 @@ func _set_weapon_drawn(drawn: bool) -> void:
 		_player_combat_action_sound_pending = false
 		_preload_player_combat_stance(_player_weapon_type())
 	if _arms == null or not _arms.built:
+		if not drawn and _player_torch_stowed_for_unarmed:
+			_restore_stowed_torch.call_deferred()
 		return
 	if drawn:
-		_arms.draw()
+		if _player_torch_form_id > 0 and _player_weapon_form_id > 0:
+			_sync_arms_weapon(true)
+		else:
+			_arms.draw()
 	else:
 		_pending_cast = {}
 		_arms.set_blocking(false)
 		_arms.holster()
+		if _player_torch_form_id > 0:
+			_arms.set_torch_held(true)
+			_settle_torch_stance_after_sheath.call_deferred()
+	if not drawn and _player_torch_stowed_for_unarmed:
+		_restore_stowed_torch.call_deferred()
+
+func _settle_torch_stance_after_sheath() -> void:
+	if not player.is_first_person or _arms == null or not _arms.built:
+		return
+	while _arms.is_busy():
+		await get_tree().process_frame
+	if _weapon_drawn or _player_torch_form_id <= 0:
+		return
+	await _arms.set_weapon(-1, "")
+	_arms.set_torch_held(true)
+	_arms.draw(true)
+
+func _restore_stowed_torch() -> void:
+	if not _player_torch_stowed_for_unarmed or _player_weapon_form_id > 0 or _weapon_drawn:
+		return
+	if player.is_first_person and _arms != null and _arms.built:
+		while _arms.is_busy():
+			await get_tree().process_frame
+		if _weapon_drawn or _player_weapon_form_id > 0:
+			return
+	var torch_form_id := _player_torch_stowed_form_id
+	_player_torch_stowed_for_unarmed = false
+	_player_torch_stowed_form_id = 0
+	if torch_form_id > 0:
+		if int(_player_inventory.get(torch_form_id, 0)) > 0:
+			await _equip_player_torch(torch_form_id)
+			_refresh_inventory_hud()
 
 ## Hostile NPCs: the controller is made with the player's avatar and runs every frame.
 func _update_npc_combat(delta: float) -> void:
@@ -8398,7 +8829,10 @@ func _cycle_player_weapon() -> void:
 func _equip_inventory_item(form_id: int) -> void:
 	if _world_loading or not _inventory_open:
 		return
-	if _player_equipment.has(form_id) or _player_weapon_form_id == form_id:
+	if _player_torch_form_id == form_id:
+		_unequip_player_torch()
+		_refresh_inventory_hud()
+	elif _player_equipment.has(form_id) or _player_weapon_form_id == form_id:
 		_unequip_player_item(form_id)
 		_refresh_inventory_hud()
 	elif await _equip_player_item(form_id):
@@ -10039,7 +10473,9 @@ func _authored_light_positions(cell: Dictionary) -> PackedVector3Array:
 			positions.push_back(_reference_origin(reference))
 	return positions
 
-func _add_local_fire_light(metadata: Dictionary, transform: Transform3D, authored_lights: PackedVector3Array) -> void:
+func _add_local_fire_light(
+	metadata: Dictionary, transform: Transform3D, authored_lights: PackedVector3Array, reference_id := 0
+) -> void:
 	if not _has_fire_particle_emitters(metadata):
 		return
 	for node: Dictionary in metadata.get("nodes", []):
@@ -10053,6 +10489,8 @@ func _add_local_fire_light(metadata: Dictionary, transform: Transform3D, authore
 		var light := OmniLight3D.new()
 		light.name = "FireLight"
 		light.position = position
+		if reference_id != 0:
+			light.set_meta("reference_id", reference_id)
 		light.light_color = Color(1.0, 0.57, 0.28)
 		for emitter: Dictionary in metadata.get("particle_emitters", []):
 			if str(emitter.get("texture_path", "")).to_lower().contains("whiteflame"):
@@ -10092,6 +10530,24 @@ func _has_fire_particle_emitters(metadata: Dictionary) -> bool:
 func _is_fire_particle_mesh(mesh_entry: Dictionary) -> bool:
 	var texture_path := str(mesh_entry.get("diffuse_texture_path", "")).to_lower().replace("\\", "/")
 	return texture_path.contains("fireflameparticle") or texture_path.contains("firesparkparticle") or texture_path.contains("firesmokeparticle")
+
+func _fire_particle_texture(texture: Texture2D, texture_path: String) -> Texture2D:
+	var cache_key := texture_path.to_lower().replace("\\", "/")
+	if _fire_particle_texture_cache.has(cache_key):
+		return _fire_particle_texture_cache[cache_key] as Texture2D
+	var image := texture.get_image()
+	if image == null or image.is_empty():
+		return texture
+	if image.is_compressed():
+		image.decompress()
+	for y in image.get_height():
+		for x in image.get_width():
+			var pixel := image.get_pixel(x, y)
+			pixel.a = minf(pixel.a * 4.0, 1.0)
+			image.set_pixel(x, y, pixel)
+	var brighter_texture := ImageTexture.create_from_image(image)
+	_fire_particle_texture_cache[cache_key] = brighter_texture
+	return brighter_texture
 
 func _texture_flipbook_for_mesh(mesh_entry: Dictionary, metadata: Dictionary) -> Dictionary:
 	var mesh_name := str(mesh_entry.get("mesh_name", "")).to_lower()
@@ -10147,6 +10603,8 @@ func _install_nif_texture_flipbook(
 	if material == null:
 		return true
 	material.albedo_texture = frames[0] as Texture2D
+	if material.emission_enabled:
+		material.emission_texture = material.albedo_texture
 	var fire_lod_sprite := _has_fire_particle_emitters(metadata)
 	if fire_lod_sprite:
 		instance.mesh = _upright_fire_sprite(instance.mesh as ArrayMesh)
@@ -10157,6 +10615,7 @@ func _install_nif_texture_flipbook(
 		instance.visibility_range_begin_margin = FIRE_VISUAL_LOD_FADE
 		instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	instance.set_meta("nif_fire_lod_sprite", fire_lod_sprite)
 	instance.material_override = material
 	_nif_flipbook_instances.push_back({
 		"instance": instance,
@@ -10212,11 +10671,16 @@ func _update_nif_flipbooks(delta: float) -> void:
 		animation["frame_index"] = frame_index
 		var texture := frames[frame_index] as Texture2D
 		material.albedo_texture = texture
+		if material.emission_enabled:
+			material.emission_texture = texture
 
 ## Rebuilds animated-reference tracks from the NIF's own NiControllerSequence data.
 ## Static mesh vertices are already in model-root space, so each animated NiNode
 ## receives the delta from its rest global transform to its sampled global transform.
-func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, model_path := "", parent_root: Node3D = null) -> void:
+func _add_nif_particles(
+	metadata: Dictionary, reference_transform: Transform3D, model_path := "", parent_root: Node3D = null,
+	reference_id := 0, force_local_coordinates := false
+) -> void:
 	var is_light_beam_dust := model_path.to_lower().replace("\\", "/").ends_with("/fxlightbeamdust01.nif")
 	var is_fire_model := _has_fire_particle_emitters(metadata)
 	var has_fire_lod_sprite := is_fire_model and not (metadata.get("texture_flipbooks", []) as Array).is_empty()
@@ -10240,6 +10704,8 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 		if texture == null:
 			continue
 		var particles := GPUParticles3D.new()
+		if reference_id != 0:
+			particles.set_meta("reference_id", reference_id)
 		# Particle shaders operate in Godot units; node scale is not reliably applied to
 		# world-space particles. Convert emitter dimensions and speed explicitly.
 		var emitter_transform := ActorFactory.godot_node_rest({
@@ -10276,7 +10742,7 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			particles.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		var capacity_rate := float(particles.amount) / particles.lifetime
 		particles.amount_ratio = clampf(rate / capacity_rate, 0.0, 1.0)
-		particles.local_coords = not bool(emitter.get("world_space", false))
+		particles.local_coords = force_local_coordinates or not bool(emitter.get("world_space", false))
 		var process := ParticleProcessMaterial.new()
 		process.lifetime_randomness = clampf(2.0 * lifetime_variation / particles.lifetime, 0.0, 0.99)
 		var mesh_points: PackedVector3Array = emitter.get("mesh_emission_points", PackedVector3Array())
@@ -10364,18 +10830,35 @@ func _add_nif_particles(metadata: Dictionary, reference_transform: Transform3D, 
 			curve_texture.curve = size_curve
 			process.scale_curve = curve_texture
 		particles.process_material = process
-		var material := StandardMaterial3D.new()
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
-		material.billboard_keep_scale = true
-		material.albedo_texture = texture
-		material.vertex_color_use_as_albedo = true
-		if bool(emitter.get("additive_blend", false)):
-			material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		var particle_material: Material
+		if texture_path.to_lower().contains("fireflameparticle"):
+			var fire_texture := _fire_particle_texture(texture, texture_path)
+			var fire_material := StandardMaterial3D.new()
+			fire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			fire_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			fire_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			fire_material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+			fire_material.billboard_keep_scale = true
+			fire_material.albedo_texture = fire_texture
+			fire_material.vertex_color_use_as_albedo = true
+			fire_material.emission_enabled = true
+			fire_material.emission_texture = fire_texture
+			fire_material.emission_energy_multiplier = 2.0
+			particle_material = fire_material
+		else:
+			var material := StandardMaterial3D.new()
+			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+			material.billboard_keep_scale = true
+			material.albedo_texture = texture
+			material.vertex_color_use_as_albedo = true
+			if bool(emitter.get("additive_blend", false)):
+				material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			particle_material = material
 		var quad := QuadMesh.new()
 		quad.size = Vector2.ONE * radius * 2.0 * unit_scale
-		quad.material = material
+		quad.material = particle_material
 		particles.draw_pass_1 = quad
 		var particle_parent := parent_root if is_instance_valid(parent_root) else cell_visual_root
 		particle_parent.add_child(particles)
@@ -10664,6 +11147,7 @@ func _update_player_animation(delta: float) -> void:
 		blend_weight,
 		_player_animations.get("Idle", {}) if _active_animation == GESTURE_KEY else {}
 	)
+	_apply_player_torch_arm_pose()
 	if _active_animation == _player_combat_action:
 		_fire_player_combat_events(animation, previous_time, _animation_time)
 	if not reaction_animation.is_empty() and _active_animation == reaction_animation \
@@ -10672,6 +11156,47 @@ func _update_player_animation(delta: float) -> void:
 		_finish_player_hit_reaction()
 	if blend_weight >= 1.0:
 		_player_animation_from_pose.clear()
+
+func _apply_player_torch_arm_pose() -> void:
+	if _player_torch_form_id <= 0 or player.is_first_person or _player_skeleton == null:
+		return
+	var pose: Dictionary = _player_onehand_torch_pose if _weapon_drawn and _player_weapon_form_id > 0 \
+		else _player_torch_idle_pose
+	if pose.is_empty():
+		return
+	var start_time := float(pose.get("start_time", 0.0))
+	var duration := float(pose.get("stop_time", start_time)) - start_time
+	if duration <= 0.0:
+		return
+	var sample_time := start_time + fposmod(_animation_time - start_time, duration)
+	var preserve_right_arm := not _player_combat_action.is_empty() or not _player_hit_reaction.is_empty() \
+		or _player_blocking
+	for track_value: Variant in pose.get("tracks", []):
+		var track: Dictionary = track_value
+		var bone_index := int(track.get("bone_index", -1))
+		if bone_index < 0 or bone_index >= _player_skeleton.get_bone_count():
+			continue
+		var bone_name := str(_player_skeleton.get_bone_name(bone_index))
+		if preserve_right_arm and (bone_name.begins_with("Bip01 R ") or bone_name == "Weapon"):
+			continue
+		if bone_name in ["Bip01", "Bip01 NonAccum"] or bone_name.contains("Thigh") \
+				or bone_name.contains("Calf") or bone_name.contains("Foot") or bone_name.contains("Toe"):
+			continue
+		var translations: PackedFloat32Array = track.get("translations", PackedFloat32Array())
+		if translations.size() >= 4:
+			_player_skeleton.set_bone_pose_position(
+				bone_index, AnimationSampling.vector(translations, 4, sample_time)
+			)
+		var rotations: PackedFloat32Array = track.get("rotations", PackedFloat32Array())
+		if rotations.size() >= 5:
+			_player_skeleton.set_bone_pose_rotation(
+				bone_index, AnimationSampling.quaternion(rotations, sample_time)
+			)
+		var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
+		if scales.size() >= 2:
+			_player_skeleton.set_bone_pose_scale(
+				bone_index, Vector3.ONE * AnimationSampling.scalar(scales, sample_time)
+			)
 
 func _has_nearby_walkable_support() -> bool:
 	# Treat a brief floor-contact gap as grounded for animation when the capsule

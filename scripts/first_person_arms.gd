@@ -74,6 +74,7 @@ var _weapon_meshes: Array[MeshInstance3D] = []
 var _nocked_arrow: Array[MeshInstance3D] = []
 var _nocked_arrow_attachment: BoneAttachment3D
 var _weapon_wanted := false
+var _torch_held := false
 var _equipment_meshes: Array[MeshInstance3D] = []
 var _shield_equipped := false
 var _body_meshes: Dictionary = {}
@@ -339,6 +340,45 @@ func set_suppressed(suppressed: bool) -> void:
 	_suppressed = suppressed
 	_refresh_visibility()
 
+## Keep the left-hand torch visible when the right-hand weapon is sheathed.
+func set_torch_held(held: bool) -> void:
+	_torch_held = held
+	if held:
+		_request_clip("torchidle")
+		_request_clip("onehandtorchidle")
+		_request_clip("handtohandtorchidle")
+
+## Instantly shows a ready view model after changing camera modes, without playing equip or holster clips.
+func present_stance(weapon_type: int, show_weapon: bool) -> void:
+	if not built or skeleton == null:
+		return
+	_stance = STANCES.get(weapon_type, UNARMED_STANCE)
+	_preload_stance()
+	var idle_clip_name := str(_stance.prefix) + "idle"
+	if _clips.get(idle_clip_name, {}).is_empty():
+		_request_clip(idle_clip_name)
+		while _clips_requested.get(idle_clip_name, "") == "loading":
+			await host.get_tree().process_frame
+	var clip: Dictionary = _clips.get(idle_clip_name, {})
+	if clip.is_empty():
+		return
+	_one_shot = ""
+	_one_shot_kind = ""
+	_one_shot_candidates.clear()
+	_one_shot_wait_s = 0.0
+	_queued.clear()
+	_hide_after_cast = false
+	_weapon_wanted = show_weapon
+	_mode = Mode.READY
+	_active_clip = idle_clip_name
+	_time = float(clip.start_time)
+	_from_pose.clear()
+	_pose(clip, _time, 1.0)
+	_apply_torch_pose(_time)
+	_place_under_camera()
+	_posed = true
+	_refresh_visibility()
+
 func _refresh_visibility() -> void:
 	if root != null:
 		root.visible = _mode != Mode.HIDDEN and _posed and not _suppressed
@@ -471,6 +511,7 @@ func update(delta: float, motion: Dictionary) -> void:
 	var looping := _one_shot.is_empty() and bool(clip.loops)
 	var sample_time := start_time + fposmod(_time - start_time, stop_time - start_time) if looping else clampf(_time, start_time, stop_time)
 	_pose(clip, sample_time, _blend_elapsed / BLEND_S)
+	_apply_torch_pose(sample_time)
 	_update_sway(delta, motion, clip)
 	_place_under_camera()
 	_posed = true
@@ -623,8 +664,13 @@ func _finish_one_shot() -> void:
 			_weapon_wanted = true
 			_apply_weapon_visibility()
 		"unequip":
-			_mode = Mode.HIDDEN
 			_weapon_wanted = false
+			if _torch_held:
+				_mode = Mode.READY
+				_apply_weapon_visibility()
+				_refresh_visibility()
+				return
+			_mode = Mode.HIDDEN
 			_refresh_visibility()
 			return
 	if _mode == Mode.READY and not _queued.is_empty():
@@ -699,6 +745,45 @@ func _pose(clip: Dictionary, sample_time: float, blend_weight: float) -> void:
 		skeleton.set_bone_pose_position(bone_index, Vector3(source.position).lerp(skeleton.get_bone_pose_position(bone_index), weight))
 		skeleton.set_bone_pose_rotation(bone_index, Quaternion(source.rotation).slerp(skeleton.get_bone_pose_rotation(bone_index), weight))
 		skeleton.set_bone_pose_scale(bone_index, Vector3(source.scale).lerp(skeleton.get_bone_pose_scale(bone_index), weight))
+
+func _apply_torch_pose(sample_time: float) -> void:
+	if not _torch_held or skeleton == null:
+		return
+	var torch_clip_name := "onehandtorchidle" if _stance.prefix == "onehand" else "torchidle"
+	var torch_clip: Dictionary = _clips.get(torch_clip_name, {})
+	if torch_clip.is_empty():
+		_request_clip(torch_clip_name)
+		return
+	var torch_start := float(torch_clip.get("start_time", 0.0))
+	var torch_stop := float(torch_clip.get("stop_time", torch_start))
+	var torch_duration := torch_stop - torch_start
+	if torch_duration <= 0.0:
+		return
+	var active_clip: Dictionary = _clips.get(_active_clip, {})
+	var active_duration := float(active_clip.get("stop_time", 0.0)) - float(active_clip.get("start_time", 0.0))
+	var phase := fposmod(sample_time - float(active_clip.get("start_time", 0.0)), maxf(active_duration, 0.001))
+	var torch_time := torch_start + fposmod(phase, torch_duration)
+	var preserve_right_arm := not _one_shot.is_empty() or _blocking
+	for track_value: Variant in torch_clip.get("tracks", []):
+		var track: Dictionary = track_value
+		var bone_index := int(track.get("bone_index", -1))
+		if bone_index < 0 or bone_index >= skeleton.get_bone_count():
+			continue
+		var bone_name := str(skeleton.get_bone_name(bone_index))
+		if preserve_right_arm and (bone_name.begins_with("Bip01 R ") or bone_name == "Weapon"):
+			continue
+		if bone_name in ["Bip01", "Bip01 NonAccum"] or bone_name.contains("Thigh") \
+				or bone_name.contains("Calf") or bone_name.contains("Foot") or bone_name.contains("Toe"):
+			continue
+		var translations: PackedFloat32Array = track.get("translations", PackedFloat32Array())
+		if translations.size() >= 4:
+			skeleton.set_bone_pose_position(bone_index, AnimationSampling.vector(translations, 4, torch_time))
+		var rotations: PackedFloat32Array = track.get("rotations", PackedFloat32Array())
+		if rotations.size() >= 5:
+			skeleton.set_bone_pose_rotation(bone_index, AnimationSampling.quaternion(rotations, torch_time))
+		var scales: PackedFloat32Array = track.get("scales", PackedFloat32Array())
+		if scales.size() >= 2:
+			skeleton.set_bone_pose_scale(bone_index, Vector3.ONE * AnimationSampling.scalar(scales, torch_time))
 
 ## Walking sways the arms: a bob that follows the step cycle of the walk or run clip and fades in and out with movement,
 ## and a trail behind the view's turns.
@@ -804,6 +889,8 @@ func _load_clip(clip_name: String) -> void:
 ## Starts loading the clips a stance plays, so the first draw and swing do not wait on the reader.
 func _preload_stance() -> void:
 	var prefix := str(_stance.prefix)
+	if _torch_held:
+		_request_clip("onehandtorchidle" if prefix == "onehand" else "torchidle")
 	for suffix: String in [
 		"idle", "equip", "unequip", "forward", "backward", "left", "right", "blockattack",
 		"fastforward", "fastbackward", "fastleft", "fastright", "blockidle",
